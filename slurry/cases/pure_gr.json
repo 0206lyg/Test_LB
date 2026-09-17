@@ -28,10 +28,10 @@
   },
   "numerics": {
     "nu_lattice": 0.5,
-    "target_mach": 0.1,
+    "target_mach": 0.05,
     "time_step_s": 0.0,
     "epsilon_cells": 0.5,
-    "particle_max_substeps": 32,
+    "particle_max_substeps": 256,
     "particle_max_iterations": 60,
     "particle_tolerance": 0.0001,
     "lubrication_cutoff_cells": 1.0,
