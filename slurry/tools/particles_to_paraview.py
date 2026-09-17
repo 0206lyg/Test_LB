@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Export saved graphite poses as ellipsoid surfaces for ParaView (stdlib only).
 
-Usage: python3 particles_to_paraview.py .
-Reads particles.csv and effective_config.json in the supplied result directory.
+Usage: python particles_to_paraview.py
+Reads particles.csv and effective_config.json in the current result directory
+(or pass another result directory as the first argument).
+By default, export the closest saved frame in each rounded 0.05-strain bin:
+0, 0.05, 0.10, ... . Empty bins are skipped; ties keep the earlier frame.
+Strain = time_s * flow.shear_rate_s_inv, as in the constant-shear solver.
+Use --strain-interval 0 to export every saved frame.
 Open paraview_particles/particles.pvd and optionally box.vtp in ParaView.
 Coordinates are SI metres; PVD times are the recorded physical time_s values.
 Euler angles are radians with R = Rz @ Ry @ Rx. Colours particle_id and
@@ -109,6 +114,25 @@ def frames(path, count):
                 yield current, rows[0][1], rows
 
 
+def strain_frames(saved_frames, shear_rate, interval):
+    """Keep the closest recorded frame per rounded strain bin, without interpolation."""
+    best, current_bin, best_error = None, None, math.inf
+    for frame in saved_frames:
+        scaled = frame[1] * shear_rate / interval
+        if not math.isfinite(scaled):
+            raise ValueError("Nonfinite strain/interval in particle data")
+        target_bin = math.floor(scaled + 0.5)
+        error = abs(scaled - target_bin)
+        if target_bin != current_bin:
+            if best is not None:
+                yield best
+            best, current_bin, best_error = frame, target_bin, error
+        elif error < best_error:
+            best, best_error = frame, error
+    if best is not None:
+        yield best
+
+
 def data_array(parent, name, values, kind="Float64", components=1):
     attrs = {"type": kind, "format": "ascii", "NumberOfComponents": str(components)}
     if name:
@@ -150,6 +174,12 @@ def export(args):
     length = float(config["geometry"]["box_length_m"])
     if not isinstance(count, int) or count <= 0 or not all(math.isfinite(v) and v > 0 for v in (a, c, length)):
         raise ValueError("Config requires positive dimensions and a positive integer particle count")
+    saved_frames = frames(source / "particles.csv", count)
+    if args.strain_interval > 0:
+        shear_rate = float(config["flow"]["shear_rate_s_inv"])
+        if not math.isfinite(shear_rate) or shear_rate <= 0:
+            raise ValueError("Config requires a finite positive flow.shear_rate_s_inv")
+        saved_frames = strain_frames(saved_frames, shear_rate, args.strain_interval)
     output = (args.output if args.output else source / "paraview_particles").resolve()
     if output.exists() and not args.overwrite:
         raise ValueError(f"Output already exists: {output}; use --overwrite to replace it")
@@ -162,7 +192,7 @@ def export(args):
         master = ET.Element("VTKFile", type="Collection", version="0.1", byte_order="LittleEndian")
         collection = ET.SubElement(master, "Collection")
         total = 0
-        for step, time, rows in frames(source / "particles.csv", count):
+        for step, time, rows in saved_frames:
             points, cells, ids, directions = [], [], [], []
             for ident, _, pose in sorted(rows):
                 center, angles = pose[:3], pose[3:]
@@ -182,7 +212,8 @@ def export(args):
         edges = [(i, i ^ bit) for i in range(8) for bit in (1, 2, 4) if i < (i ^ bit)]
         write_vtp(staging / "box.vtp", corners, edges, lines=True)
         ET.ElementTree(master).write(staging / "particles.pvd", encoding="utf-8", xml_declaration=True)
-        (staging / "CONVERTER_OUTPUT.txt").write_text(__doc__ + "\n", encoding="utf-8")
+        (staging / "CONVERTER_OUTPUT.txt").write_text(
+            __doc__ + f"\nstrain_interval = {args.strain_interval:g} (0 = all saved frames)\n", encoding="utf-8")
         if output.exists():
             shutil.rmtree(output)
         staging.rename(output)
@@ -197,9 +228,13 @@ def main():
     parser.add_argument("result_dir", type=Path, nargs="?", default=Path("."))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--strain-interval", type=float, default=0.05,
+                        help="Strain spacing (default: 0.05); 0 exports all saved frames")
     parser.add_argument("--longitude", type=int, default=24, help="Surface angular resolution (default: 24)")
     parser.add_argument("--latitude", type=int, default=12, help="Polar subdivisions (default: 12)")
     args = parser.parse_args()
+    if not math.isfinite(args.strain_interval) or args.strain_interval < 0:
+        parser.error("strain-interval must be finite and nonnegative")
     if args.longitude < 4 or args.latitude < 2:
         parser.error("longitude must be >=4 and latitude >=2")
     try:

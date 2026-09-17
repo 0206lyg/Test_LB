@@ -117,7 +117,12 @@ def main():
         else:
             for index, rate in enumerate(rates or [None]):
                 name = engine + ('/g%03d_%s' % (index, format(rate, '.12g')) if rate is not None else '')
-                args = prefix + ['--config', str(configs[engine]), '--output', str(output / name)]
+                result_dir = output / name
+                if not a.dry_run:
+                    result_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(BASE / 'slurry/tools/particles_to_paraview.py'),
+                                 str(result_dir / 'particles_to_paraview.py'))
+                args = prefix + ['--config', str(configs[engine]), '--output', str(result_dir)]
                 if rate is not None: args += ['--shear-rate', str(rate)]
                 limit = a.max_steps if a.max_steps is not None else (20 if a.smoke else None)
                 if limit is not None: args += ['--max-steps' if engine == 'pure_gr' else '--benchmark-steps', str(limit)]
