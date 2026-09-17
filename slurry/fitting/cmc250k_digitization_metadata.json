@@ -1,0 +1,196 @@
+{
+  "source": "Gwag et al., Supporting Information, Figure S2, CMC 250k middle panel",
+  "source_pdf_sha256": "88b7a8e14d1a58afdeaf8b553fdc717c6739335f0c45cdebc109be86f2cf5505",
+  "pdf_page_one_based": 3,
+  "printed_page": "S3",
+  "pdf_drawing_count": 1918,
+  "method": "PDF vector black-line extraction, not raster clicks or raw experimental data",
+  "x_major_ticks_pdf_pt": [
+    245.1951904296875,
+    264.685791015625,
+    284.1763916015625,
+    303.6670227050781,
+    323.1575927734375,
+    342.648193359375
+  ],
+  "x_major_ticks_log10_shear_rate": [
+    -2,
+    -1,
+    0,
+    1,
+    2,
+    3
+  ],
+  "y_major_ticks_pdf_pt": [
+    208.98065185546875,
+    185.974609375,
+    162.96856689453125,
+    140.065673828125,
+    117.05963134765625,
+    94.0535888671875
+  ],
+  "y_major_ticks_log10_viscosity_mPa_s": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "x_pdf_equals_a_log10_gamma_plus_b": [
+    19.49060145786832,
+    284.17639625186
+  ],
+  "y_pdf_equals_a_log10_eta_mPa_s_plus_b": [
+    -22.979518345424115,
+    208.96591622488842
+  ],
+  "panel_clip_pdf_pt": [
+    228,
+    82,
+    364,
+    237
+  ],
+  "approx_y_graphical_quantization_pt": 0.10316,
+  "approx_y_graphical_quantization_decades": 0.004489215067492576,
+  "curve_identification": [
+    {
+      "concentration_g_L": 0.6,
+      "pdf_drawing_indices": [
+        944
+      ],
+      "marker_count": 20,
+      "median_marker_distance_to_black_line_pt": 0.10316848754882812
+    },
+    {
+      "concentration_g_L": 1.5,
+      "pdf_drawing_indices": [
+        945
+      ],
+      "marker_count": 19,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 3,
+      "pdf_drawing_indices": [
+        946
+      ],
+      "marker_count": 19,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 4,
+      "pdf_drawing_indices": [
+        947
+      ],
+      "marker_count": 20,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 5,
+      "pdf_drawing_indices": [
+        948
+      ],
+      "marker_count": 19,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 6,
+      "pdf_drawing_indices": [
+        949
+      ],
+      "marker_count": 19,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 7,
+      "pdf_drawing_indices": [
+        958
+      ],
+      "marker_count": 16,
+      "median_marker_distance_to_black_line_pt": 0.10315704289273242
+    },
+    {
+      "concentration_g_L": 8,
+      "pdf_drawing_indices": [
+        959
+      ],
+      "marker_count": 20,
+      "median_marker_distance_to_black_line_pt": 0.10315704345703125
+    },
+    {
+      "concentration_g_L": 9,
+      "pdf_drawing_indices": [
+        950
+      ],
+      "marker_count": 22,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 10,
+      "pdf_drawing_indices": [
+        951
+      ],
+      "marker_count": 14,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 11,
+      "pdf_drawing_indices": [
+        962
+      ],
+      "marker_count": 16,
+      "median_marker_distance_to_black_line_pt": 1.52587890625e-05
+    },
+    {
+      "concentration_g_L": 12,
+      "pdf_drawing_indices": [
+        952
+      ],
+      "marker_count": 25,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 15,
+      "pdf_drawing_indices": [
+        953
+      ],
+      "marker_count": 18,
+      "median_marker_distance_to_black_line_pt": 7.62939453125e-06
+    },
+    {
+      "concentration_g_L": 16,
+      "pdf_drawing_indices": [
+        954
+      ],
+      "marker_count": 23,
+      "median_marker_distance_to_black_line_pt": 1.5261046286241253e-05
+    },
+    {
+      "concentration_g_L": 20,
+      "pdf_drawing_indices": [
+        955
+      ],
+      "marker_count": 27,
+      "median_marker_distance_to_black_line_pt": 0.10315704345703125
+    },
+    {
+      "concentration_g_L": 31,
+      "pdf_drawing_indices": [
+        956,
+        957
+      ],
+      "marker_count": 42,
+      "median_marker_distance_to_black_line_pt": 0.3094940185546875
+    },
+    {
+      "concentration_g_L": 42,
+      "pdf_drawing_indices": [
+        960,
+        961
+      ],
+      "marker_count": 35,
+      "median_marker_distance_to_black_line_pt": 0.20633697509765625
+    }
+  ]
+}

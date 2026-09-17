@@ -1,0 +1,7 @@
+{
+  "cases": ["pure_cmc", "pure_gr"],
+  "shear_rates_s_inv": null,
+  "ranks": {"pure_cmc": 1, "pure_gr": "allocation", "gr_baseline": "allocation"},
+  "cmc": {"concentrations": "16", "resolution": 64, "points": 9},
+  "graphite_configs": {"pure_gr": "pure_gr.json", "gr_baseline": "gr_baseline.json"}
+}

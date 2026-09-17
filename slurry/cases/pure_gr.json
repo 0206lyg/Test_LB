@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "description": "Graphite-water quick magnitude check: full RE-squared, rough contact with sliding and adhesive rolling resistance, Lees-Edwards shear. Random initial placement; attraction and shear start together. Target Mach 0.1, end strain 10.",
+  "fluid": {
+    "density_kg_m3": 997.0,
+    "dynamic_viscosity_Pa_s": 0.00089,
+    "temperature_K": 298.15
+  },
+  "geometry": {
+    "box_length_m": 1e-05,
+    "dx_m": 5e-08
+  },
+  "particles": {
+    "count": 108,
+    "diameter_m": 3.3e-06,
+    "thickness_m": 4e-07,
+    "density_kg_m3": 2400.0,
+    "seed": 1729,
+    "minimum_gap_m": 3e-09,
+    "target_solid_mass_fraction": 0.44,
+    "insertion_attempts_per_batch": 32,
+    "insertion_batches_per_particle": 2048,
+    "initialization_mc_sweeps": 100
+  },
+  "flow": {
+    "shear_rate_s_inv": 100.0,
+    "end_strain": 10.0
+  },
+  "numerics": {
+    "nu_lattice": 0.5,
+    "target_mach": 0.1,
+    "time_step_s": 0.0,
+    "epsilon_cells": 0.5,
+    "particle_max_substeps": 32,
+    "particle_max_iterations": 60,
+    "particle_tolerance": 0.0001,
+    "lubrication_cutoff_cells": 1.0,
+    "particle_force_absolute_tolerance_N": 1e-15,
+    "particle_torque_absolute_tolerance_N_m": 1.65e-21,
+    "contact_gap_tolerance_m": 1e-12
+  },
+  "interaction": {
+    "hamaker_J": 9.9e-20,
+    "sigma_lj_m": 3e-09,
+    "switch_gap_m": 4e-07,
+    "cutoff_gap_m": 5e-07
+  },
+  "output": {
+    "sample_every_steps": 20,
+    "vtk_every_steps": 0
+  },
+  "rough_contact": {
+    "enabled": true,
+    "roughness_gap_m": 2e-09,
+    "sliding_friction": 0.5,
+    "tangential_stiffness_N_m": 9.0,
+    "rolling_length_m": 1e-07,
+    "rolling_yield_angle_rad": 0.01
+  }
+}

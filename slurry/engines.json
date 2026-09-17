@@ -1,0 +1,17 @@
+[
+  {
+    "id": "pure_cmc",
+    "namespace": "cmc",
+    "driver": "slurry/drivers/cmc/run_cross_sweep.py"
+  },
+  {
+    "id": "pure_gr",
+    "namespace": "gr_re2",
+    "driver": "slurry/drivers/gr_re2/run_graphite.py"
+  },
+  {
+    "id": "gr_baseline",
+    "namespace": "gr_baseline",
+    "driver": "slurry/drivers/gr_baseline/run_graphite.py"
+  }
+]

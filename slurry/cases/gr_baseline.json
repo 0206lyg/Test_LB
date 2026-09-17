@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "description": "Pure graphite-water hydrodynamic baseline at 25 C; no CMC, CB, attraction, Brownian forcing, gravity or tangential friction.",
+  "fluid": {
+    "density_kg_m3": 997.0,
+    "dynamic_viscosity_Pa_s": 0.000890,
+    "temperature_K": 298.15
+  },
+  "geometry": {
+    "box_length_m": 0.000010,
+    "dx_m": 0.000000050
+  },
+  "particles": {
+    "count": 108,
+    "diameter_m": 0.0000033,
+    "thickness_m": 0.0000004,
+    "density_kg_m3": 2400.0,
+    "seed": 1729,
+    "minimum_gap_m": 0.000000050,
+    "target_solid_mass_fraction": 0.44
+  },
+  "flow": {
+    "shear_rate_s_inv": 10.0,
+    "end_strain": 1.0
+  },
+  "numerics": {
+    "nu_lattice": 0.1,
+    "target_re": 0.001,
+    "epsilon_cells": 0.5,
+    "contact_enlargement_cells": 0.2,
+    "contact_young_Pa": 1000.0,
+    "contact_poisson": 0.3,
+    "contact_restitution": 1.0,
+    "contact_resolution": 8
+  },
+  "output": {
+    "sample_every_steps": 10000,
+    "vtk_every_steps": 0,
+    "checkpoint_every_steps": 1000000
+  }
+}

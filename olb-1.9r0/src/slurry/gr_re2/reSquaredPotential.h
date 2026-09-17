@@ -1,0 +1,104 @@
+#ifndef SLURRY_GR_RE2_GRAPHITE_RE_SQUARED_POTENTIAL_H
+#define SLURRY_GR_RE2_GRAPHITE_RE_SQUARED_POTENTIAL_H
+#include "ellipsoidGap.h"
+#include <limits>
+
+// SLURRY SCOPE BEGIN
+namespace slurry { namespace gr_re2 {
+
+namespace graphite {
+struct PairParameters {
+  double hamaker=.99e-19,sigma=3e-9,switchGap=400e-9,cutoffGap=500e-9;
+};
+struct PairResult {
+  Vec3 forceI{},torqueI{},torqueJ{};
+  Vec3 forceAttractiveI{},forceRepulsiveI{};
+  Vec3 torqueAttractiveI{},torqueAttractiveJ{},torqueRepulsiveI{},torqueRepulsiveJ{};
+  double ua=0.,ur=0.,energy=0.,gap=std::numeric_limits<double>::infinity();
+  Vec3 normal{},leverI{},leverJ{};
+  bool active=false;
+};
+namespace re2_detail {
+// Nine forward derivatives: relative centre displacement (3), laboratory
+// infinitesimal rotation of I (3), laboratory infinitesimal rotation of J (3).
+// Gap derivatives use the envelope theorem, so no perturbed closest-gap solves
+// are required in the production force/torque evaluation.
+struct AD {
+  double v=0.;std::array<double,9> d{};
+  AD()=default;AD(double value):v(value){}
+};
+inline AD operator+(const AD& a,const AD& b){AD c(a.v+b.v);for(int k=0;k<9;++k)c.d[k]=a.d[k]+b.d[k];return c;}
+inline AD operator-(const AD& a,const AD& b){AD c(a.v-b.v);for(int k=0;k<9;++k)c.d[k]=a.d[k]-b.d[k];return c;}
+inline AD operator-(const AD& a){AD c(-a.v);for(int k=0;k<9;++k)c.d[k]=-a.d[k];return c;}
+inline AD operator*(const AD& a,const AD& b){AD c(a.v*b.v);for(int k=0;k<9;++k)c.d[k]=a.d[k]*b.v+a.v*b.d[k];return c;}
+inline AD operator/(const AD& a,const AD& b){AD c(a.v/b.v);for(int k=0;k<9;++k)c.d[k]=(a.d[k]-c.v*b.d[k])/b.v;return c;}
+inline AD sqrt(const AD& a){AD c(std::sqrt(a.v));for(int k=0;k<9;++k)c.d[k]=a.d[k]/(2.*c.v);return c;}
+inline AD power(AD a,int n){AD b(1.);for(;n;n>>=1,a=a*a)if(n&1)b=b*a;return b;}
+using AVec=std::array<AD,3>;using AMat=std::array<AD,9>;
+inline AD dot(const AVec&a,const AVec&b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+inline AVec mv(const AMat&a,const AVec&b){AVec c{};for(int i=0;i<3;++i)for(int k=0;k<3;++k)c[i]=c[i]+a[3*i+k]*b[k];return c;}
+inline AD determinant(const AMat&m){return m[0]*(m[4]*m[8]-m[5]*m[7])-m[1]*(m[3]*m[8]-m[5]*m[6])+m[2]*(m[3]*m[7]-m[4]*m[6]);}
+inline AMat inverse(const AMat&m){
+  AMat c{m[4]*m[8]-m[5]*m[7],m[2]*m[7]-m[1]*m[8],m[1]*m[5]-m[2]*m[4],
+    m[5]*m[6]-m[3]*m[8],m[0]*m[8]-m[2]*m[6],m[2]*m[3]-m[0]*m[5],
+    m[3]*m[7]-m[4]*m[6],m[1]*m[6]-m[0]*m[7],m[0]*m[4]-m[1]*m[3]};
+  const AD det=determinant(m);for(auto& x:c)x=x/det;return c;
+}
+inline AMat rotation(const Mat3&r,int offset){
+  AMat m;for(int i=0;i<9;++i)m[i]=AD(r[i]);
+  for(int axis=0;axis<3;++axis){Vec3 e{};e[axis]=1.;for(int col=0;col<3;++col){const Vec3 v{r[col],r[3+col],r[6+col]};const Vec3 dv=cross(e,v);for(int row=0;row<3;++row)m[3*row+col].d[offset+axis]=dv[row];}}
+  return m;
+}
+inline AMat shape(const AMat&r,const Vec3&d){AMat q{};for(int i=0;i<3;++i)for(int j=0;j<3;++j)for(int k=0;k<3;++k)q[3*i+j]=q[3*i+j]+r[3*i+k]*d[k]*r[3*j+k];return q;}
+inline AD orientationLength(const Body&bi,const Body&bj,const AVec&rh,double sigma){
+  const AMat ri=rotation(bi.rotation,3),rj=rotation(bj.rotation,6);
+  const double di=bi.axes[0]*bi.axes[1]*bi.axes[2],dj=bj.axes[0]*bj.axes[1]*bj.axes[2];
+  Vec3 ai2{},aj2{},aiInv{},ajInv{};for(int k=0;k<3;++k){ai2[k]=bi.axes[k]*bi.axes[k];aj2[k]=bj.axes[k]*bj.axes[k];aiInv[k]=1./ai2[k];ajInv[k]=1./aj2[k];}
+  const AMat qi=shape(ri,ai2),qj=shape(rj,aj2),ii=shape(ri,aiInv),ij=shape(rj,ajInv);
+  const AD pi=1./sqrt(dot(rh,mv(ii,rh))),pj=1./sqrt(dot(rh,mv(ij,rh)));
+  AMat h{},b{};for(int k=0;k<9;++k){h[k]=qi[k]/pi+qj[k]/pj;b[k]=qi[k]*(sigma/di)+qj[k]*(sigma/dj);}
+  const AD chi=2.*dot(rh,mv(inverse(b),rh));
+  const AD eta=(di/(pi*pi)+dj/(pj*pj))/sqrt(determinant(h)/(pi+pj));
+  return eta*chi*sigma;
+}
+inline AD branch(const AD&h,const AD&ell,const Body&i,const Body&j,const PairParameters&p,bool repulsive){
+  const double m=repulsive?2025.:-36.,o=repulsive?45./56.:3.,shapeScale=repulsive?std::cbrt(60.):2.;
+  AD product(1.);for(int k=0;k<3;++k){product=product*(i.axes[k]/(i.axes[k]+h/shapeScale));product=product*(j.axes[k]/(j.axes[k]+h/shapeScale));}
+  AD u=(p.hamaker/m)*(1.+o*ell/h)*product;
+  if(repulsive)u=u*power(p.sigma/h,6);
+  return u;
+}
+inline void unpack(const AD&u,Vec3&forceI,Vec3&torqueI,Vec3&torqueJ){for(int k=0;k<3;++k){forceI[k]=u.d[k];torqueI[k]=-u.d[3+k];torqueJ[k]=-u.d[6+k];}}
+}
+inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&p=PairParameters{},GapCache*cache=nullptr){
+  if(!(p.hamaker>=0.)||!(p.sigma>0.)||!(p.switchGap>=0.)||!(p.cutoffGap>p.switchGap))throw std::domain_error("Invalid RE2 parameters");
+  PairResult result;
+  const Vec3 dr=sub(bj.position,bi.position);const double distance=norm(dr);
+  const double bound=*std::max_element(bi.axes.begin(),bi.axes.end())+*std::max_element(bj.axes.begin(),bj.axes.end());
+  if(distance>bound+p.cutoffGap)return result;
+  const GapResult gap=closestEllipsoidGap(bi,bj,cache);
+  result.gap=gap.gap;result.normal=gap.normal;result.leverI=gap.leverI;result.leverJ=gap.leverJ;
+  if(gap.gap>=p.cutoffGap)return result;
+  if(!(gap.gap>0.))throw std::domain_error("RE2 evaluated at overlapping ellipsoids: trial particle step must remain disjoint");
+  if(!(distance>0.))throw std::domain_error("Coincident RE2 centres");
+  using namespace re2_detail;
+  AD h(gap.gap);const Vec3 gi=scale(cross(gap.leverI,gap.normal),-1.),gj=cross(gap.leverJ,gap.normal);
+  for(int k=0;k<3;++k){h.d[k]=gap.normal[k];h.d[3+k]=gi[k];h.d[6+k]=gj[k];}
+  AVec r{};for(int k=0;k<3;++k){r[k]=AD(dr[k]);r[k].d[k]=1.;}
+  const AD length=sqrt(re2_detail::dot(r,r));AVec rh{};for(int k=0;k<3;++k)rh[k]=r[k]/length;
+  const AD ell=orientationLength(bi,bj,rh,p.sigma);
+  AD ua=branch(h,ell,bi,bj,p,false),ur=branch(h,ell,bi,bj,p,true);
+  if(gap.gap>p.switchGap){const AD t=(h-p.switchGap)/(p.cutoffGap-p.switchGap);const AD sw=1.-10.*power(t,3)+15.*power(t,4)-6.*power(t,5);ua=ua*sw;ur=ur*sw;}
+  unpack(ua,result.forceAttractiveI,result.torqueAttractiveI,result.torqueAttractiveJ);
+  unpack(ur,result.forceRepulsiveI,result.torqueRepulsiveI,result.torqueRepulsiveJ);
+  result.forceI=add(result.forceAttractiveI,result.forceRepulsiveI);
+  result.torqueI=add(result.torqueAttractiveI,result.torqueRepulsiveI);
+  result.torqueJ=add(result.torqueAttractiveJ,result.torqueRepulsiveJ);
+  result.ua=ua.v;result.ur=ur.v;result.energy=ua.v+ur.v;result.active=true;
+  if(!std::isfinite(result.energy)||!finite(result.forceI)||!finite(result.torqueI)||!finite(result.torqueJ))throw std::runtime_error("Nonfinite RE2 force or energy");
+  return result;
+}
+} // namespace graphite
+
+} } // SLURRY SCOPE END
+#endif

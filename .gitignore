@@ -1,0 +1,35 @@
+
+# BEGIN OPENLB SLURRY GENERATED FILES
+/build/slurry/
+/runs/
+*.o
+*.d
+__pycache__/
+*.pyc
+/slurm-*.out
+/slurry_*.out
+/build_slurry_*.out
+/.slurry_install_manifest.json
+# END OPENLB SLURRY GENERATED FILES
+
+# Local downloads and generated build files
+/downloads/
+/.openlb-1.9r0-build.lock
+/build/
+/runs/
+/olb-1.9r0/build/
+/olb-1.9r0/lib/
+/olb-1.9r0/external/lib/
+/olb-1.9r0/external/*/build/
+tmp/
+checkpoint_*/
+__pycache__/
+*.o
+*.d
+*.a
+*.so
+*.so.*
+*.pyc
+*.log
+*.out
+/olb-1.9r0/examples/laminar/nonNewtonianPoiseuille3d/nonNewtonianPoiseuille3d

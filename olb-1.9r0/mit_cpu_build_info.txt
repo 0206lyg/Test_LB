@@ -1,0 +1,9 @@
+OpenLB release: 1.9r0
+Archive SHA256: e4d2421b50643482036917c4416145f7d6b495492f3afac64e048212361c8b3e
+Build completed (UTC): 2026-09-14T23:53:53Z
+Slurm job: 22768453
+Compiler: 12.2.0
+mpicxx: Open MPI 4.1.4 (Language: C++)
+/orcd/software/core/001/spack/pkg/gcc/12.2.0/yt6vabm/bin/g++
+b01dd893244f04859498ce3e3f7466b65a5fbde953ca1075ac332cbce1e5c503  /home/lyjania/OpenLB/olb-1.9r0/config.mk
+3443a25082a4f74c6ae78af270622dd26145fa04a83237c01c5cc7d9a2c6bc1b  /home/lyjania/OpenLB/olb-1.9r0/examples/laminar/nonNewtonianPoiseuille3d/nonNewtonianPoiseuille3d
