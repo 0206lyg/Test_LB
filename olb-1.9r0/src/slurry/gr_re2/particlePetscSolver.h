@@ -7,6 +7,7 @@
 struct ParticleAttemptTrace {
   int iteration=0,kspIterations=0,activeContacts=0,slidingContacts=0,rollingContacts=0,activated=0,released=0,domainErrors=0,kspReason=0,candidateExpansion=0;
   int frictionBranchAttempts=0,frictionBranchCorrections=0;
+  int contactStateUpdates=0,contactActivations=0,contactReleases=0;
   double forceRatio=0.,torqueRatio=0.,gapViolation=0.,complementarityRatio=0.;
   double residualNorm=0.,fraction=1.,kspResidual=0.;
 };
@@ -40,15 +41,16 @@ inline void writeAttemptTrace(const ParticleStepSettings& s,
   const std::string path=s.solverDiagnosticsPrefix+"_trace.csv";
   std::ifstream existing(path);const bool header=!existing.good()||existing.peek()==std::ifstream::traits_type::eof();
   std::ofstream file(path,std::ios::app);if(!file)return;
-  if(header)file<<"outer_time_s,outer_dt_s,subdivision_count,substep_index,subdt_s,newton_iteration,force_ratio,torque_ratio,gap_violation_m,complementarity_ratio,residual_norm,step_fraction,ksp_iterations,ksp_residual_norm,snes_reason,status,message,active_contacts,sliding_contacts,rolling_contacts,activated_contacts,released_contacts,domain_errors,ksp_reason,candidate_expansion,friction_branch_attempts,friction_branch_corrections\n";
+  if(header)file<<"outer_time_s,outer_dt_s,subdivision_count,substep_index,subdt_s,newton_iteration,force_ratio,torque_ratio,gap_violation_m,complementarity_ratio,residual_norm,step_fraction,ksp_iterations,ksp_residual_norm,snes_reason,status,message,active_contacts,sliding_contacts,rolling_contacts,activated_contacts,released_contacts,domain_errors,ksp_reason,candidate_expansion,friction_branch_attempts,friction_branch_corrections,contact_state_updates,contact_activations,contact_releases\n";
   file<<std::setprecision(17);
   for(const auto& r:trace)file<<outerTime<<','<<outerDt<<','<<count<<','<<substep<<','<<subdt<<','
     <<r.iteration<<','<<r.forceRatio<<','<<r.torqueRatio<<','<<r.gapViolation<<','<<r.complementarityRatio<<','
     <<r.residualNorm<<','<<r.fraction<<','<<r.kspIterations<<','<<r.kspResidual<<','<<reason<<",failed_iteration,"<<csvQuoted(error)<<','<<r.activeContacts<<','<<r.slidingContacts<<','<<r.rollingContacts
     <<','<<r.activated<<','<<r.released<<','<<r.domainErrors<<','<<r.kspReason<<','<<r.candidateExpansion
-    <<','<<r.frictionBranchAttempts<<','<<r.frictionBranchCorrections<<'\n';
+    <<','<<r.frictionBranchAttempts<<','<<r.frictionBranchCorrections
+    <<','<<r.contactStateUpdates<<','<<r.contactActivations<<','<<r.contactReleases<<'\n';
   file<<outerTime<<','<<outerDt<<','<<count<<','<<substep<<','<<subdt
-      <<",-1,0,0,0,0,0,0,0,0,"<<reason<<",failed_attempt,"<<csvQuoted(error)<<",0,0,0,0,0,0,0,0,0,0\n";
+      <<",-1,0,0,0,0,0,0,0,0,"<<reason<<",failed_attempt,"<<csvQuoted(error)<<",0,0,0,0,0,0,0,0,0,0,0,0,0\n";
 }
 inline void ParticleDiagnosticScope::flushFailure() {
   auto* saved=pendingParticleDiagnostics();pendingParticleDiagnostics()=nullptr;
@@ -180,6 +182,8 @@ struct PetscParticleContext {
   std::vector<unsigned char> engagement;std::deque<ParticleAttemptTrace> trace;
   std::string error;int totalKrylov=0,domainErrors=0,candidateExpansion=0,iterationBudget=0;bool missingCandidate=false;
   int frictionBranchAttempts=0,frictionBranchCorrections=0,frictionBranchKrylov=0;
+  int frictionAttemptOffset=0,frictionCorrectionOffset=0;
+  int iterationOffset=0,contactStateUpdates=0,contactActivations=0,contactReleases=0;
   std::vector<unsigned char> previousTraceContacts;
   std::vector<std::size_t> newCandidates;
   PetscParticleContext(Residual& r):residual(r),iterationBudget(r.settings.maxNewtonIterations){}
@@ -196,7 +200,21 @@ struct PetscParticleContext {
                                                    e.normalLoads[p]/residual.settings.forceAbsoluteTolerance)));
     return worst;
   }
-  bool converged(const Evaluation& e)const {
+  bool convergedInner(const Evaluation& e)const {
+    // A retained contact is allowed to open in this fixed-regime subproblem.
+    // Its finite rolling torque is removed only by the outer state update,
+    // never from a residual evaluation midway through a line search.
+    const auto& s=residual.settings;
+    if(e.diagnostic.maxForceResidualRatio>1.||e.diagnostic.maxTorqueResidualRatio>1.
+        ||e.diagnostic.contactGapViolation>s.contactGapTolerance||complementarity(e)>1.)return false;
+    for(std::size_t p=0;p<residual.activeSlot.size();++p)if(residual.activeSlot[p]>=0) {
+      const double load=e.normalLoads[p],gap=e.gaps[p]-s.rough.gap;
+      if(load<0.||gap < -s.contactGapTolerance)return false;
+      if(load>s.forceAbsoluteTolerance&&std::abs(gap)>s.contactGapTolerance)return false;
+    }
+    return true;
+  }
+  bool convergedPhysical(const Evaluation& e)const {
     if(!physicallyConverged(e,residual.settings)||complementarity(e)>1.)return false;
     const auto& s=residual.settings;
     for(std::size_t p=0;p<residual.activeSlot.size();++p)if(residual.activeSlot[p]>=0) {
@@ -242,12 +260,17 @@ inline bool particleNcpJacobian(PetscParticleContext& c,const Vector& direction,
     double bodyMagnitude=0.;for(std::size_t k=0;k<6*n;++k)bodyMagnitude+=q[k]*q[k];
     double epsilon=settings.finiteDifferenceStep*(1.+std::sqrt(bodyMagnitude))/magnitude;
     Vector trial=q;Evaluation displaced;bool valid=false;
-    residual.engagementOverride=&c.engagement;
+    struct RestoreEngagement {
+      Residual& residual;const std::vector<unsigned char>* previous;
+      RestoreEngagement(Residual& value,const std::vector<unsigned char>* fixed):residual(value),previous(value.engagementOverride) {
+        residual.engagementOverride=fixed;
+      }
+      ~RestoreEngagement(){residual.engagementOverride=previous;}
+    } restoreEngagement(residual,&c.engagement);
     for(int attempt=0;attempt<8;++attempt) {
       for(std::size_t k=0;k<6*n;++k)trial[k]=q[k]+epsilon*direction[k];
       if(residual(trial,displaced,c.error)){valid=true;break;}epsilon*=-.5;
     }
-    residual.engagementOverride=nullptr;
     if(!valid)return false;
     for(std::size_t k=0;k<q.size();++k)product[k]=(displaced.residual[k]-base.residual[k])/epsilon;
     auto derivative=[](const Vec3& trial,const Vec3& change,double stiffness,double cap,double dk,double dc,bool yielded)->Vec3 {
@@ -447,16 +470,16 @@ inline PetscErrorCode particlePetscConverged(SNES snes,PetscInt iteration,PetscR
   // re-evaluate every physical residual. This cannot bypass a force criterion.
   bool changed=false;const std::size_t n=c.residual.old.size();
   for(std::size_t k=6*n;k<q.size();++k)if(q[k]<0. && -q[k]*c.residual.reactionScale<=c.residual.settings.forceAbsoluteTolerance){q[k]=0.;changed=true;}
-  if(changed){Evaluation projected;if(c.evaluate(q,projected)&&c.converged(projected)){
+  if(changed){Evaluation projected;if(c.evaluate(q,projected)&&c.convergedInner(projected)){
       petscWrite(solution,q);c.baseQ=q;c.base=std::move(projected);*reason=SNES_CONVERGED_FNORM_ABS;return 0;}}
-  if(!changed && c.converged(e)){c.baseQ=q;c.base=std::move(e);*reason=SNES_CONVERGED_FNORM_ABS;return 0;}
+  if(!changed && c.convergedInner(e)){c.baseQ=q;c.base=std::move(e);*reason=SNES_CONVERGED_FNORM_ABS;return 0;}
   if(iteration+c.frictionBranchAttempts>=c.iterationBudget)*reason=SNES_DIVERGED_MAX_IT;
   return 0;
 }
 inline PetscErrorCode particlePetscMonitor(SNES snes,PetscInt iteration,PetscReal fnorm,void* pointer) {
   auto& c=*static_cast<PetscParticleContext*>(pointer);Vec solution;SNESGetSolution(snes,&solution);Evaluation e;
   if(!c.evaluate(petscRead(solution),e))return 0;
-  ParticleAttemptTrace t;t.iteration=iteration;t.forceRatio=e.diagnostic.maxForceResidualRatio;t.torqueRatio=e.diagnostic.maxTorqueResidualRatio;
+  ParticleAttemptTrace t;t.iteration=c.iterationOffset+iteration+c.frictionBranchAttempts;t.forceRatio=e.diagnostic.maxForceResidualRatio;t.torqueRatio=e.diagnostic.maxTorqueResidualRatio;
   t.gapViolation=e.diagnostic.contactGapViolation;t.complementarityRatio=c.complementarity(e);t.residualNorm=fnorm;
   t.activeContacts=e.diagnostic.contacts;t.slidingContacts=e.diagnostic.slidingContacts;t.rollingContacts=e.diagnostic.rollingContacts;t.domainErrors=c.domainErrors;t.candidateExpansion=c.candidateExpansion;
   if(c.previousTraceContacts.empty()){c.previousTraceContacts.resize(e.contacts.size());
@@ -466,7 +489,9 @@ inline PetscErrorCode particlePetscMonitor(SNES snes,PetscInt iteration,PetscRea
   SNESLineSearch line;SNESGetLineSearch(snes,&line);SNESLineSearchGetLambda(line,&t.fraction);
   KSP ksp;SNESGetKSP(snes,&ksp);PetscInt count=0;KSPGetIterationNumber(ksp,&count);t.kspIterations=count;KSPGetResidualNorm(ksp,&t.kspResidual);
   KSPConvergedReason linearReason;KSPGetConvergedReason(ksp,&linearReason);t.kspReason=static_cast<int>(linearReason);
-  t.frictionBranchAttempts=c.frictionBranchAttempts;t.frictionBranchCorrections=c.frictionBranchCorrections;
+  t.frictionBranchAttempts=c.frictionAttemptOffset+c.frictionBranchAttempts;
+  t.frictionBranchCorrections=c.frictionCorrectionOffset+c.frictionBranchCorrections;
+  t.contactStateUpdates=c.contactStateUpdates;t.contactActivations=c.contactActivations;t.contactReleases=c.contactReleases;
   c.trace.push_back(t);if(c.trace.size()>256)c.trace.pop_front();return 0;
 }
 struct PetscParticleObjects {
@@ -477,6 +502,7 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     const std::vector<Vec3>& torque,double dt,double time,const ParticleStepSettings& settings,
     std::vector<GapCache>& cache,PersistentContactState& contacts,std::vector<Body>& output,
     ParticleStepDiagnostics& diagnostic,std::string& error,double outerTime,double outerDt,int count,int substep) {
+  error.clear();
   PetscBool initialized=PETSC_FALSE;PetscInitialized(&initialized);
   if(!initialized){error="PETSc particle solver requires PetscInitialize before advanceParticles";
     writeAttemptTrace(settings,{},outerTime,outerDt,count,substep,dt,0,error);return false;}
@@ -499,18 +525,36 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     }}
   q.resize(6*n+activeCount,0.);
   for(std::size_t p=0;p<np;++p)if(slots[p]>=0&&contacts[p].active)q[6*n+slots[p]]=std::max(0.,contacts[p].normalLoad)/reactionScale;
+  std::vector<unsigned char> engagement(np,0);
+  for(std::size_t p=0;p<np;++p)engagement[p]=slots[p]>=0&&contacts[p].active;
+  auto previousTraceEngagement=engagement;
   std::deque<ParticleAttemptTrace> allTrace;int totalNewton=0,totalKrylov=0,totalEvaluations=0;int finalReason=0;
   int totalFrictionAttempts=0,totalFrictionCorrections=0;
-  // Candidate growth terminates after at most np additions. Ordinary contact
-  // engagement/release never rebuilds the set or resets Newton's normal loads.
-  for(std::size_t expansion=0;expansion<=np;++expansion) {
-    if(totalNewton>=settings.maxNewtonIterations){error="PETSc contact solve exhausted Newton budget during candidate expansion";finalReason=SNES_DIVERGED_MAX_IT;break;}
+  int stateUpdates=0,activations=0,releases=0,candidateExpansions=0;
+  // Each inner solve owns one immutable engagement regime. Opening/closing
+  // restarts the merit function only outside SNES, with the same beginning-of-
+  // substep history. Neither a line search nor a derivative may release history.
+  // Candidate growth and state restarts are bounded independently, while all
+  // Newton work shares the original configured iteration budget.
+  for(std::size_t outer=0;outer<=np+static_cast<std::size_t>(settings.maxNewtonIterations);++outer) {
+    if(totalNewton>=settings.maxNewtonIterations) {
+      std::ostringstream message;message<<"PETSc contact solve exhausted shared Newton budget across contact states: Newton="
+        <<totalNewton<<", state updates="<<stateUpdates<<", activations="<<activations<<", releases="<<releases;
+      error=message.str();finalReason=SNES_DIVERGED_MAX_IT;break;
+    }
     Residual residual{old,force,torque,settings,cache,contacts,slots,dt,time,L,reactionScale,activeCount};residual.complementarity=true;
-    PetscParticleContext context(residual);context.candidateExpansion=static_cast<int>(expansion);context.iterationBudget=settings.maxNewtonIterations-totalNewton;Evaluation initial;bool valid=false;
+    residual.engagementOverride=&engagement;
+    PetscParticleContext context(residual);context.candidateExpansion=candidateExpansions;
+    context.iterationBudget=settings.maxNewtonIterations-totalNewton;context.iterationOffset=totalNewton;
+    context.contactStateUpdates=stateUpdates;context.contactActivations=activations;context.contactReleases=releases;
+    context.frictionAttemptOffset=totalFrictionAttempts;context.frictionCorrectionOffset=totalFrictionCorrections;
+    context.previousTraceContacts=previousTraceEngagement;
+    Evaluation initial;bool valid=false;
     for(int attempt=0;attempt<12;++attempt){if(context.evaluate(q,initial)){valid=true;break;}for(std::size_t k=0;k<6*n;++k)q[k]*=.5;}
     if(!valid){for(std::size_t k=0;k<6*n;++k)q[k]=0.;valid=context.evaluate(q,initial);}
     if(!valid){error=context.error;break;}
-    if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;q.resize(6*n+activeCount,0.);continue;}
+    if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;
+      q.resize(6*n+activeCount,0.);++candidateExpansions;continue;}
     // Freeze physical tolerance row scales for this solve so backtracking
     // compares one merit function. Final acceptance still uses current loads.
     context.weights.resize(6*n);
@@ -552,27 +596,82 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     PetscInt iterations=0,linear=0;SNESGetIterationNumber(objects.snes,&iterations);SNESGetLinearSolveIterations(objects.snes,&linear);
     totalNewton+=iterations+context.frictionBranchAttempts;totalKrylov+=linear+context.frictionBranchKrylov;totalEvaluations+=residual.evaluations;
     totalFrictionAttempts+=context.frictionBranchAttempts;totalFrictionCorrections+=context.frictionBranchCorrections;
+    previousTraceEngagement=engagement;
     q=petscRead(objects.x);
     for(const auto& row:context.trace){allTrace.push_back(row);if(allTrace.size()>256)allTrace.pop_front();}
-    if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;q.resize(6*n+activeCount,0.);continue;}
+    if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;
+      q.resize(6*n+activeCount,0.);++candidateExpansions;continue;}
     Evaluation final;
-    if(!ierr && reason>0 && context.evaluate(q,final) && context.converged(final)) {
-      output=std::move(final.bodies);cache=std::move(final.cache);contacts=std::move(final.contacts);diagnostic=final.diagnostic;
-      diagnostic.newtonIterations=totalNewton;diagnostic.krylovIterations=totalKrylov;diagnostic.residualEvaluations=totalEvaluations;
-      diagnostic.frictionBranchAttempts=totalFrictionAttempts;diagnostic.frictionBranchCorrections=totalFrictionCorrections;
-      for(auto& b:output){wrap(b,time+dt,settings);}
-      return true;
+    if(!ierr && reason>0 && context.evaluate(q,final) && context.convergedInner(final)) {
+      // An OFF candidate's tolerance-sized normal reaction is unresolved, not
+      // evidence for recreating a friction/rolling contact. Project it before
+      // deciding the regime, and verify momentum and complementarity again.
+      // This projection never removes a resolved compressive reaction.
+      bool projectedOpenReaction=false;
+      for(std::size_t p=0;p<np;++p)if(slots[p]>=0&&!engagement[p]
+          &&q[6*n+slots[p]]!=0.&&std::abs(final.normalLoads[p])<=settings.forceAbsoluteTolerance) {
+        q[6*n+slots[p]]=0.;projectedOpenReaction=true;
+      }
+      if(projectedOpenReaction) {
+        if(!context.evaluate(q,final)) {error=context.error;finalReason=SNES_DIVERGED_FUNCTION_DOMAIN;break;}
+        if(!context.convergedInner(final))continue;
+      }
+      auto desired=engagement;int added=0,removed=0;
+      for(std::size_t p=0;p<np;++p) {
+        // Retain the CURRENT trial regime in the existing gap/force tolerance
+        // band. Using committed history here resurrects an already released
+        // spring at N=0 and can create an ON/OFF cycle with two valid endpoints.
+        // Committed history remains immutable and is still the constitutive
+        // input if a resolved compressive reaction requires reactivation.
+        desired[p]=slots[p]>=0 && final.gaps[p]<=settings.rough.gap+settings.contactGapTolerance
+                   && (engagement[p]||final.normalLoads[p]>settings.forceAbsoluteTolerance);
+        added+=desired[p]&&!engagement[p];removed+=!desired[p]&&engagement[p];
+      }
+      if(added||removed) {
+        ++stateUpdates;activations+=added;releases+=removed;
+        if(stateUpdates>=settings.maxNewtonIterations) {
+          std::ostringstream message;message<<"PETSc contact-state updates exhausted the configured iteration budget: updates="
+            <<stateUpdates<<", activations="<<activations<<", releases="<<releases<<", Newton="<<totalNewton;
+          error=message.str();finalReason=SNES_DIVERGED_MAX_IT;break;
+        }
+        // A repeated mask alone is not a repeated nonlinear state. Continue
+        // under the shared Newton/state-update bounds rather than aborting the
+        // first time a contact set is revisited with different positions/loads.
+        engagement=std::move(desired);continue;
+      }
+      // An open candidate has exactly zero committed normal reaction. Project
+      // only multipliers within the existing force tolerance, then re-evaluate
+      // every physical residual; never erase a finite reaction after acceptance.
+      bool projected=false,largeOpenReaction=false;
+      for(std::size_t p=0;p<np;++p)if(slots[p]>=0&&!engagement[p]&&q[6*n+slots[p]]!=0.) {
+        if(std::abs(final.normalLoads[p])>settings.forceAbsoluteTolerance){largeOpenReaction=true;break;}
+        q[6*n+slots[p]]=0.;projected=true;
+      }
+      if(!largeOpenReaction&&(!projected||context.evaluate(q,final))&&context.convergedPhysical(final)) {
+        output=std::move(final.bodies);cache=std::move(final.cache);contacts=std::move(final.contacts);diagnostic=final.diagnostic;
+        diagnostic.newtonIterations=totalNewton;diagnostic.krylovIterations=totalKrylov;diagnostic.residualEvaluations=totalEvaluations;
+        diagnostic.frictionBranchAttempts=totalFrictionAttempts;diagnostic.frictionBranchCorrections=totalFrictionCorrections;
+        diagnostic.contactStateUpdates=stateUpdates;diagnostic.contactActivations=activations;diagnostic.contactReleases=releases;
+        for(auto& b:output){wrap(b,time+dt,settings);}
+        return true;
+      }
+      if(projected&&!largeOpenReaction)continue;
     }
     KSPConvergedReason lastLinearReason=KSP_CONVERGED_ITERATING;KSPGetConvergedReason(ksp,&lastLinearReason);
     std::ostringstream message;message<<"PETSc SNES failed: reason="<<finalReason<<" ("<<SNESConvergedReasons[reason]<<")"
       <<", KSP="<<static_cast<int>(lastLinearReason)<<" ("<<KSPConvergedReasons[lastLinearReason]<<")"
-      <<", ierr="<<ierr<<", Newton="<<iterations+context.frictionBranchAttempts
-      <<", friction branch predictors="<<context.frictionBranchAttempts<<", descent predictors="<<context.frictionBranchCorrections;
+      <<", ierr="<<ierr<<", Newton="<<totalNewton
+      <<", friction branch predictors="<<totalFrictionAttempts<<", descent predictors="<<totalFrictionCorrections
+      <<", contact state updates="<<stateUpdates<<", activations="<<activations<<", releases="<<releases;
     if(context.evaluate(q,final))message<<", force residual ratio="<<final.diagnostic.maxForceResidualRatio
       <<", torque residual ratio="<<final.diagnostic.maxTorqueResidualRatio<<", gap violation="<<final.diagnostic.contactGapViolation
       <<" m, complementarity ratio="<<context.complementarity(final);
     if(!context.error.empty())message<<", last_trial_error="<<context.error;
     error=message.str();break;
+  }
+  if(finalReason>=0) {
+    finalReason=SNES_DIVERGED_MAX_IT;
+    if(error.empty())error="PETSc contact solve exhausted bounded contact-state restarts without physical convergence";
   }
   writeAttemptTrace(settings,allTrace,outerTime,outerDt,count,substep,dt,finalReason,error);
   return false;

@@ -52,6 +52,7 @@ struct ParticleStepDiagnostics {
   int contacts=0,slidingContacts=0,rollingContacts=0;
   int substeps=0,newtonIterations=0,krylovIterations=0,residualEvaluations=0;
   int frictionBranchAttempts=0,frictionBranchCorrections=0;
+  int contactStateUpdates=0,contactActivations=0,contactReleases=0;
   std::size_t activePairs=0;
 };
 
@@ -735,6 +736,9 @@ inline ParticleStepDiagnostics advanceParticles(
       total.newtonIterations+=d.newtonIterations;total.krylovIterations+=d.krylovIterations;
       total.frictionBranchAttempts+=d.frictionBranchAttempts;
       total.frictionBranchCorrections+=d.frictionBranchCorrections;
+      total.contactStateUpdates+=d.contactStateUpdates;
+      total.contactActivations+=d.contactActivations;
+      total.contactReleases+=d.contactReleases;
       total.residualEvaluations+=d.residualEvaluations;
       const double weight=1./count;
       total.lubricationDissipation+=weight*d.lubricationDissipation;
