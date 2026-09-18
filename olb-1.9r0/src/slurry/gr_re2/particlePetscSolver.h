@@ -6,6 +6,7 @@
 
 struct ParticleAttemptTrace {
   int iteration=0,kspIterations=0,activeContacts=0,slidingContacts=0,rollingContacts=0,activated=0,released=0,domainErrors=0,kspReason=0,candidateExpansion=0;
+  int frictionBranchAttempts=0,frictionBranchCorrections=0;
   double forceRatio=0.,torqueRatio=0.,gapViolation=0.,complementarityRatio=0.;
   double residualNorm=0.,fraction=1.,kspResidual=0.;
 };
@@ -39,14 +40,15 @@ inline void writeAttemptTrace(const ParticleStepSettings& s,
   const std::string path=s.solverDiagnosticsPrefix+"_trace.csv";
   std::ifstream existing(path);const bool header=!existing.good()||existing.peek()==std::ifstream::traits_type::eof();
   std::ofstream file(path,std::ios::app);if(!file)return;
-  if(header)file<<"outer_time_s,outer_dt_s,subdivision_count,substep_index,subdt_s,newton_iteration,force_ratio,torque_ratio,gap_violation_m,complementarity_ratio,residual_norm,step_fraction,ksp_iterations,ksp_residual_norm,snes_reason,status,message,active_contacts,sliding_contacts,rolling_contacts,activated_contacts,released_contacts,domain_errors,ksp_reason,candidate_expansion\n";
+  if(header)file<<"outer_time_s,outer_dt_s,subdivision_count,substep_index,subdt_s,newton_iteration,force_ratio,torque_ratio,gap_violation_m,complementarity_ratio,residual_norm,step_fraction,ksp_iterations,ksp_residual_norm,snes_reason,status,message,active_contacts,sliding_contacts,rolling_contacts,activated_contacts,released_contacts,domain_errors,ksp_reason,candidate_expansion,friction_branch_attempts,friction_branch_corrections\n";
   file<<std::setprecision(17);
   for(const auto& r:trace)file<<outerTime<<','<<outerDt<<','<<count<<','<<substep<<','<<subdt<<','
     <<r.iteration<<','<<r.forceRatio<<','<<r.torqueRatio<<','<<r.gapViolation<<','<<r.complementarityRatio<<','
     <<r.residualNorm<<','<<r.fraction<<','<<r.kspIterations<<','<<r.kspResidual<<','<<reason<<",failed_iteration,"<<csvQuoted(error)<<','<<r.activeContacts<<','<<r.slidingContacts<<','<<r.rollingContacts
-    <<','<<r.activated<<','<<r.released<<','<<r.domainErrors<<','<<r.kspReason<<','<<r.candidateExpansion<<'\n';
+    <<','<<r.activated<<','<<r.released<<','<<r.domainErrors<<','<<r.kspReason<<','<<r.candidateExpansion
+    <<','<<r.frictionBranchAttempts<<','<<r.frictionBranchCorrections<<'\n';
   file<<outerTime<<','<<outerDt<<','<<count<<','<<substep<<','<<subdt
-      <<",-1,0,0,0,0,0,0,0,0,"<<reason<<",failed_attempt,"<<csvQuoted(error)<<",0,0,0,0,0,0,0,0\n";
+      <<",-1,0,0,0,0,0,0,0,0,"<<reason<<",failed_attempt,"<<csvQuoted(error)<<",0,0,0,0,0,0,0,0,0,0\n";
 }
 inline void ParticleDiagnosticScope::flushFailure() {
   auto* saved=pendingParticleDiagnostics();pendingParticleDiagnostics()=nullptr;
@@ -177,6 +179,7 @@ struct PetscParticleContext {
   Residual& residual;Vector weights,baseQ;Evaluation base;NcpPreconditioner pc;
   std::vector<unsigned char> engagement;std::deque<ParticleAttemptTrace> trace;
   std::string error;int totalKrylov=0,domainErrors=0,candidateExpansion=0,iterationBudget=0;bool missingCandidate=false;
+  int frictionBranchAttempts=0,frictionBranchCorrections=0,frictionBranchKrylov=0;
   std::vector<unsigned char> previousTraceContacts;
   std::vector<std::size_t> newCandidates;
   PetscParticleContext(Residual& r):residual(r),iterationBudget(r.settings.maxNewtonIterations){}
@@ -247,9 +250,11 @@ inline bool particleNcpJacobian(PetscParticleContext& c,const Vector& direction,
     residual.engagementOverride=nullptr;
     if(!valid)return false;
     for(std::size_t k=0;k<q.size();++k)product[k]=(displaced.residual[k]-base.residual[k])/epsilon;
-    auto derivative=[](const Vec3& trial,const Vec3& change,double stiffness,double cap,double dk,double dc)->Vec3 {
+    auto derivative=[](const Vec3& trial,const Vec3& change,double stiffness,double cap,double dk,double dc,bool yielded)->Vec3 {
       const double r=norm(trial);if(cap<=0.)return r>0.?scale(trial,-dc/r):Vec3{};
-      if(stiffness*r<=cap)return add(scale(change,-stiffness),scale(trial,-dk));
+      // Use the branch selected by the actual return map.  Recomputing k*|s|
+      // here can round differently from |k*s| exactly at a yield boundary.
+      if(!yielded)return add(scale(change,-stiffness),scale(trial,-dk));
       const Vec3 v=scale(trial,1./r);return add(scale(sub(change,scale(v,dot(v,change))),-cap/r),scale(v,-dc));
     };
     for(const auto& p:base.pairs)if(p.slot>=0 && p.contact.active) {
@@ -260,9 +265,9 @@ inline bool particleNcpJacobian(PetscParticleContext& c,const Vector& direction,
       const Vec3 dn=scale(sub(found->normal,p.normal),1./epsilon);
       const Vec3 dli=scale(sub(found->leverI,p.leverI),1./epsilon),dlj=scale(sub(found->leverJ,p.leverJ),1./epsilon);
       const auto& state=contact.candidateState;const auto& ns=next.candidateState;
-      const Vec3 dft=derivative(contact.trialSlip,ds,settings.rough.tangentialStiffness,settings.rough.friction*std::max(0.,state.normalLoad),0.,0.);
+      const Vec3 dft=derivative(contact.trialSlip,ds,settings.rough.tangentialStiffness,settings.rough.friction*std::max(0.,state.normalLoad),0.,0.,contact.sliding);
       const Vec3 dmr=derivative(contact.trialRoll,dr,state.rollingStiffness,state.rollingCap,
-            (ns.rollingStiffness-state.rollingStiffness)/epsilon,(ns.rollingCap-state.rollingCap)/epsilon);
+            (ns.rollingStiffness-state.rollingStiffness)/epsilon,(ns.rollingCap-state.rollingCap)/epsilon,contact.rolling);
       const Vec3 df=add(scale(dn,-state.normalLoad),dft);
       const Vec3 dti=add(add(cross(dli,contact.forceI),cross(p.leverI,df)),dmr);
       const Vec3 dtj=scale(add(add(cross(dlj,contact.forceI),cross(p.leverJ,df)),dmr),-1.);
@@ -304,6 +309,127 @@ inline PetscErrorCode particlePetscJacobian(SNES,Vec x,Mat,Mat,void* pointer) {
     return 0;
   }catch(const std::exception& ex){c.error=ex.what();return PETSC_ERR_USER;}
 }
+
+// A Newton direction can approach a Coulomb/rolling yield boundary from the
+// sticking side while every useful step crosses onto another return-map branch.
+// Backtracking alone can then converge to the boundary instead of crossing it.
+// Locate that actual transition, relinearize at its outgoing representable
+// state, and propose a Newton predictor from there.  This never changes a force
+// law or a yield tolerance: both Jacobians use branches of evaluated states.
+// The proposal must reduce the ORIGINAL residual and PETSc still backtracks it.
+inline PetscErrorCode particlePetscFrictionPreCheck(SNESLineSearch line,Vec x,Vec y,
+                                                   PetscBool* changed,void* pointer) {
+  auto& c=*static_cast<PetscParticleContext*>(pointer);*changed=PETSC_FALSE;
+  try {
+    if(!c.residual.settings.rough.enabled||c.missingCandidate)return 0;
+    SNES snes=nullptr;SNESLineSearchGetSNES(line,&snes);
+    PetscInt iteration=0;SNESGetIterationNumber(snes,&iteration);
+    // An extra linearization consumes the same configured Newton budget.
+    if(iteration+1+c.frictionBranchAttempts>=c.iterationBudget)return 0;
+    const Vector q=petscRead(x),direction=petscRead(y);
+    auto probe=[&](const Vector& trial,Evaluation& state,double& fnorm)->bool {
+      std::string ignored;
+      // Exploratory states must not change missingCandidate, contact history,
+      // cached geometry, or the error belonging to the actual SNES iterate.
+      if(!c.residual(trial,state,ignored))return false;
+      for(std::size_t p=0;p<c.residual.activeSlot.size();++p)
+        if(c.residual.activeSlot[p]<0
+            && state.gaps[p]<c.residual.settings.rough.gap+c.residual.settings.contactGapTolerance)return false;
+      Vector f;c.transform(trial,state,f);fnorm=length(f);
+      return std::isfinite(fnorm);
+    };
+    Evaluation base;double before=0.;
+    if(c.baseQ==q) {base=c.base;Vector f;c.transform(q,base,f);before=length(f);}
+    else if(!probe(q,base,before))return 0;
+    if(!(before>0.)||!std::isfinite(before))return 0;
+    auto differentYieldBranch=[&](const Evaluation& state)->bool {
+      bool different=false;
+      for(std::size_t p=0;p<base.contacts.size();++p) {
+        // Normal engagement changes remain the responsibility of the NCP
+        // solve; this predictor crosses a material yield boundary only.
+        if(base.contacts[p].active!=state.contacts[p].active)return false;
+        if(base.contacts[p].active)
+          different|=base.contacts[p].sliding!=state.contacts[p].sliding
+                    ||base.contacts[p].rolling!=state.contacts[p].rolling;
+      }
+      return different;
+    };
+    const int maxProbes=std::max(1,c.residual.settings.maxLineSearch);
+    Vector crossedQ;Evaluation crossed;double upper=0.,fraction=1.;
+    for(int k=0;k<maxProbes;++k,fraction*=.5) {
+      Vector trial=q;for(std::size_t j=0;j<q.size();++j)trial[j]-=fraction*direction[j];
+      Evaluation state;double norm=0.;if(!probe(trial,state,norm))continue;
+      // Ordinary descending directions do not need a second linear solve.
+      if(norm<before*(1.-1.e-4*fraction))return 0;
+      if(differentYieldBranch(state)){upper=fraction;crossedQ=std::move(trial);crossed=std::move(state);}
+    }
+    if(!(upper>0.))return 0;
+    double lower=0.;
+    for(int k=0;k<std::numeric_limits<double>::digits+8;++k) {
+      const double middle=.5*(lower+upper);if(middle==lower||middle==upper)break;
+      Vector trial=q;for(std::size_t j=0;j<q.size();++j)trial[j]-=middle*direction[j];
+      Evaluation state;double norm=0.;if(!probe(trial,state,norm))return 0;
+      if(differentYieldBranch(state)){upper=middle;crossedQ=std::move(trial);crossed=std::move(state);}
+      else lower=middle;
+    }
+    Vector crossing=q;for(std::size_t j=0;j<q.size();++j)crossing[j]-=crossedQ[j];
+    double bodyMagnitude=0.;for(std::size_t j=0;j<6*c.residual.old.size();++j)bodyMagnitude+=q[j]*q[j];
+    const double linearizationScale=c.residual.settings.finiteDifferenceStep*(1.+std::sqrt(bodyMagnitude));
+    // A distant transition is not a local generalized-Newton correction.  The
+    // existing dimensionless Jacobian perturbation bounds this lookahead;
+    // there is no new force band around the friction or rolling cap.
+    if(length(crossing)>linearizationScale)return 0;
+
+    struct RestoreLinearization {
+      PetscParticleContext& context;Vector q;Evaluation state;NcpPreconditioner pc;
+      std::vector<unsigned char> engagement;
+      explicit RestoreLinearization(PetscParticleContext& value):context(value),q(std::move(value.baseQ)),
+        state(std::move(value.base)),pc(std::move(value.pc)),engagement(std::move(value.engagement)){}
+      ~RestoreLinearization(){context.baseQ=std::move(q);context.base=std::move(state);
+        context.pc=std::move(pc);context.engagement=std::move(engagement);}
+    } restore(c);
+    c.baseQ=crossedQ;c.base=std::move(crossed);
+    c.engagement.assign(c.residual.activeSlot.size(),0);
+    for(std::size_t p=0;p<c.engagement.size();++p)c.engagement[p]=c.base.contacts[p].active;
+    if(!c.pc.build(c.base,c.residual,c.weights)) {
+      c.error="Friction branch predictor rejected: singular preconditioner";return 0;
+    }
+    Vector rhs;c.transform(c.baseQ,c.base,rhs);
+    struct PredictorVectors {
+      Vec rhs=nullptr,answer=nullptr;
+      ~PredictorVectors(){if(answer)VecDestroy(&answer);if(rhs)VecDestroy(&rhs);}
+    } vectors;
+    PetscErrorCode code=VecDuplicate(x,&vectors.rhs);if(code)return code;
+    code=VecDuplicate(x,&vectors.answer);if(code)return code;
+    code=petscWrite(vectors.rhs,rhs);if(code)return code;
+    code=VecSet(vectors.answer,0.);if(code)return code;
+    KSP ksp=nullptr;code=SNESGetKSP(snes,&ksp);if(code)return code;
+    ++c.frictionBranchAttempts;
+    code=KSPSolve(ksp,vectors.rhs,vectors.answer);
+    PetscInt innerIterations=0;KSPGetIterationNumber(ksp,&innerIterations);c.frictionBranchKrylov+=innerIterations;
+    KSPConvergedReason reason=KSP_CONVERGED_ITERATING;KSPGetConvergedReason(ksp,&reason);
+    if(code||reason<=0) {
+      std::ostringstream message;message<<"Friction branch predictor KSP failed: reason="<<static_cast<int>(reason)<<", ierr="<<code;
+      c.error=message.str();return code;
+    }
+    Vector predictor=petscRead(vectors.answer);
+    for(std::size_t j=0;j<q.size();++j)predictor[j]+=crossing[j];
+    fraction=1.;
+    for(int k=0;k<maxProbes;++k,fraction*=.5) {
+      Vector trial=q;for(std::size_t j=0;j<q.size();++j)trial[j]-=fraction*predictor[j];
+      Evaluation state;double norm=0.;
+      if(probe(trial,state,norm)&&norm<before*(1.-1.e-4*fraction)) {
+        for(double& value:predictor)value*=fraction;
+        code=petscWrite(y,predictor);if(code)return code;
+        ++c.frictionBranchCorrections;*changed=PETSC_TRUE;return 0;
+      }
+    }
+    // No improving predictor: keep the original direction and let PETSc report
+    // its ordinary line-search result.  RestoreLinearization also restores the
+    // original Jacobian before PETSc computes the backtracking slope.
+    return 0;
+  }catch(const std::exception& ex){c.error=ex.what();return PETSC_ERR_USER;}
+}
 inline PetscErrorCode particlePetscConverged(SNES snes,PetscInt iteration,PetscReal,PetscReal,
                                             PetscReal fnorm,SNESConvergedReason* reason,void* pointer) {
   auto& c=*static_cast<PetscParticleContext*>(pointer);*reason=SNES_CONVERGED_ITERATING;
@@ -324,7 +450,7 @@ inline PetscErrorCode particlePetscConverged(SNES snes,PetscInt iteration,PetscR
   if(changed){Evaluation projected;if(c.evaluate(q,projected)&&c.converged(projected)){
       petscWrite(solution,q);c.baseQ=q;c.base=std::move(projected);*reason=SNES_CONVERGED_FNORM_ABS;return 0;}}
   if(!changed && c.converged(e)){c.baseQ=q;c.base=std::move(e);*reason=SNES_CONVERGED_FNORM_ABS;return 0;}
-  if(iteration>=c.iterationBudget)*reason=SNES_DIVERGED_MAX_IT;
+  if(iteration+c.frictionBranchAttempts>=c.iterationBudget)*reason=SNES_DIVERGED_MAX_IT;
   return 0;
 }
 inline PetscErrorCode particlePetscMonitor(SNES snes,PetscInt iteration,PetscReal fnorm,void* pointer) {
@@ -340,6 +466,7 @@ inline PetscErrorCode particlePetscMonitor(SNES snes,PetscInt iteration,PetscRea
   SNESLineSearch line;SNESGetLineSearch(snes,&line);SNESLineSearchGetLambda(line,&t.fraction);
   KSP ksp;SNESGetKSP(snes,&ksp);PetscInt count=0;KSPGetIterationNumber(ksp,&count);t.kspIterations=count;KSPGetResidualNorm(ksp,&t.kspResidual);
   KSPConvergedReason linearReason;KSPGetConvergedReason(ksp,&linearReason);t.kspReason=static_cast<int>(linearReason);
+  t.frictionBranchAttempts=c.frictionBranchAttempts;t.frictionBranchCorrections=c.frictionBranchCorrections;
   c.trace.push_back(t);if(c.trace.size()>256)c.trace.pop_front();return 0;
 }
 struct PetscParticleObjects {
@@ -373,6 +500,7 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
   q.resize(6*n+activeCount,0.);
   for(std::size_t p=0;p<np;++p)if(slots[p]>=0&&contacts[p].active)q[6*n+slots[p]]=std::max(0.,contacts[p].normalLoad)/reactionScale;
   std::deque<ParticleAttemptTrace> allTrace;int totalNewton=0,totalKrylov=0,totalEvaluations=0;int finalReason=0;
+  int totalFrictionAttempts=0,totalFrictionCorrections=0;
   // Candidate growth terminates after at most np additions. Ordinary contact
   // engagement/release never rebuilds the set or resets Newton's normal loads.
   for(std::size_t expansion=0;expansion<=np;++expansion) {
@@ -417,10 +545,13 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     const char* type=nullptr;checked(SNESGetType(objects.snes,&type));
     if(type && std::string(type)!=SNESNEWTONLS){error="Graphite contact backend requires -gr_snes_type newtonls";break;}
     checked(SNESSetConvergenceTest(objects.snes,particlePetscConverged,&context,nullptr));
+    checked(SNESGetLineSearch(objects.snes,&line));
+    checked(SNESLineSearchSetPreCheck(line,particlePetscFrictionPreCheck,&context));
     if(!ierr){PetscPushErrorHandler(PetscReturnErrorHandler,nullptr);ierr=SNESSolve(objects.snes,nullptr,objects.x);PetscPopErrorHandler();}
     SNESConvergedReason reason=SNES_CONVERGED_ITERATING;SNESGetConvergedReason(objects.snes,&reason);finalReason=static_cast<int>(reason);
     PetscInt iterations=0,linear=0;SNESGetIterationNumber(objects.snes,&iterations);SNESGetLinearSolveIterations(objects.snes,&linear);
-    totalNewton+=iterations;totalKrylov+=linear;totalEvaluations+=residual.evaluations;
+    totalNewton+=iterations+context.frictionBranchAttempts;totalKrylov+=linear+context.frictionBranchKrylov;totalEvaluations+=residual.evaluations;
+    totalFrictionAttempts+=context.frictionBranchAttempts;totalFrictionCorrections+=context.frictionBranchCorrections;
     q=petscRead(objects.x);
     for(const auto& row:context.trace){allTrace.push_back(row);if(allTrace.size()>256)allTrace.pop_front();}
     if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;q.resize(6*n+activeCount,0.);continue;}
@@ -428,13 +559,15 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     if(!ierr && reason>0 && context.evaluate(q,final) && context.converged(final)) {
       output=std::move(final.bodies);cache=std::move(final.cache);contacts=std::move(final.contacts);diagnostic=final.diagnostic;
       diagnostic.newtonIterations=totalNewton;diagnostic.krylovIterations=totalKrylov;diagnostic.residualEvaluations=totalEvaluations;
+      diagnostic.frictionBranchAttempts=totalFrictionAttempts;diagnostic.frictionBranchCorrections=totalFrictionCorrections;
       for(auto& b:output){wrap(b,time+dt,settings);}
       return true;
     }
     KSPConvergedReason lastLinearReason=KSP_CONVERGED_ITERATING;KSPGetConvergedReason(ksp,&lastLinearReason);
     std::ostringstream message;message<<"PETSc SNES failed: reason="<<finalReason<<" ("<<SNESConvergedReasons[reason]<<")"
       <<", KSP="<<static_cast<int>(lastLinearReason)<<" ("<<KSPConvergedReasons[lastLinearReason]<<")"
-      <<", ierr="<<ierr<<", Newton="<<iterations;
+      <<", ierr="<<ierr<<", Newton="<<iterations+context.frictionBranchAttempts
+      <<", friction branch predictors="<<context.frictionBranchAttempts<<", descent predictors="<<context.frictionBranchCorrections;
     if(context.evaluate(q,final))message<<", force residual ratio="<<final.diagnostic.maxForceResidualRatio
       <<", torque residual ratio="<<final.diagnostic.maxTorqueResidualRatio<<", gap violation="<<final.diagnostic.contactGapViolation
       <<" m, complementarity ratio="<<context.complementarity(final);

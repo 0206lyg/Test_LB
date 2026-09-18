@@ -51,6 +51,7 @@ struct ParticleStepDiagnostics {
   double maxForceResidualRatio=0.,maxTorqueResidualRatio=0.,contactGapViolation=0.;
   int contacts=0,slidingContacts=0,rollingContacts=0;
   int substeps=0,newtonIterations=0,krylovIterations=0,residualEvaluations=0;
+  int frictionBranchAttempts=0,frictionBranchCorrections=0;
   std::size_t activePairs=0;
 };
 
@@ -732,6 +733,8 @@ inline ParticleStepDiagnostics advanceParticles(
       total.maxTorqueResidualRatio=std::max(total.maxTorqueResidualRatio,d.maxTorqueResidualRatio);
       total.contactGapViolation=std::max(total.contactGapViolation,d.contactGapViolation);
       total.newtonIterations+=d.newtonIterations;total.krylovIterations+=d.krylovIterations;
+      total.frictionBranchAttempts+=d.frictionBranchAttempts;
+      total.frictionBranchCorrections+=d.frictionBranchCorrections;
       total.residualEvaluations+=d.residualEvaluations;
       const double weight=1./count;
       total.lubricationDissipation+=weight*d.lubricationDissipation;
@@ -764,4 +767,3 @@ inline ParticleStepDiagnostics advanceParticles(
 
 } } // SLURRY SCOPE END
 #endif
-
