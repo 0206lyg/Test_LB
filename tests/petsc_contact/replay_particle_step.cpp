@@ -86,6 +86,8 @@ int main(int argc, char** argv) {
                 << "; Krylov=" << diagnostics.krylovIterations
                 << "; force_ratio=" << diagnostics.maxForceResidualRatio
                 << "; torque_ratio=" << diagnostics.maxTorqueResidualRatio
+                << "; friction_branch_attempts=" << diagnostics.frictionBranchAttempts
+                << "; friction_branch_corrections=" << diagnostics.frictionBranchCorrections
                 << "; gap_violation_m=" << diagnostics.contactGapViolation << '\n';
       result = 0;
     } else {

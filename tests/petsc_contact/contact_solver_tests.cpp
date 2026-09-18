@@ -441,6 +441,109 @@ void threeBodyContactChain() {
   }
 }
 
+void decreasingNormalLoadProjectsStoredSlip() {
+  const auto s = settings();
+  const auto bodies = pairAtGap(s.rough.gap);
+  // A contact can leave stick without a velocity increment: reducing its
+  // normal reaction shrinks the Coulomb disk around its stored elastic force.
+  // Check both tangent directions and values immediately below/above yield.
+  for (const double sign : {-1., 1.}) {
+    for (const double offset : {-1.e-10, 0., 1.e-10}) {
+      auto state = preloadedState(s);
+      state.elasticSlip = {0., sign * (1. + offset) *
+          s.rough.friction * load / s.rough.tangentialStiffness, 0.};
+      state.tangentForce = g::scale(state.elasticSlip, -s.rough.tangentialStiffness);
+      state.elasticEnergy = .5 * s.rough.tangentialStiffness *
+          g::dot(state.elasticSlip, state.elasticSlip) + .5 * state.rollingStiffness *
+          g::dot(state.elasticRoll, state.elasticRoll);
+      const double reducedLoad = .7 * load;
+      const auto out = g::roughContact(bodies[0], bodies[1], {1., 0., 0.},
+          {radius, 0., 0.}, {-radius, 0., 0.}, reducedLoad, 0., step,
+          state, s.rough, true);
+      require(out.sliding, "normal unloading must yield the stored tangential spring");
+      near(out.tangentForce[1], -sign * s.rough.friction * reducedLoad,
+           1.e-22, 1.e-12, "unloading tracks the current Coulomb cap");
+      near(g::norm(out.candidateState.elasticSlip),
+           s.rough.friction * reducedLoad / s.rough.tangentialStiffness,
+           1.e-23, 1.e-12, "unloading commits the projected elastic slip");
+      require(out.plasticSlipWork > 0., "shrinking Coulomb disk records plastic slip");
+      nearVector(out.candidateState.elasticRoll, state.elasticRoll,
+                 1.e-16, 1.e-12, "normal unloading preserves stored elastic roll");
+      near(out.candidateState.rollingCap, state.rollingCap, 1.e-28, 1.e-12,
+           "normal unloading preserves the adhesive birth rolling cap");
+      nearVector(out.rollingTorque, state.rollingTorque, 1.e-28, 1.e-12,
+                 "normal unloading does not rescale adhesive rolling torque");
+    }
+  }
+}
+
+void coupledFrictionLoadReversal() {
+  auto s = settings();
+  s.maxSubsteps = 64;
+  const double distance = 2. * radius + s.rough.gap;
+  std::vector<g::Body> bodies{sphere({8.e-6 - distance, 10.e-6, 10.e-6}),
+                            sphere({8.e-6, 10.e-6, 10.e-6}),
+                            sphere({8.e-6 + distance, 10.e-6, 10.e-6})};
+  g::PersistentContactState history(3);
+  auto state = preloadedState(s);
+  state.elasticSlip = {0., (1. - 1.e-12) * load / s.rough.tangentialStiffness, 0.};
+  state.elasticRoll = {0., 0., .9999 * s.rough.rollingYieldAngle};
+  state.tangentForce = g::scale(state.elasticSlip, -s.rough.tangentialStiffness);
+  state.rollingTorque = g::scale(state.elasticRoll, -state.rollingStiffness);
+  state.elasticEnergy = .5 * s.rough.tangentialStiffness *
+      g::dot(state.elasticSlip, state.elasticSlip) + .5 * state.rollingStiffness *
+      g::dot(state.elasticRoll, state.elasticRoll);
+  history[0] = state;
+  history[2] = state;
+  const double arm = .5 * distance;
+  const double normalSchedule[] = {1., .7, .4, 1.2, 1.2, .7, .7, 1.};
+  const double shearSchedule[] = {1., 1., 1., -1., -1., -1., 1., 1.};
+  bool sawSliding = false, sawRolling = false, sawPositive = false, sawNegative = false;
+  double slipWork = 0., rollWork = 0.;
+  std::vector<g::GapCache> cache;
+  for (int k = 0; k < 8; ++k) {
+    const double normal = normalSchedule[k] * load;
+    const double shear = shearSchedule[k] * load;
+    const double appliedRoll = k == 0 ? 0. : (k < 4 ? 2. : -2.) * state.rollingCap;
+    const std::vector<g::Vec3> force{{normal, shear, 0.}, {}, {-normal, -shear, 0.}};
+    const std::vector<g::Vec3> torque{{0., 0., arm * shear + appliedRoll},
+        {0., 0., 2. * arm * shear}, {0., 0., arm * shear - appliedRoll}};
+    const auto d = g::advanceParticles(bodies, force, torque, step, k * step,
+                                      s, &cache, &history);
+    require(d.maxForceResidualRatio <= 1. && d.maxTorqueResidualRatio <= 1. &&
+            d.contactGapViolation <= s.contactGapTolerance,
+            "coupled load reversal satisfies all physical acceptance criteria");
+    require(history[0].active && !history[1].active && history[2].active,
+            "coupled chain retains its two loaded contacts");
+    for (const std::size_t p : {std::size_t{0}, std::size_t{2}}) {
+      const auto& contact = history[p];
+      require(contact.normalLoad >= 0., "coupled contact reaction remains compressive");
+      require(g::norm(contact.tangentForce) <=
+                  s.rough.friction * contact.normalLoad + s.forceAbsoluteTolerance,
+              "coupled contact obeys its current Coulomb force cap");
+      require(g::norm(contact.rollingTorque) <=
+                  contact.rollingCap + s.torqueAbsoluteTolerance,
+              "coupled contact obeys the adhesive rolling cap");
+      near(contact.rollingCap, state.rollingCap, 1.e-27, 1.e-11,
+           "normal and shear cycling preserve the rolling birth cap");
+      sawSliding = sawSliding || contact.sliding;
+      sawRolling = sawRolling || contact.rolling;
+      sawPositive = sawPositive || contact.tangentForce[1] > .1 * load;
+      sawNegative = sawNegative || contact.tangentForce[1] < -.1 * load;
+      slipWork += contact.plasticSlipWork;
+      rollWork += contact.plasticRollWork;
+    }
+    nearVector(momentum(bodies), {}, 3.e-20, 0.,
+               "coupled contact cycling conserves total linear momentum");
+    for (int i = 0; i < 2; ++i)
+      near(g::closestEllipsoidGap(bodies[i], bodies[i + 1]).gap, s.rough.gap,
+           s.contactGapTolerance, 0., "coupled chain no penetration");
+  }
+  require(sawSliding && slipWork > 0., "load cycling exercises dissipative sliding");
+  require(sawPositive && sawNegative, "shear reversal changes the tangential force sign");
+  require(sawRolling && rollWork > 0., "load cycling exercises dissipative rolling");
+}
+
 void failedStepDoesNotCommit() {
   auto s = settings();
 #ifdef SLURRY_USE_PETSC
@@ -539,6 +642,57 @@ void recoveredRetryWritesNoDiagnostics() {
   require(std::filesystem::is_empty(files.directory),
           "recoverable failed attempts must not write trace, outcome, or replay files");
 }
+
+void savedFrictionBranchReplay(const std::string& input) {
+  // The real failure state is supplied explicitly and remains outside the test
+  // source tree. Run exactly its saved substep, retaining every physical input,
+  // convergence tolerance, and iteration budget without further subdivision.
+  auto replay = g::particle_detail::readParticleReplay(input);
+  TemporaryDiagnostics files;
+  replay.settings.solverBackend = "petsc";
+  replay.settings.solverDiagnosticsPrefix = files.prefix();
+  std::vector<g::Body> output;
+  g::ParticleStepDiagnostics d;
+  std::string error;
+  const bool success = g::particle_detail::dispatchImplicitStep(
+      replay.bodies, replay.force, replay.torque, replay.dt, replay.time,
+      replay.settings, replay.cache, replay.contacts, output, d, error,
+      replay.outerTime, replay.outerDt, replay.count, replay.substep);
+  require(success, "saved friction-boundary substep must converge: " + error);
+  require(std::isfinite(d.maxForceResidualRatio) && d.maxForceResidualRatio <= 1. &&
+          std::isfinite(d.maxTorqueResidualRatio) && d.maxTorqueResidualRatio <= 1. &&
+          std::isfinite(d.contactGapViolation) &&
+          d.contactGapViolation <= replay.settings.contactGapTolerance,
+          "saved substep must satisfy its original force, torque, and gap tolerances");
+  require(d.frictionBranchCorrections > 0 &&
+          d.frictionBranchAttempts >= d.frictionBranchCorrections,
+          "saved fixture must exercise an accepted friction-branch correction");
+  require(d.newtonIterations <= replay.settings.maxNewtonIterations,
+          "friction-branch correction must remain within the original iteration budget");
+  require(output.size() == replay.bodies.size(), "replay preserves particle count");
+  for (const auto& body : output)
+    require(g::finite(body.position) && g::finite(body.velocity) && g::finite(body.omega),
+            "accepted replay state has finite positions and velocities");
+  for (const auto& contact : replay.contacts) {
+    if (!contact.active) continue;
+    require(contact.normalLoad >= 0., "replayed contact reaction remains compressive");
+    require(g::norm(contact.tangentForce) <= replay.settings.rough.friction *
+                contact.normalLoad + replay.settings.forceAbsoluteTolerance,
+            "replayed contact retains the unmodified Coulomb force cap");
+    require(g::norm(contact.rollingTorque) <=
+                contact.rollingCap + replay.settings.torqueAbsoluteTolerance,
+            "replayed contact retains the unmodified rolling torque cap");
+  }
+  require(std::filesystem::is_empty(files.directory),
+          "successful branch recovery must not emit failure files");
+  std::cout << "REPLAY REGRESSION: particles=" << output.size()
+            << "; Newton=" << d.newtonIterations
+            << "; branch_attempts=" << d.frictionBranchAttempts
+            << "; branch_corrections=" << d.frictionBranchCorrections
+            << "; force_ratio=" << d.maxForceResidualRatio
+            << "; torque_ratio=" << d.maxTorqueResidualRatio
+            << "; gap_violation_m=" << d.contactGapViolation << '\n';
+}
 #endif
 
 void productionOblateContact() {
@@ -617,19 +771,33 @@ void productionOblateContact() {
 } // namespace
 
 int main(int argc, char** argv) {
-  std::string selected;
+  std::string selected, replayFixture;
   std::vector<char*> runtimeArguments{argv[0]};
   for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) == "--case" && i + 1 < argc) selected = argv[++i];
+    const std::string argument = argv[i];
+    if (argument == "--case" || argument == "--replay-fixture") {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for " << argument << '\n';
+        return 1;
+      }
+      if (argument == "--case") selected = argv[++i];
+      else replayFixture = argv[++i];
+    }
     else runtimeArguments.push_back(argv[i]);
   }
+#ifndef SLURRY_USE_PETSC
+  if (!replayFixture.empty()) {
+    std::cerr << "--replay-fixture requires a PETSc-enabled test binary\n";
+    return 1;
+  }
+#endif
 #ifdef SLURRY_USE_PETSC
   int runtimeCount = static_cast<int>(runtimeArguments.size());
   runtimeArguments.push_back(nullptr);
   char** runtimeArgv = runtimeArguments.data();
   if (PetscInitialize(&runtimeCount, &runtimeArgv, nullptr, nullptr)) return 2;
 #endif
-  const std::vector<std::pair<std::string, std::function<void()>>> tests{
+  std::vector<std::pair<std::string, std::function<void()>>> tests{
       {"free_flight", freeFlight},
       {"forced_free_motion", forcedFreeMotion},
       {"normal_equilibrium", normalEquilibrium},
@@ -641,11 +809,18 @@ int main(int argc, char** argv) {
       {"rigid_rotation_transports_history", rigidRotationTransportsHistory},
       {"sliding_and_rolling_yield", slidingAndRollingYield},
       {"three_body_contact_chain", threeBodyContactChain},
+      {"decreasing_normal_load_projects_stored_slip", decreasingNormalLoadProjectsStoredSlip},
+      {"coupled_friction_load_reversal", coupledFrictionLoadReversal},
       {"failed_step_does_not_commit", failedStepDoesNotCommit},
 #ifdef SLURRY_USE_PETSC
       {"recovered_retry_writes_no_diagnostics", recoveredRetryWritesNoDiagnostics},
 #endif
       {"production_oblate_contact", productionOblateContact}};
+#ifdef SLURRY_USE_PETSC
+  if (!replayFixture.empty())
+    tests.emplace_back("saved_friction_branch_replay",
+                       [replayFixture] { savedFrictionBranchReplay(replayFixture); });
+#endif
   int failed = 0, ran = 0;
   for (const auto& test : tests) {
     if (!selected.empty() && test.first != selected) continue;
