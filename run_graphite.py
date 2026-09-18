@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""Prepare graphite-water RE-squared plus rough-contact shear; Python standard library only.
+
+Example: python3 run_graphite.py --output runs/quick100 --ranks 16
+Use --dry-run to inspect the Mach-based time mapping without running OpenLB.
+"""
+import argparse
+import copy
+from datetime import datetime, timezone
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for block in iter(lambda: source.read(1048576), b''):
+            value.update(block)
+    return value.hexdigest()
+
+
+def write_json(path, value):
+    Path(path).write_text(json.dumps(value, indent=2, allow_nan=False)+'\n', encoding='utf-8')
+
+
+def positive(value, name, zero=False):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or (value < 0 if zero else value <= 0):
+        raise ValueError(name+' must be finite and '+('nonnegative' if zero else 'positive'))
+    return value
+
+
+def integer(value, name, minimum=0):
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(name+' must be an integer >= '+str(minimum))
+    return value
+
+
+def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=None, end_strain=None):
+    cfg = copy.deepcopy(config)
+    if cfg.get('schema_version') != 2:
+        raise ValueError('Only schema_version=2 is supported by this RE-squared runner')
+    cfg['flow'].setdefault('end_strain', 10.0)
+    defaults = {'particle_tolerance':1e-4,
+                'particle_force_absolute_tolerance_N':1e-15,
+                'particle_torque_absolute_tolerance_N_m':1.65e-21,
+                'contact_gap_tolerance_m':1e-12}
+    for key,value in defaults.items():
+        cfg['numerics'].setdefault(key,value)
+    cfg['numerics'].setdefault('particle_solver', 'petsc')
+    cfg['numerics'].setdefault('particle_max_krylov_iterations', 120)
+    cfg['numerics'].setdefault('solver_diagnostics', True)
+    contact = cfg.setdefault('rough_contact',{})
+    for key,value in {'enabled':True,'roughness_gap_m':2e-9,'sliding_friction':.5,
+                      'tangential_stiffness_N_m':9.0,'rolling_length_m':100e-9,
+                      'rolling_yield_angle_rad':.01}.items():
+        contact.setdefault(key,value)
+    if shear_rate is not None:
+        cfg['flow']['shear_rate_s_inv'] = shear_rate
+    if end_strain is not None:
+        cfg['flow']['end_strain'] = end_strain
+    if target_mach is not None:
+        cfg['numerics']['target_mach'] = target_mach
+    if time_step is not None:
+        cfg['numerics']['time_step_s'] = time_step
+    f, g, p, flow, n, interaction, out = (cfg[k] for k in ('fluid','geometry','particles','flow','numerics','interaction','output'))
+    for group, names in ((f, ('density_kg_m3','dynamic_viscosity_Pa_s','temperature_K')),
+                         (g, ('box_length_m','dx_m')),
+                         (p, ('diameter_m','thickness_m','density_kg_m3')),
+                         (flow, ('shear_rate_s_inv','end_strain')),
+                         (n, ('nu_lattice','target_mach','epsilon_cells')),
+                         (interaction, ('sigma_lj_m','switch_gap_m','cutoff_gap_m'))):
+        for name in names:
+            positive(group[name], name)
+    positive(interaction['hamaker_J'], 'hamaker_J', zero=True)
+    positive(n['time_step_s'], 'time_step_s', zero=True)
+    positive(p['minimum_gap_m'], 'minimum_gap_m', zero=True)
+    integer(p['count'], 'particles.count', 1)
+    integer(p['seed'], 'particles.seed')
+    integer(n['particle_max_substeps'], 'particle_max_substeps', 1)
+    integer(n['particle_max_iterations'], 'particle_max_iterations', 1)
+    integer(n['particle_max_krylov_iterations'], 'particle_max_krylov_iterations', 1)
+    if n['particle_solver'] not in ('petsc', 'legacy'):
+        raise ValueError('particle_solver must be petsc or legacy')
+    if not isinstance(n['solver_diagnostics'], bool):
+        raise ValueError('solver_diagnostics must be boolean')
+    positive(n['particle_tolerance'], 'particle_tolerance')
+    if n['particle_tolerance'] >= 1:
+        raise ValueError('particle_tolerance must be below one')
+    for name in ('particle_force_absolute_tolerance_N','particle_torque_absolute_tolerance_N_m','contact_gap_tolerance_m'):
+        positive(n[name],name)
+    positive(n['lubrication_cutoff_cells'], 'lubrication_cutoff_cells', zero=True)
+    if not isinstance(contact['enabled'],bool):
+        raise ValueError('rough_contact.enabled must be a JSON boolean')
+    for name in ('roughness_gap_m','tangential_stiffness_N_m','rolling_yield_angle_rad'):
+        positive(contact[name],'rough_contact.'+name)
+    for name in ('sliding_friction','rolling_length_m'):
+        positive(contact[name],'rough_contact.'+name,zero=True)
+    if not n['contact_gap_tolerance_m'] < contact['roughness_gap_m'] < interaction['cutoff_gap_m']:
+        raise ValueError('Require contact_gap_tolerance_m < roughness_gap_m < cutoff_gap_m')
+    if contact['enabled'] and p['minimum_gap_m'] < contact['roughness_gap_m']:
+        raise ValueError('particles.minimum_gap_m must be at least rough_contact.roughness_gap_m')
+    integer(max_steps, 'max_steps')
+    integer(out['sample_every_steps'], 'sample_every_steps', 1)
+    integer(out['vtk_every_steps'], 'vtk_every_steps')
+    length, dx, diameter, thickness = g['box_length_m'],g['dx_m'],p['diameter_m'],p['thickness_m']
+    rate, eta, nu_lb = flow['shear_rate_s_inv'],f['dynamic_viscosity_Pa_s'],n['nu_lattice']
+    cells = round(length/dx)
+    if cells < 8 or not math.isclose(length/dx, cells, rel_tol=0, abs_tol=1e-7):
+        raise ValueError('box_length_m / dx_m must be an integer >= 8')
+    if not 0 < thickness <= diameter < length:
+        raise ValueError('Require 0 < thickness <= diameter < box length')
+    if not interaction['sigma_lj_m'] < interaction['switch_gap_m'] < interaction['cutoff_gap_m']:
+        raise ValueError('Require sigma_lj_m < switch_gap_m < cutoff_gap_m')
+    if 2*(diameter+interaction['cutoff_gap_m']) >= length:
+        raise ValueError('Pair cutoff requires 2*(diameter + cutoff_gap) < box length')
+    volume = math.pi*diameter**2*thickness/6
+    phi = p['count']*volume/length**3
+    if phi >= 1:
+        raise ValueError('Particle volume fraction must be below one')
+    # Centered affine flow ux = rate * (y-Ly/2), with LB sound speed 1/sqrt(3).
+    affine_speed = 0.5*rate*length
+    dt = n['time_step_s'] or n['target_mach']*dx/(math.sqrt(3)*affine_speed)
+    rho_num = eta*dt/(nu_lb*dx**2)
+    density_scale = rho_num/f['density_kg_m3']
+    re_phys = f['density_kg_m3']*rate*diameter**2/eta
+    re_num = rho_num*rate*diameter**2/eta
+    steps = math.ceil(flow['end_strain']/(rate*dt))
+    stop = min(steps,max_steps) if max_steps else steps
+    metadata = {
+        'shear_rate_s_inv':rate, 'dt_s':dt,
+        'time_mapping':'manual_time_step' if n['time_step_s'] else 'centered_affine_target_mach',
+        'target_mach':n['target_mach'], 'affine_mach':math.sqrt(3)*affine_speed*dt/dx,
+        'particle_solver':n['particle_solver'],
+        'particle_tolerance':n['particle_tolerance'],
+        'particle_force_absolute_tolerance_N':n['particle_force_absolute_tolerance_N'],
+        'particle_torque_absolute_tolerance_N_m':n['particle_torque_absolute_tolerance_N_m'],
+        'contact_gap_tolerance_m':n['contact_gap_tolerance_m'],
+        'particle_max_substeps':n['particle_max_substeps'],
+        'particle_max_iterations':n['particle_max_iterations'],
+        'particle_max_krylov_iterations':n['particle_max_krylov_iterations'],
+        'solver_diagnostics':n['solver_diagnostics'],
+        'shear_increment_per_step':rate*dt,
+        'nu_lattice':nu_lb, 'tau_lattice':0.5+3*nu_lb,
+        'physical_fluid_re_D':re_phys, 'numerical_fluid_re_D':re_num,
+        'physical_particle_St_D':re_phys*p['density_kg_m3']/f['density_kg_m3'],
+        'numerical_particle_St_D':re_num*p['density_kg_m3']/f['density_kg_m3'],
+        'fluid_inertial_density_kg_m3':rho_num,
+        'particle_inertial_density_kg_m3':p['density_kg_m3']*density_scale,
+        'inertial_density_scale':density_scale,
+        'particle_volume_m3':volume, 'actual_volume_fraction':phi,
+        'actual_mass_fraction':phi*p['density_kg_m3']/(phi*p['density_kg_m3']+(1-phi)*f['density_kg_m3']),
+        'grid_cells_per_direction':cells, 'nominal_bulk_cells':cells**3,
+        'd3q19_single_population_bytes':cells**3*19*8,
+        'thickness_cells':thickness/dx, 'diameter_cells':diameter/dx,
+        'steps_to_requested_end_strain':steps, 'this_run_max_step':stop,
+        'this_run_target_strain':stop*rate*dt,
+        'notes':[
+            'Mach target refers to the centered imposed affine profile; measured maximum Mach includes particle-induced flow.',
+            'Dynamic viscosity is preserved; fluid and particle inertial densities are scaled together.',
+            'At the default target Mach, numerical inertia is deliberately increased for a quick magnitude check; no 10-percent error bound is assumed.',
+            'Re_D uses diameter and St_D is Re_D times the particle/fluid density ratio; these are diagnostics, not run gates.',
+            'The LB time step stays fixed throughout a run. End strain specifies its length, not rheological convergence.'
+        ]
+    }
+    return cfg,metadata
+
+
+def solver_values(cfg, output, particles, max_steps):
+    f,g,p,flow,n,interaction,out = (cfg[k] for k in ('fluid','geometry','particles','flow','numerics','interaction','output'))
+    contact = cfg['rough_contact']
+    return {
+        'shear_rate':flow['shear_rate_s_inv'],
+        'box_x':g['box_length_m'], 'box_y':g['box_length_m'], 'box_z':g['box_length_m'], 'dx':g['dx_m'],
+        'diameter':p['diameter_m'], 'thickness':p['thickness_m'],
+        'rho_particle':p['density_kg_m3'], 'rho_fluid':f['density_kg_m3'],
+        'dynamic_viscosity':f['dynamic_viscosity_Pa_s'],
+        'nu_lattice':n['nu_lattice'], 'target_mach':n['target_mach'], 'time_step_s':n['time_step_s'],
+        'epsilon_cells':n['epsilon_cells'],
+        'particle_max_substeps':n['particle_max_substeps'],
+        'particle_max_iterations':n['particle_max_iterations'],
+        'particle_max_krylov_iterations':n['particle_max_krylov_iterations'],
+        'particle_solver':n['particle_solver'],
+        'solver_diagnostics':int(n['solver_diagnostics']),
+        'particle_tolerance':n['particle_tolerance'],
+        'particle_force_absolute_tolerance':n['particle_force_absolute_tolerance_N'],
+        'particle_torque_absolute_tolerance':n['particle_torque_absolute_tolerance_N_m'],
+        'contact_gap_tolerance':n['contact_gap_tolerance_m'],
+        'lubrication_cutoff_cells':n['lubrication_cutoff_cells'],
+        'rough_contact_enabled':int(contact['enabled']),
+        'roughness_gap':contact['roughness_gap_m'],
+        'sliding_friction':contact['sliding_friction'],
+        'tangential_stiffness':contact['tangential_stiffness_N_m'],
+        'rolling_length':contact['rolling_length_m'],
+        'rolling_yield_angle':contact['rolling_yield_angle_rad'],
+        'hamaker':interaction['hamaker_J'], 'sigma_lj':interaction['sigma_lj_m'],
+        'switch_gap':interaction['switch_gap_m'], 'cutoff_gap':interaction['cutoff_gap_m'],
+        'end_strain':flow['end_strain'], 'max_steps':max_steps,
+        'sample_every':out['sample_every_steps'], 'vtk_every':out['vtk_every_steps'],
+        'output_dir':str(output), 'particles_csv':str(particles)
+    }
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config',type=Path,default=Path(__file__).with_name('config.json'))
+    parser.add_argument('--shear-rate',type=float)
+    parser.add_argument('--target-mach',type=float)
+    parser.add_argument('--time-step',type=float,help='Explicit fixed LB step in seconds; 0 uses target Mach')
+    parser.add_argument('--end-strain',type=float,help='Accumulated strain to run; default config value is 10')
+    parser.add_argument('--max-steps',type=int,default=0,help='Explicit step limit; 0 uses end strain')
+    parser.add_argument('--dry-run',action='store_true')
+    parser.add_argument('--output',type=Path)
+    parser.add_argument('--executable',type=Path,default=Path(__file__).with_name('build')/'current'/'graphiteCouette3d')
+    parser.add_argument('--generator',type=Path,default=Path(__file__).with_name('generate_particles.py'))
+    parser.add_argument('--ranks',type=int,default=1)
+    args=parser.parse_args()
+    try:
+        cfg,meta=resolve(json.loads(args.config.read_text(encoding='utf-8')),args.shear_rate,args.max_steps,
+                         args.target_mach,args.time_step,args.end_strain)
+        integer(args.ranks,'ranks',1)
+        if args.dry_run:
+            print(json.dumps({'config':cfg,'derived':meta},indent=2,allow_nan=False))
+            return 0
+        if args.output is None:
+            raise ValueError('--output is required')
+        output=args.output.expanduser().resolve()
+        executable=args.executable.expanduser().resolve()
+        generator=args.generator.expanduser().resolve()
+        if not executable.is_file() or not os.access(executable,os.X_OK):
+            raise ValueError('Executable not found or not executable: '+str(executable))
+        # Python 3.6 compatibility: capture_output and text require Python 3.7.
+        build_query=subprocess.run([str(executable),'--build-info'],
+                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                                   universal_newlines=True)
+        try:
+            build_info=json.loads(build_query.stdout)
+        except (ValueError,TypeError):
+            raise ValueError('Executable does not provide valid --build-info; rebuild this RE-squared application')
+        if build_query.returncode or not isinstance(build_info,dict) or not isinstance(build_info.get('mpi_enabled'),bool):
+            raise ValueError('Executable did not report its MPI build mode; rebuild this application')
+        if build_info.get('rough_contact') is not True:
+            raise ValueError('Executable predates rough contact and the corrected particle solver; run build_slurry_cpu.sbatch again')
+        if cfg['numerics']['particle_solver'] == 'petsc' and build_info.get('particle_solver') != 'petsc':
+            raise ValueError('This configuration requires the PETSc contact solver. Rebuild with build_slurry_cpu.sbatch before running.')
+        if args.ranks>1 and not build_info['mpi_enabled']:
+            raise ValueError('--ranks > 1 requires an MPI-enabled executable; use build_slurry_cpu.sbatch')
+        if not generator.is_file():
+            raise ValueError('Particle generator not found: '+str(generator))
+        if any((output/name).exists() for name in ('manifest.json','history.csv','resolved_run.cfg','initial_particles.csv')):
+            raise ValueError('Output already contains a run; specify a new --output directory')
+        mpirun=shutil.which('mpirun') if args.ranks>1 else None
+        if args.ranks>1 and not mpirun:
+            raise ValueError('mpirun not found')
+    except (ValueError,OSError,KeyError,TypeError) as error:
+        parser.error(str(error))
+    output.mkdir(parents=True,exist_ok=True)
+    effective=output/'effective_config.json'
+    write_json(effective,cfg)
+    particles=output/'initial_particles.csv'
+    generation=subprocess.run([sys.executable,str(generator),'--config',str(effective),'--output',str(particles)])
+    if generation.returncode:
+        return generation.returncode
+    config_path=output/'resolved_run.cfg'
+    values=solver_values(cfg,output,particles,args.max_steps)
+    with config_path.open('w',encoding='utf-8') as stream:
+        for name,value in values.items():
+            if '\n' in str(value) or '\r' in str(value):
+                raise ValueError('Newline in solver parameter '+name)
+            stream.write(str(name)+'='+str(value)+'\n')
+    argv=([mpirun,'-np',str(args.ranks)] if mpirun else [])+[str(executable),'--config',str(config_path)]
+    write_json(output/'manifest.json',{
+        'created_utc':datetime.now(timezone.utc).isoformat(), 'slurm_job_id':os.environ.get('SLURM_JOB_ID'),
+        'config':cfg,'derived':meta,'ranks':args.ranks,'argv':argv,'executable_build':build_info,
+        'petsc_options':os.environ.get('PETSC_OPTIONS',''),
+        'sha256':{'executable':digest(executable),'driver':digest(__file__),'generator':digest(generator),'particles':digest(particles)}
+    })
+    print(json.dumps(meta,indent=2),flush=True)
+    print('Run directory: '+str(output),flush=True)
+    start=time.monotonic()
+    # Stream directly to stdout and the log. No signal interception or stop files.
+    with (output/'solver.log').open('w',encoding='utf-8') as logfile:
+        process=subprocess.Popen(argv,cwd=str(output),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                                 universal_newlines=True,bufsize=1)
+        for line in process.stdout:
+            print(line,end='',flush=True)
+            logfile.write(line)
+            logfile.flush()
+        rc=process.wait()
+    solver_status=json.loads((output/'status.json').read_text(encoding='utf-8')) if rc==0 else {}
+    status={'exit_code':rc,'wall_seconds':time.monotonic()-start,
+            'status':solver_status.get('status','FAILED') if rc==0 else 'FAILED'}
+    write_json(output/'driver_status.json',status)
+    print(json.dumps(status,indent=2),flush=True)
+    summarizer=output/'summarize_particle_solver.py'
+    if rc!=0 and summarizer.is_file():
+        report=subprocess.run([sys.executable,str(summarizer)],cwd=str(output),
+                              stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                              universal_newlines=True)
+        (output/'particle_solver_summary.txt').write_text(report.stdout,encoding='utf-8')
+        print(report.stdout,end='',flush=True)
+    return rc if rc>=0 else 128-rc
+
+
+if __name__=='__main__':
+    raise SystemExit(main())

@@ -18,4 +18,8 @@ if [[ ! -f "$SLURRY_BASE/slurry/tools/build_slurry.py" ]]; then
     printf 'Submit from your OpenLB base directory, or set SLURRY_ROOT.\n' >&2
     exit 1
 fi
+if [[ -z "${PETSC_DIR:-}" && -z "${PETSC_ARCH:-}" && -f "$SLURRY_BASE/build/petsc/env.sh" ]]; then
+    source "$SLURRY_BASE/build/petsc/env.sh"
+fi
+# The common build prepares PETSc and compiles the single all-case executable.
 exec python3 "$SLURRY_BASE/slurry/tools/build_slurry.py" --mode mpi "$@"
