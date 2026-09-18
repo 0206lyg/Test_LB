@@ -78,6 +78,34 @@ struct TemporaryDiagnostics {
   }
   std::string prefix() const { return (directory / "particle_solver_rank0").string(); }
 };
+
+struct ScopedPetscOptions {
+  struct Saved { std::string name, value; bool present; };
+  std::vector<Saved> saved;
+  explicit ScopedPetscOptions(const std::vector<std::pair<std::string, std::string>>& options) {
+    try {
+      for (const auto& option : options) {
+        char value[4096]{};
+        PetscBool present = PETSC_FALSE;
+        require(PetscOptionsGetString(nullptr, nullptr, option.first.c_str(), value,
+                    sizeof(value), &present) == 0, "read existing PETSc test option");
+        saved.push_back({option.first, value, present == PETSC_TRUE});
+        require(PetscOptionsSetValue(nullptr, option.first.c_str(), option.second.c_str()) == 0,
+                "set scoped PETSc test option");
+      }
+    } catch (...) { restore(); throw; }
+  }
+  ScopedPetscOptions(const ScopedPetscOptions&) = delete;
+  ScopedPetscOptions& operator=(const ScopedPetscOptions&) = delete;
+  void restore() {
+    for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
+      if (it->present) PetscOptionsSetValue(nullptr, it->name.c_str(), it->value.c_str());
+      else PetscOptionsClearValue(nullptr, it->name.c_str());
+    }
+    saved.clear();
+  }
+  ~ScopedPetscOptions() { restore(); }
+};
 #endif
 
 g::ParticleStepSettings settings() {
@@ -600,8 +628,16 @@ void slidingAndRollingYield() {
   nearVector(angular, {}, 1.e-27, 0., "contact common-point angular conservation");
 }
 
-void threeBodyContactChain() {
-  const auto s = settings();
+void threeBodyContactChain(bool staticReaction) {
+  auto s = settings();
+  if (staticReaction) {
+    // The unchanged static-reaction assertion allows 1e-14 N.  Over successive
+    // backward-Euler steps, position errors bounded by the gap resolution can
+    // contribute up to 4*m*gapTolerance/dt^2 to the reaction (a second position
+    // difference).  A 1e-16 m gap tolerance bounds that contribution by 8e-15 N.
+    // The original gap tolerance is covered separately by discrete impulse.
+    s.contactGapTolerance = 1.e-16;
+  }
   const double distance = 2. * radius + s.rough.gap;
   std::vector<g::Body> bodies{sphere({8.e-6 - distance, 10.e-6, 10.e-6}),
                             sphere({8.e-6, 10.e-6, 10.e-6}),
@@ -610,6 +646,8 @@ void threeBodyContactChain() {
   const std::vector<g::Vec3> force{{load, 0., 0.}, {}, {-load, 0., 0.}}, zero(3);
   g::PersistentContactState history;
   for (int k = 0; k < 3; ++k) {
+    const auto previous = bodies;
+    const auto previousHistory = history;
     const auto d = g::advanceParticles(bodies, force, zero, step, k * step, s,
                                      nullptr, &history);
     accepted(d);
@@ -617,8 +655,37 @@ void threeBodyContactChain() {
             "three-body chain must support exactly two normal contacts");
     require(history[0].active && !history[1].active && history[2].active,
             "contact identity must follow ordered particle pairs");
-    near(history[0].normalLoad, load, 5.e-15, 5.e-6, "left chain reaction");
-    near(history[2].normalLoad, load, 5.e-15, 5.e-6, "right chain reaction");
+    if (staticReaction) {
+      near(history[0].normalLoad, load, 5.e-15, 5.e-6, "left chain reaction");
+      near(history[2].normalLoad, load, 5.e-15, 5.e-6, "right chain reaction");
+    }
+    auto netForce = force;
+    for (int i = 0; i < 2; ++i) {
+      const int p = 2 * i;
+      const auto& contact = history[p];
+      require(contact.normalLoad > 0., "loaded chain contacts remain compressive");
+      const auto pairForce = g::add(g::scale(contact.normal, -contact.normalLoad),
+                                    contact.tangentForce);
+      netForce[i] = g::add(netForce[i], pairForce);
+      netForce[i+1] = g::sub(netForce[i+1], pairForce);
+      nearVector(contact.elasticSlip, {}, 1.e-20, 0.,
+                 "normal chain loading creates no tangential spring");
+      nearVector(contact.elasticRoll, {}, 1.e-14, 0.,
+                 "normal chain loading creates no rolling spring");
+      if (k > 0)
+        near(contact.rollingCap, previousHistory[p].rollingCap, 0., 0.,
+             "persistent chain contact retains its birth rolling cap");
+    }
+    for (int i = 0; i < 3; ++i) {
+      const auto inertialForce = g::scale(g::sub(bodies[i].velocity,
+          previous[i].velocity), bodies[i].mass / step);
+      double forceReference = 0.;
+      for (int axis = 0; axis < 3; ++axis)
+        forceReference = std::max(forceReference,
+            std::max(std::abs(netForce[i][axis]), std::abs(inertialForce[axis])));
+      nearVector(inertialForce, netForce[i], s.forceAbsoluteTolerance +
+          s.relativeTolerance * forceReference, 0., "chain discrete impulse balance");
+    }
     for (int i = 0; i < 3; ++i)
       nearVector(bodies[i].position, initial[i].position, 5.e-14, 0.,
                  "balanced multi-contact particle position");
@@ -808,6 +875,68 @@ void failedStepDoesNotCommit() {
 }
 
 #ifdef SLURRY_USE_PETSC
+void nonlinearWorkAccounting(bool failLinearSolve) {
+  auto s = settings();
+  s.maxNewtonIterations = failLinearSolve ? 60 : 2;
+  TemporaryDiagnostics files;
+  s.solverDiagnosticsPrefix = files.prefix();
+  std::vector<std::pair<std::string, std::string>> overrides{
+      {"-gr_npc_snes_max_it", "999"}, {"-gr_snes_max_it", "999"},
+      {"-gr_snes_norm_schedule", "none"}, {"-gr_npc_snes_norm_schedule", "none"}};
+  if (failLinearSolve) {
+    overrides.emplace_back("-gr_npc_ksp_max_it", "1");
+    overrides.emplace_back("-gr_npc_ksp_rtol", "1e-30");
+    overrides.emplace_back("-gr_npc_ksp_atol", "1e-50");
+  }
+  ScopedPetscOptions options(overrides);
+  auto bodies = pairAtGap(s.rough.gap);
+  bodies[0].velocity = {1.e-3, 3.e-3, 0.};
+  bodies[1].velocity = {-1.e-3, -3.e-3, 0.};
+  bodies[0].omega = {10., 20., 30.};
+  bodies[1].omega = {-20., 30., 10.};
+  g::PersistentContactState history{preloadedState(s)};
+  const auto oldHistory = history;
+  std::vector<g::GapCache> cache(1);
+  cache[0].normal = {1., 0., 0.};
+  cache[0].valid = true;
+  const auto oldCache = cache;
+  const std::vector<g::Vec3> zero(2);
+  std::vector<g::Body> output;
+  g::ParticleStepDiagnostics d;
+  std::string error;
+  // Capture the real failed solve's structured diagnostic trace rather than
+  // guessing work from the outer NGMRES iteration count or parsing prose.
+  g::particle_detail::ParticleDiagnosticScope diagnostics(s);
+  const bool success = g::particle_detail::dispatchImplicitStep(
+      bodies, zero, zero, step, 0., s, cache, history, output, d, error,
+      0., step, 1, 0);
+  require(!success, "forced solver-budget or Krylov failure must not be accepted");
+  require(!diagnostics.attempts.empty() && !diagnostics.attempts.back().trace.empty(),
+          "failed nonlinear attempt must retain an actual work-count trace");
+  const auto& trace = diagnostics.attempts.back().trace;
+  int attemptedNewton = 0;
+  bool failedKrylovRecorded = false;
+  for (const auto& row : trace) {
+    attemptedNewton = std::max(attemptedNewton, row.iteration);
+    failedKrylovRecorded = failedKrylovRecorded || row.kspReason < 0;
+    require(row.iteration <= s.maxNewtonIterations,
+            "PETSc option overrides cannot bypass the physical solver's Newton budget");
+  }
+  if (failLinearSolve) {
+    require(attemptedNewton == 1 && failedKrylovRecorded,
+            "an unsuccessful Krylov solve still consumes and records one Newton attempt");
+  } else {
+    require(attemptedNewton == s.maxNewtonIterations,
+            "nested nonlinear options cannot turn two allowed Newton solves into 999");
+  }
+  require(history.size() == oldHistory.size() && identicalContact(history[0], oldHistory[0]),
+          "an exhausted nested solve cannot commit trial contact history");
+  require(cache.size() == oldCache.size() && cache[0].valid == oldCache[0].valid &&
+              cache[0].normal == oldCache[0].normal,
+          "an exhausted nested solve cannot commit a trial geometric cache");
+  require(output.empty(), "an unsuccessful nested solve cannot publish particle output");
+}
+
 void failedContactReleaseDoesNotCommit() {
   auto s = settings();
   // The normal-state update and its new angular balance exceed this budget.
@@ -852,9 +981,9 @@ void recoveredRetryWritesNoDiagnostics() {
   auto s = settings();
   TemporaryDiagnostics files;
   s.solverDiagnosticsPrefix = files.prefix();
-  // A non-principal free rotation is nonlinear even without contact changes.
-  // Four Newton iterations intentionally force a failed large-angle attempt;
-  // smaller physical substeps must recover without writing failure artifacts.
+  // Keep the original four-Newton physical fixture. Acceleration can solve it
+  // directly, so a second independent call injects a three-Newton budget, one
+  // below the full interval's measured cost, to exercise actual retry/no-I/O.
   s.rough.enabled = false;
   s.maxNewtonIterations = 4;
   s.maxSubsteps = 32;
@@ -864,30 +993,35 @@ void recoveredRetryWritesNoDiagnostics() {
                       .232 * mass * radius * radius,
                       .298 * mass * radius * radius};
   rotor.omega = {1.5e5, 3.e5, -2.25e5};
-  std::vector<g::Body> bodies{rotor};
   const auto initialMomentum = g::particle_detail::worldMomentum(rotor);
   const std::vector<g::Vec3> zero(1);
-  const auto d = g::advanceParticles(bodies, zero, zero, step, 0., s);
-  require(d.substeps > 1 && d.substeps <= s.maxSubsteps,
-          "recovery fixture must actually retry with smaller particle timesteps");
-  require(d.maxForceResidualRatio <= 1. && d.maxTorqueResidualRatio <= 1. &&
-          d.contactGapViolation <= s.contactGapTolerance,
-          "recovered outer step must satisfy all physical criteria");
   // For zero applied torque, each accepted substep has
   // |delta L| <= subdt * torqueAbsoluteTolerance / (1-relativeTolerance).
   // The total bound is independent of the number of accepted substeps.
   const double angularAllowance = step * s.torqueAbsoluteTolerance /
       (1. - s.relativeTolerance) + 32. * std::numeric_limits<double>::epsilon() *
       g::norm(initialMomentum);
-  nearVector(g::particle_detail::worldMomentum(bodies[0]), initialMomentum,
-             angularAllowance, 0., "free rotor preserves angular momentum through retries");
-  nearVector(bodies[0].position, rotor.position, 0., 0.,
-             "rotational retries cannot move a force-free particle centre");
-  require(std::filesystem::is_empty(files.directory),
-          "recoverable failed attempts must not write trace, outcome, or replay files");
-  std::cout << "RECOVERED ROTATION: substeps=" << d.substeps
-            << "; Newton=" << d.newtonIterations
-            << "; Krylov=" << d.krylovIterations << '\n';
+  for (const int budget : {4, 3}) {
+    s.maxNewtonIterations = budget;
+    std::vector<g::Body> bodies{rotor};
+    const auto d = g::advanceParticles(bodies, zero, zero, step, 0., s);
+    require(d.substeps >= 1 && d.substeps <= s.maxSubsteps,
+            "rotor must converge within its unchanged particle subdivision limit");
+    if (budget == 3)
+      require(d.substeps > 1, "injected budget must actually trigger a recovered retry");
+    require(d.maxForceResidualRatio <= 1. && d.maxTorqueResidualRatio <= 1. &&
+            d.contactGapViolation <= s.contactGapTolerance,
+            "rotor must satisfy all unchanged physical acceptance criteria");
+    nearVector(g::particle_detail::worldMomentum(bodies[0]), initialMomentum,
+               angularAllowance, 0., "free rotor preserves angular momentum through retries");
+    nearVector(bodies[0].position, rotor.position, 0., 0.,
+               "rotational retries cannot move a force-free particle centre");
+    require(std::filesystem::is_empty(files.directory),
+            "recoverable failed attempts must not write trace, outcome, or replay files");
+    std::cout << "ROTATION VALIDATION: budget=" << budget << "; substeps=" << d.substeps
+              << "; accepted_Newton=" << d.newtonIterations
+              << "; accepted_Krylov=" << d.krylovIterations << '\n';
+  }
 }
 
 void preloadedCollisionWithinProductionBudget() {
@@ -1126,11 +1260,14 @@ int main(int argc, char** argv) {
       {"integrated_yielded_rolling", [] { integratedRollingResponse(true); }},
       {"rigid_rotation_transports_history", rigidRotationTransportsHistory},
       {"sliding_and_rolling_yield", slidingAndRollingYield},
-      {"three_body_contact_chain", threeBodyContactChain},
+      {"three_body_contact_chain", [] { threeBodyContactChain(true); }},
+      {"three_body_contact_chain_discrete_impulse", [] { threeBodyContactChain(false); }},
       {"decreasing_normal_load_projects_stored_slip", decreasingNormalLoadProjectsStoredSlip},
       {"coupled_friction_load_reversal", coupledFrictionLoadReversal},
       {"failed_step_does_not_commit", failedStepDoesNotCommit},
 #ifdef SLURRY_USE_PETSC
+      {"npc_iteration_override_respects_shared_budget", [] { nonlinearWorkAccounting(false); }},
+      {"failed_krylov_attempt_is_counted", [] { nonlinearWorkAccounting(true); }},
       {"failed_contact_release_does_not_commit", failedContactReleaseDoesNotCommit},
       {"recovered_retry_writes_no_diagnostics", recoveredRetryWritesNoDiagnostics},
       {"preloaded_collision_within_production_budget", preloadedCollisionWithinProductionBudget},
