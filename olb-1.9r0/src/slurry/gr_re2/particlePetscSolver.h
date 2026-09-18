@@ -339,7 +339,7 @@ inline PetscErrorCode particlePetscJacobian(SNES,Vec x,Mat,Mat,void* pointer) {
 // Locate that actual transition, relinearize at its outgoing representable
 // state, and propose a Newton predictor from there.  This never changes a force
 // law or a yield tolerance: both Jacobians use branches of evaluated states.
-// The proposal must reduce the ORIGINAL residual and PETSc still backtracks it.
+// The proposal must reduce the ORIGINAL residual before PETSc applies its line search.
 inline PetscErrorCode particlePetscFrictionPreCheck(SNESLineSearch line,Vec x,Vec y,
                                                    PetscBool* changed,void* pointer) {
   auto& c=*static_cast<PetscParticleContext*>(pointer);*changed=PETSC_FALSE;
@@ -449,7 +449,7 @@ inline PetscErrorCode particlePetscFrictionPreCheck(SNESLineSearch line,Vec x,Ve
     }
     // No improving predictor: keep the original direction and let PETSc report
     // its ordinary line-search result.  RestoreLinearization also restores the
-    // original Jacobian before PETSc computes the backtracking slope.
+    // original Jacobian before PETSc continues with the proposed direction.
     return 0;
   }catch(const std::exception& ex){c.error=ex.what();return PETSC_ERR_USER;}
 }
@@ -506,6 +506,8 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
   PetscBool initialized=PETSC_FALSE;PetscInitialized(&initialized);
   if(!initialized){error="PETSc particle solver requires PetscInitialize before advanceParticles";
     writeAttemptTrace(settings,{},outerTime,outerDt,count,substep,dt,0,error);return false;}
+  if(settings.maxLineSearch<1){error="PETSc particle solver requires maxLineSearch >= 1";
+    writeAttemptTrace(settings,{},outerTime,outerDt,count,substep,dt,0,error);return false;}
   const std::size_t n=old.size(),np=n*(n-1)/2;double L=0.;for(const auto& b:old)L=std::max(L,radius(b));
   const double reactionScale=old.front().mass*L/(dt*dt);
   std::vector<int> slots(np,-1);int activeCount=0;Vector q(6*n,0.);
@@ -555,7 +557,7 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     if(!valid){error=context.error;break;}
     if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;
       q.resize(6*n+activeCount,0.);++candidateExpansions;continue;}
-    // Freeze physical tolerance row scales for this solve so backtracking
+    // Freeze physical tolerance row scales for this solve so the line search
     // compares one merit function. Final acceptance still uses current loads.
     context.weights.resize(6*n);
     for(std::size_t i=0;i<n;++i){
@@ -577,8 +579,18 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     checked(SNESSetTolerances(objects.snes,0.,0.,0.,context.iterationBudget,100000));
     checked(SNESSetConvergenceTest(objects.snes,particlePetscConverged,&context,nullptr));
     if(!settings.solverDiagnosticsPrefix.empty())checked(SNESMonitorSet(objects.snes,particlePetscMonitor,&context,nullptr));
-    SNESLineSearch line;checked(SNESGetLineSearch(objects.snes,&line));checked(SNESLineSearchSetType(line,SNESLINESEARCHBT));
-    checked(SNESLineSearchSetTolerances(line,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,settings.maxLineSearch));
+    SNESLineSearch line;checked(SNESGetLineSearch(objects.snes,&line));
+    // At friction corners, monotone backtracking can shrink a locally correct
+    // Newton direction to repeated microscopic steps. PETSc's secant search
+    // samples the residual norm along that direction. Use its standard single
+    // secant iteration, within the existing line-search work cap, and bound the
+    // search to a full Newton step. Final physical acceptance is unchanged.
+#if PETSC_VERSION_GE(3,24,0)
+    checked(SNESLineSearchSetType(line,SNESLINESEARCHSECANT));
+#else
+    checked(SNESLineSearchSetType(line,SNESLINESEARCHL2));
+#endif
+    checked(SNESLineSearchSetTolerances(line,PETSC_DEFAULT,1.,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,std::min(1,settings.maxLineSearch)));
     KSP ksp;PC pc;checked(SNESGetKSP(objects.snes,&ksp));checked(KSPSetType(ksp,KSPGMRES));
     checked(KSPGMRESSetRestart(ksp,settings.maxKrylovIterations));checked(KSPSetTolerances(ksp,.05,1.e-14,PETSC_DEFAULT,settings.maxKrylovIterations));
     checked(KSPSetPCSide(ksp,PC_RIGHT));checked(KSPSetNormType(ksp,KSP_NORM_UNPRECONDITIONED));
@@ -590,6 +602,9 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     if(type && std::string(type)!=SNESNEWTONLS){error="Graphite contact backend requires -gr_snes_type newtonls";break;}
     checked(SNESSetConvergenceTest(objects.snes,particlePetscConverged,&context,nullptr));
     checked(SNESGetLineSearch(objects.snes,&line));
+    const char* lineType=nullptr;PetscInt lineMaxIterations=0;
+    checked(SNESLineSearchGetType(line,&lineType));
+    checked(SNESLineSearchGetTolerances(line,nullptr,nullptr,nullptr,nullptr,nullptr,&lineMaxIterations));
     checked(SNESLineSearchSetPreCheck(line,particlePetscFrictionPreCheck,&context));
     if(!ierr){PetscPushErrorHandler(PetscReturnErrorHandler,nullptr);ierr=SNESSolve(objects.snes,nullptr,objects.x);PetscPopErrorHandler();}
     SNESConvergedReason reason=SNES_CONVERGED_ITERATING;SNESGetConvergedReason(objects.snes,&reason);finalReason=static_cast<int>(reason);
@@ -660,6 +675,7 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     KSPConvergedReason lastLinearReason=KSP_CONVERGED_ITERATING;KSPGetConvergedReason(ksp,&lastLinearReason);
     std::ostringstream message;message<<"PETSc SNES failed: reason="<<finalReason<<" ("<<SNESConvergedReasons[reason]<<")"
       <<", KSP="<<static_cast<int>(lastLinearReason)<<" ("<<KSPConvergedReasons[lastLinearReason]<<")"
+      <<", line search="<<(lineType?lineType:"unknown")<<", line search max_it="<<lineMaxIterations
       <<", ierr="<<ierr<<", Newton="<<totalNewton
       <<", friction branch predictors="<<totalFrictionAttempts<<", descent predictors="<<totalFrictionCorrections
       <<", contact state updates="<<stateUpdates<<", activations="<<activations<<", releases="<<releases;
