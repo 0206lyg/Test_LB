@@ -5,6 +5,9 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#ifdef SLURRY_USE_PETSC
+#include <petscversion.h>
+#endif
 #include "slurry_registry.h"
 
 int main(int argc, char** argv) {
@@ -15,7 +18,14 @@ int main(int argc, char** argv) {
 #else
     std::cout << "false";
 #endif
-    std::cout << ",\"rough_contact\":true,\"revision\":\"slurry-integration-1\",\"engines\":[";
+    std::cout << ",\"rough_contact\":true,\"revision\":\"slurry-petsc-contact-1\"";
+#ifdef SLURRY_USE_PETSC
+    std::cout << ",\"particle_solver\":\"petsc\",\"petsc_version\":\""
+              << PETSC_VERSION_MAJOR << '.' << PETSC_VERSION_MINOR << '.' << PETSC_VERSION_SUBMINOR << '"';
+#else
+    std::cout << ",\"particle_solver\":\"legacy\"";
+#endif
+    std::cout << ",\"engines\":[";
     bool first = true;
     for (const auto& e : slurry_registry) {
       if (!first) std::cout << ',';
