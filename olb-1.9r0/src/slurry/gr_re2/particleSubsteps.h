@@ -9,6 +9,12 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <fstream>
+#include <iomanip>
+#include <deque>
+#ifdef SLURRY_USE_PETSC
+#include <petscsnes.h>
+#endif
 
 // SLURRY SCOPE BEGIN
 namespace slurry { namespace gr_re2 {
@@ -23,7 +29,9 @@ struct ParticleStepSettings {
   double shearRate=100.;
   int maxSubsteps=32;
   int maxNewtonIterations=12;
-  int maxKrylovIterations=36;
+  int maxKrylovIterations=120;
+  std::string solverBackend="petsc";
+  std::string solverDiagnosticsPrefix;
   int maxLineSearch=14;
   double relativeTolerance=1.e-7;
   double forceAbsoluteTolerance=1.e-15;
@@ -113,7 +121,7 @@ struct Evaluation {
   std::vector<Body> bodies;
   std::vector<GapCache> cache;
   PersistentContactState contacts;
-  std::vector<double> gaps;
+  std::vector<double> gaps,normalLoads,forceReference,torqueReference;
   std::vector<PairLinearization> pairs;
   ParticleStepDiagnostics diagnostic;
 };
@@ -129,6 +137,8 @@ struct Residual {
   double dt,time,lengthScale,reactionScale;
   int activeCount;
   mutable int evaluations=0;
+  bool complementarity=false;
+  const std::vector<unsigned char>* engagementOverride=nullptr;
 
   bool operator()(const Vector& q,Evaluation& e,std::string& error) const {
     ++evaluations;
@@ -136,6 +146,7 @@ struct Residual {
       const std::size_t n=old.size(),np=n*(n-1)/2;
       e=Evaluation{};e.bodies=old;e.cache=startingCache;
       e.contacts.resize(np);e.gaps.assign(np,std::numeric_limits<double>::infinity());
+      e.normalLoads.assign(np,0.);e.forceReference.resize(n);e.torqueReference.resize(n);
       e.residual.assign(6*n+activeCount,0.);
       std::vector<Vec3> force=externalForce,torque=externalTorque;
       for(std::size_t i=0;i<n;++i) {
@@ -191,8 +202,13 @@ struct Residual {
         if(settings.rough.enabled) {
           e.diagnostic.contactGapViolation=std::max(e.diagnostic.contactGapViolation,
               std::max(0.,settings.rough.gap-p.gap));
-          const bool active=linear.slot>=0;
-          const double normalLoad=active?q[6*n+linear.slot]*reactionScale:0.;
+          const bool candidate=linear.slot>=0;
+          const double normalLoad=candidate?q[6*n+linear.slot]*reactionScale:0.;
+          e.normalLoads[index]=normalLoad;
+          const bool active=candidate && (!complementarity || (engagementOverride
+              ? (*engagementOverride)[index]!=0
+              : p.gap<=settings.rough.gap+settings.contactGapTolerance
+                && (normalLoad>0. || startingContacts[index].active)));
           double adhesiveBirthForce=0.;
           if(active && !startingContacts[index].active) {
             Body birthImage=image;
@@ -200,17 +216,25 @@ struct Residual {
             const auto birth=evaluatePair(e.bodies[i],birthImage,settings.pair);
             adhesiveBirthForce=std::max(0.,dot(birth.forceI,birth.normal));
           }
-          const auto contact=roughContact(e.bodies[i],image,p.normal,p.leverI,p.leverJ,
+          auto contact=roughContact(e.bodies[i],image,p.normal,p.leverI,p.leverJ,
               normalLoad,adhesiveBirthForce,dt,startingContacts[index],settings.rough,active);
+          // A candidate may be open: only its algebraic normal multiplier enters
+          // momentum. It must not acquire tangential or rolling history.
+          if(candidate && !active) {
+            contact.normalForce=scale(p.normal,-normalLoad);contact.forceI=contact.normalForce;
+            contact.leverI=linear.leverI;contact.leverJ=linear.leverJ;
+            contact.torqueI=cross(linear.leverI,contact.forceI);
+            contact.torqueJ=scale(cross(linear.leverJ,contact.forceI),-1.);
+          }
           e.contacts[index]=contact.candidateState;
           linear.contact=contact;
-          if(active) {
+          if(candidate) {
             force[i]=add(force[i],contact.forceI);force[j]=sub(force[j],contact.forceI);
             torque[i]=add(torque[i],contact.torqueI);torque[j]=add(torque[j],contact.torqueJ);
             addMoment(e.diagnostic.contactNormalMoment,contact.normalForce,rij);
             addMoment(e.diagnostic.contactTangentialMoment,contact.tangentForce,rij);
             e.diagnostic.maxForce=std::max(e.diagnostic.maxForce,norm(contact.forceI));
-            ++e.diagnostic.contacts;
+            e.diagnostic.contacts+=active?1:0;
             e.diagnostic.slidingContacts+=contact.sliding?1:0;
             e.diagnostic.rollingContacts+=contact.rolling?1:0;
             e.residual[6*n+linear.slot]=(p.gap-settings.rough.gap)/lengthScale;
@@ -219,7 +243,7 @@ struct Residual {
           e.diagnostic.elasticContactEnergy+=contact.elasticEnergy;
           // Filled below with the analytic constitutive tangents supplied by the
           // return map.  The Newton product also retains geometry derivatives.
-          if(active) {
+          if(candidate) {
             for(int k=0;k<9;++k) {
               linear.resistance[k]-=contact.dForceDSlipVelocity[k];
               linear.rollingResistance[k]-=contact.dTorqueDRollVelocity[k];
@@ -245,6 +269,7 @@ struct Residual {
           fCurrent=std::max(fCurrent,std::max(std::abs(inertialForce[c]),std::abs(force[i][c])));
           tCurrent=std::max(tCurrent,std::max(std::abs(inertialTorque[c]),std::abs(torque[i][c])));
         }
+        e.forceReference[i]=fCurrent;e.torqueReference[i]=tCurrent;
         e.diagnostic.maxForceResidualRatio=std::max(e.diagnostic.maxForceResidualRatio,
             fError/(settings.forceAbsoluteTolerance+settings.relativeTolerance*fCurrent));
         e.diagnostic.maxTorqueResidualRatio=std::max(e.diagnostic.maxTorqueResidualRatio,
@@ -602,6 +627,8 @@ inline bool implicitStep(const std::vector<Body>& old,const std::vector<Vec3>& f
   error=message.str();return false;
 }
 
+#include "particlePetscSolver.h"
+
 } // namespace particle_detail
 
 inline ParticleStepDiagnostics evaluateParticleState(
@@ -688,13 +715,14 @@ inline ParticleStepDiagnostics advanceParticles(
   std::vector<GapCache> originalCache=(persistentCache && persistentCache->size()==pairs)
       ?*persistentCache:std::vector<GapCache>(pairs);
   std::string failure;
+  particle_detail::ParticleDiagnosticScope diagnosticScope(settings);
   for(int count=1;count<=settings.maxSubsteps;count*=2) {
     auto working=bodies;auto cache=originalCache;auto contacts=originalContacts;ParticleStepDiagnostics total;
     total.substeps=count;const double subdt=dt/count;bool okay=true;
     for(int substep=0;substep<count;++substep) {
       std::vector<Body> next;ParticleStepDiagnostics d;
-      if(!particle_detail::implicitStep(working,hydroForce,hydroTorque,subdt,time+substep*subdt,
-                                       settings,cache,contacts,next,d,failure)) {okay=false;break;}
+      if(!particle_detail::dispatchImplicitStep(working,hydroForce,hydroTorque,subdt,time+substep*subdt,
+                                       settings,cache,contacts,next,d,failure,time,dt,count,substep)) {okay=false;break;}
       working=std::move(next);
       total.minGap=std::min(total.minGap,d.minGap);total.maxForce=std::max(total.maxForce,d.maxForce);
       total.energyAtEnd=d.energyAtEnd;total.activePairs=d.activePairs;
@@ -716,12 +744,16 @@ inline ParticleStepDiagnostics advanceParticles(
       particle_detail::addMatrix(total.contactTangentialMoment,d.contactTangentialMoment,weight);
     }
     if(okay) {
+      // Recoverable retries are discarded with the bounded in-memory trace.
+      // Routine successful timesteps produce no diagnostic filesystem traffic.
       bodies=std::move(working);if(persistentCache)*persistentCache=std::move(cache);
       if(persistentContacts)*persistentContacts=std::move(contacts);
       return total;
     }
     if(count>settings.maxSubsteps/2)break;
   }
+  diagnosticScope.flushFailure();
+  particle_detail::writeOuterOutcome(settings,time,dt,settings.maxSubsteps,false);
   std::ostringstream message;message<<"Particle solve failed within the configured "<<settings.maxSubsteps
       <<" particle-only subdivisions at t="<<time<<" s and fixed dt_LB="<<dt<<" s: "<<failure
       <<". The global LB timestep was not changed.";
@@ -732,3 +764,4 @@ inline ParticleStepDiagnostics advanceParticles(
 
 } } // SLURRY SCOPE END
 #endif
+

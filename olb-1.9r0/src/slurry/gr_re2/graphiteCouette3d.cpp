@@ -33,6 +33,29 @@ namespace fs=std::filesystem;
 using Clock=std::chrono::steady_clock;
 static double seconds(Clock::time_point t){return std::chrono::duration<double>(Clock::now()-t).count();}
 
+// OpenLB initializes MPI first. PETSc therefore does not own MPI finalization.
+struct ParticleSolverRuntime {
+  bool ownsPetsc=false;
+  explicit ParticleSolverRuntime(const Config& c) {
+    if(c.particle_solver!="petsc")return;
+#ifdef SLURRY_USE_PETSC
+    PetscBool initialized=PETSC_FALSE;
+    if(PetscInitialized(&initialized))throw std::runtime_error("Cannot query PETSc initialization");
+    if(!initialized){
+      if(PetscInitializeNoArguments())throw std::runtime_error("PETSc initialization failed");
+      ownsPetsc=true;
+    }
+#else
+    throw std::runtime_error("PETSc particle solver requested, but this executable was not built with PETSc. Run build_slurry_cpu.sbatch.");
+#endif
+  }
+  ~ParticleSolverRuntime(){
+#ifdef SLURRY_USE_PETSC
+    if(ownsPetsc)PetscFinalize();
+#endif
+  }
+};
+
 std::vector<std::array<T,7>> readParticles(const Config& c){
   std::ifstream in(c.particles_csv);if(!in)throw std::runtime_error("Cannot read particles_csv: "+c.particles_csv);
   std::string line;std::getline(in,line);
@@ -139,6 +162,10 @@ void simulate(const Config& c){
   solver.nearField.viscosity=c.dynamic_viscosity;solver.nearField.matchingGap=c.lubrication_cutoff_cells*c.dx;
   solver.nearField.enabled=c.lubrication_cutoff_cells>0;
   solver.maxSubsteps=c.particle_max_substeps;solver.maxNewtonIterations=c.particle_max_iterations;solver.relativeTolerance=c.particle_tolerance;
+  solver.maxKrylovIterations=c.particle_max_krylov_iterations;
+  solver.solverBackend=c.particle_solver;
+  if(c.solver_diagnostics)solver.solverDiagnosticsPrefix=(fs::path(c.output_dir)/
+      ("particle_solver_rank"+std::to_string(singleton::mpi().getRank()))).string();
   solver.forceAbsoluteTolerance=c.particle_force_absolute_tolerance;
   solver.torqueAbsoluteTolerance=c.particle_torque_absolute_tolerance;
   solver.contactGapTolerance=c.contact_gap_tolerance;
@@ -163,6 +190,13 @@ void simulate(const Config& c){
      <<" sliding_friction="<<c.sliding_friction<<" tangential_stiffness_N_m="<<c.tangential_stiffness
      <<" rolling_length_nm="<<c.rolling_length*1.e9<<" rolling_yield_angle_rad="<<c.rolling_yield_angle
      <<" end_strain="<<c.end_strain<<std::endl;
+  log<<"particle_solver="<<c.particle_solver<<" particle_tolerance="<<c.particle_tolerance
+     <<" force_absolute_tolerance_N="<<c.particle_force_absolute_tolerance
+     <<" torque_absolute_tolerance_N_m="<<c.particle_torque_absolute_tolerance
+     <<" contact_gap_tolerance_m="<<c.contact_gap_tolerance
+     <<" max_substeps="<<c.particle_max_substeps<<" max_newton_iterations="<<c.particle_max_iterations
+     <<" max_krylov_iterations="<<c.particle_max_krylov_iterations
+     <<" solver_diagnostics="<<c.solver_diagnostics<<std::endl;
   std::ofstream history,poses;
   if(singleton::mpi().isMainProcessor()){
     std::ofstream meta(fs::path(c.output_dir)/"mapping.json");
@@ -257,7 +291,9 @@ int runCase(int argc,char** argv){
       if(singleton::mpi().isMainProcessor())std::cout<<"graphiteCouette3d --config run.cfg [--max-steps N]\n";
       return 0;
     }
-    simulate(parseConfig(argc,argv));return 0;
+    const auto config=parseConfig(argc,argv);
+    ParticleSolverRuntime particleRuntime(config);
+    simulate(config);return 0;
   }catch(const std::exception& e){
     std::cerr<<"graphiteCouette3d: "<<e.what()<<std::endl;
 #ifdef PARALLEL_MODE_MPI
