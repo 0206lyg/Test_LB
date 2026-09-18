@@ -183,6 +183,10 @@ def render(report):
                      + "; rolling=" + display(last.get("rolling_contacts"))
                      + "; rejected domain evaluations=" + display(last.get("domain_errors"))
                      + "; KSP reason=" + display(last.get("ksp_reason")))
+    if "friction_branch_attempts" in last:
+        lines.append("Friction boundary corrections: attempts="
+                     + display(last.get("friction_branch_attempts"))
+                     + "; descent directions=" + display(last.get("friction_branch_corrections")))
     lines.append("Final iteration rows (force/torque/complementarity ratios pass at <=1):")
     lines.append("  iter       force      torque     contact   step_frac    KSP_residual"
                  + ("   active  added removed expand" if has_contacts else ""))
