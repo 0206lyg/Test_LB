@@ -53,6 +53,9 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
                 'contact_gap_tolerance_m':1e-12}
     for key,value in defaults.items():
         cfg['numerics'].setdefault(key,value)
+    cfg['numerics'].setdefault('particle_solver', 'petsc')
+    cfg['numerics'].setdefault('particle_max_krylov_iterations', 120)
+    cfg['numerics'].setdefault('solver_diagnostics', True)
     contact = cfg.setdefault('rough_contact',{})
     for key,value in {'enabled':True,'roughness_gap_m':2e-9,'sliding_friction':.5,
                       'tangential_stiffness_N_m':9.0,'rolling_length_m':100e-9,
@@ -82,6 +85,11 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
     integer(p['seed'], 'particles.seed')
     integer(n['particle_max_substeps'], 'particle_max_substeps', 1)
     integer(n['particle_max_iterations'], 'particle_max_iterations', 1)
+    integer(n['particle_max_krylov_iterations'], 'particle_max_krylov_iterations', 1)
+    if n['particle_solver'] not in ('petsc', 'legacy'):
+        raise ValueError('particle_solver must be petsc or legacy')
+    if not isinstance(n['solver_diagnostics'], bool):
+        raise ValueError('solver_diagnostics must be boolean')
     positive(n['particle_tolerance'], 'particle_tolerance')
     if n['particle_tolerance'] >= 1:
         raise ValueError('particle_tolerance must be below one')
@@ -129,6 +137,15 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         'shear_rate_s_inv':rate, 'dt_s':dt,
         'time_mapping':'manual_time_step' if n['time_step_s'] else 'centered_affine_target_mach',
         'target_mach':n['target_mach'], 'affine_mach':math.sqrt(3)*affine_speed*dt/dx,
+        'particle_solver':n['particle_solver'],
+        'particle_tolerance':n['particle_tolerance'],
+        'particle_force_absolute_tolerance_N':n['particle_force_absolute_tolerance_N'],
+        'particle_torque_absolute_tolerance_N_m':n['particle_torque_absolute_tolerance_N_m'],
+        'contact_gap_tolerance_m':n['contact_gap_tolerance_m'],
+        'particle_max_substeps':n['particle_max_substeps'],
+        'particle_max_iterations':n['particle_max_iterations'],
+        'particle_max_krylov_iterations':n['particle_max_krylov_iterations'],
+        'solver_diagnostics':n['solver_diagnostics'],
         'shear_increment_per_step':rate*dt,
         'nu_lattice':nu_lb, 'tau_lattice':0.5+3*nu_lb,
         'physical_fluid_re_D':re_phys, 'numerical_fluid_re_D':re_num,
@@ -168,6 +185,9 @@ def solver_values(cfg, output, particles, max_steps):
         'epsilon_cells':n['epsilon_cells'],
         'particle_max_substeps':n['particle_max_substeps'],
         'particle_max_iterations':n['particle_max_iterations'],
+        'particle_max_krylov_iterations':n['particle_max_krylov_iterations'],
+        'particle_solver':n['particle_solver'],
+        'solver_diagnostics':int(n['solver_diagnostics']),
         'particle_tolerance':n['particle_tolerance'],
         'particle_force_absolute_tolerance':n['particle_force_absolute_tolerance_N'],
         'particle_torque_absolute_tolerance':n['particle_torque_absolute_tolerance_N_m'],
@@ -226,9 +246,11 @@ def main():
         if build_query.returncode or not isinstance(build_info,dict) or not isinstance(build_info.get('mpi_enabled'),bool):
             raise ValueError('Executable did not report its MPI build mode; rebuild this application')
         if build_info.get('rough_contact') is not True:
-            raise ValueError('Executable predates rough contact and the corrected particle solver; run build_graphite_cpu.sbatch again')
+            raise ValueError('Executable predates rough contact and the corrected particle solver; run build_slurry_cpu.sbatch again')
+        if cfg['numerics']['particle_solver'] == 'petsc' and build_info.get('particle_solver') != 'petsc':
+            raise ValueError('This configuration requires the PETSc contact solver. Rebuild with build_slurry_cpu.sbatch before running.')
         if args.ranks>1 and not build_info['mpi_enabled']:
-            raise ValueError('--ranks > 1 requires an MPI-enabled executable; use build_graphite_cpu.sbatch')
+            raise ValueError('--ranks > 1 requires an MPI-enabled executable; use build_slurry_cpu.sbatch')
         if not generator.is_file():
             raise ValueError('Particle generator not found: '+str(generator))
         if any((output/name).exists() for name in ('manifest.json','history.csv','resolved_run.cfg','initial_particles.csv')):
@@ -256,6 +278,7 @@ def main():
     write_json(output/'manifest.json',{
         'created_utc':datetime.now(timezone.utc).isoformat(), 'slurm_job_id':os.environ.get('SLURM_JOB_ID'),
         'config':cfg,'derived':meta,'ranks':args.ranks,'argv':argv,'executable_build':build_info,
+        'petsc_options':os.environ.get('PETSC_OPTIONS',''),
         'sha256':{'executable':digest(executable),'driver':digest(__file__),'generator':digest(generator),'particles':digest(particles)}
     })
     print(json.dumps(meta,indent=2),flush=True)
@@ -275,6 +298,13 @@ def main():
             'status':solver_status.get('status','FAILED') if rc==0 else 'FAILED'}
     write_json(output/'driver_status.json',status)
     print(json.dumps(status,indent=2),flush=True)
+    summarizer=output/'summarize_particle_solver.py'
+    if rc!=0 and summarizer.is_file():
+        report=subprocess.run([sys.executable,str(summarizer)],cwd=str(output),
+                              stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                              universal_newlines=True)
+        (output/'particle_solver_summary.txt').write_text(report.stdout,encoding='utf-8')
+        print(report.stdout,end='',flush=True)
     return rc if rc>=0 else 128-rc
 
 
