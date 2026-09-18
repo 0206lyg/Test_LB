@@ -258,6 +258,18 @@ g::RoughContactState preloadedState(const g::ParticleStepSettings& s) {
   return state;
 }
 
+g::RoughContactState zeroNormalRollingState(const g::ParticleStepSettings& s) {
+  auto state = preloadedState(s);
+  state.normalLoad = 0.;
+  state.elasticSlip = {};
+  state.tangentForce = {};
+  state.elasticRoll = {0., 0., .25 * s.rough.rollingYieldAngle};
+  state.rollingTorque = g::scale(state.elasticRoll, -state.rollingStiffness);
+  state.elasticEnergy = .5 * state.rollingStiffness *
+      g::dot(state.elasticRoll, state.elasticRoll);
+  return state;
+}
+
 void separatingContactClearsHistory() {
   const auto s = settings();
   auto bodies = pairAtGap(s.rough.gap);
@@ -285,6 +297,182 @@ void separatingContactClearsHistory() {
   accepted(g::advanceParticles(bodies, force, zero, step, step, s, nullptr, &history));
   near(history[0].releasedEnergy, 0., 1.e-29, 0.,
        "released elasticity is not counted a second time");
+}
+
+void zeroNormalLoadRetainsRollingUntilRelease() {
+  const auto s = settings();
+  auto bodies = pairAtGap(s.rough.gap);
+  const auto state = zeroNormalRollingState(s);
+  g::PersistentContactState history{state};
+  const std::vector<g::Vec3> zero(2);
+  const std::vector<g::Vec3> torque{g::scale(state.rollingTorque, -1.),
+                                   state.rollingTorque};
+  std::vector<g::GapCache> cache;
+  for (int k = 0; k < 3; ++k) {
+    const auto d = g::advanceParticles(bodies, zero, torque, step, k * step, s,
+                                      &cache, &history);
+    accepted(d);
+    require(d.contactReleases == 0,
+            "zero normal load alone cannot trigger a contact release update");
+    require(history[0].active, "zero normal load must not erase a closed adhesive contact");
+    near(history[0].normalLoad, 0., s.forceAbsoluteTolerance, 0.,
+         "closed adhesive rolling equilibrium needs no normal reaction");
+    nearVector(history[0].rollingTorque, state.rollingTorque, 2.e-22, 1.e-7,
+               "finite adhesive rolling torque survives zero normal reaction");
+    near(history[0].rollingCap, state.rollingCap, 1.e-27, 1.e-12,
+         "zero normal load preserves the rolling cap at contact birth");
+    near(history[0].releasedEnergy, 0., 1.e-29, 0.,
+         "a closed zero-load contact does not release stored energy");
+  }
+  const auto beforeRelease = bodies;
+  const double storedEnergy = history[0].elasticEnergy;
+  // The free normal displacement is only twice the configured gap tolerance.
+  // Losing the finite rolling torque at this transition must be solved in the
+  // same step, rather than accepting a stale angular balance or erasing history
+  // during an intermediate line-search trial.
+  const double separatingForce = mass * s.contactGapTolerance / (step * step);
+  const std::vector<g::Vec3> force{{-separatingForce, 0., 0.},
+                                  {separatingForce, 0., 0.}};
+  const auto released = g::advanceParticles(bodies, force, torque, step, 3. * step,
+                                            s, &cache, &history);
+  accepted(released);
+  require(released.contactStateUpdates > 0 && released.contactReleases > 0,
+          "release fixture exercises the normal-contact state update");
+  require(!history[0].active, "accepted separation releases the adhesive contact");
+  require(g::closestEllipsoidGap(bodies[0], bodies[1]).gap >
+              s.rough.gap + s.contactGapTolerance,
+          "release fixture actually crosses the normal-contact tolerance");
+  nearVector(history[0].elasticSlip, {}, 1.e-24, 0., "release clears stored slip");
+  nearVector(history[0].elasticRoll, {}, 1.e-18, 0., "release clears stored roll");
+  nearVector(history[0].rollingTorque, {}, 1.e-28, 0., "release clears rolling torque");
+  near(history[0].rollingCap, 0., 1.e-28, 0., "release clears the old birth cap");
+  near(history[0].releasedEnergy, storedEnergy, 1.e-28, 1.e-8,
+       "accepted release accounts for the stored adhesive energy exactly once");
+  for (int i = 0; i < 2; ++i) {
+    nearVector(bodies[i].velocity,
+        g::add(beforeRelease[i].velocity, g::scale(force[i], step / mass)),
+        2.e-11, 1.e-7, "released bodies follow the external normal impulse");
+    nearVector(bodies[i].omega,
+        g::add(beforeRelease[i].omega,
+               g::scale(torque[i], step / beforeRelease[i].inertiaBody[2])),
+        2.e-5, 1.e-6, "released rolling torque participates in the angular solve");
+  }
+  accepted(g::advanceParticles(bodies, force, torque, step, 4. * step, s,
+                              &cache, &history));
+  near(history[0].releasedEnergy, 0., 1.e-29, 0.,
+       "a later open step cannot release the same elastic energy again");
+}
+
+void recontactCreatesFreshAdhesiveHistory() {
+  const auto s = settings();
+  const auto bodies = pairAtGap(s.rough.gap);
+  const auto old = preloadedState(s);
+  const auto released = g::roughContact(bodies[0], bodies[1], {1., 0., 0.},
+      {radius, 0., 0.}, {-radius, 0., 0.}, 0., 0., step, old, s.rough, false);
+  require(!released.candidateState.active, "release candidate is inactive");
+  const auto stillClosed = g::roughContact(bodies[0], bodies[1], {1., 0., 0.},
+      {radius, 0., 0.}, {-radius, 0., 0.}, load, 0., step, old, s.rough, true);
+  nearVector(stillClosed.candidateState.elasticRoll, old.elasticRoll, 1.e-18, 1.e-12,
+             "an uncommitted release trial cannot erase accepted rolling history");
+  near(stillClosed.candidateState.rollingCap, old.rollingCap, 1.e-28, 1.e-12,
+       "an uncommitted release trial cannot erase the accepted birth cap");
+  constexpr double newBirthForce = 3.e-9;
+  const auto reborn = g::roughContact(bodies[0], bodies[1], {1., 0., 0.},
+      {radius, 0., 0.}, {-radius, 0., 0.}, load, newBirthForce, step,
+      released.candidateState, s.rough, true);
+  require(reborn.candidateState.active, "recontact creates a fresh active state");
+  near(reborn.candidateState.rollingCap, s.rough.rollingLength * newBirthForce,
+       1.e-28, 1.e-12, "recontact uses its new adhesive birth force");
+  near(reborn.candidateState.rollingStiffness,
+       s.rough.rollingLength * newBirthForce / s.rough.rollingYieldAngle,
+       1.e-26, 1.e-12, "recontact creates its own rolling stiffness");
+  nearVector(reborn.candidateState.elasticSlip, {}, 1.e-24, 0.,
+             "recontact cannot inherit a released sliding spring");
+  nearVector(reborn.candidateState.elasticRoll, {}, 1.e-18, 0.,
+             "recontact cannot inherit a released rolling spring");
+  nearVector(reborn.rollingTorque, {}, 1.e-28, 0.,
+             "recontact at rest has no stale rolling torque");
+  near(reborn.releasedEnergy, 0., 1.e-29, 0.,
+       "recontact cannot count an earlier release twice");
+}
+
+void releasedAdhesiveContactStaysOpenInsideGapTolerance() {
+  const auto s = settings();
+  auto ellipsoid = sphere({});
+  ellipsoid.axes = {radius, .5 * radius, .5 * radius};
+  ellipsoid.rotation = g::rotationIncrement({0., 0., .25 * std::acos(-1.)});
+  ellipsoid.inertiaBody = {.1 * mass * radius * radius,
+                       .25 * mass * radius * radius,
+                       .25 * mass * radius * radius};
+  const g::Vec3 normal{1., 0., 0.}, centre{8.e-6, 10.e-6, 10.e-6};
+  const auto shape = g::rotatedDiagonal(ellipsoid.rotation,
+      {radius * radius, .25 * radius * radius, .25 * radius * radius});
+  const auto shapeNormal = g::mul(shape, normal);
+  const auto support = g::scale(shapeNormal, 1. / std::sqrt(g::dot(normal, shapeNormal)));
+  ellipsoid.position = g::sub(g::sub(centre, support), g::scale(normal, .5 * s.rough.gap));
+  std::vector<g::Body> bodies{ellipsoid,
+      sphere(g::add(centre, g::scale(normal, radius + .5 * s.rough.gap)))};
+  const auto initial = bodies;
+  near(g::closestEllipsoidGap(bodies[0], bodies[1]).gap, s.rough.gap,
+       1.e-18, 0., "aspherical chatter fixture starts at the rough-contact surface");
+
+  // A tilted ellipsoid couples an applied rolling torque to its normal gap.
+  // With the old spring retained, the normal loading alone opens by 1.25*tol.
+  // Releasing that spring lets the external torque rotate the ellipsoid, so
+  // the gap then returns to approximately +0.75*tol without compressive load.
+  // This is an admissible open state, not a reason to resurrect the old spring.
+  const double supportDerivative = -.75 * radius * radius /
+      (2. * std::sqrt(.625 * radius * radius));
+  const double releasedAngle = .5 * s.contactGapTolerance / supportDerivative;
+  const double rollingMagnitude = -releasedAngle * ellipsoid.inertiaBody[2] / (step * step);
+  auto state = zeroNormalRollingState(s);
+  state.normal = normal;
+  state.elasticRoll = {0., 0., -.25 * s.rough.rollingYieldAngle};
+  state.rollingStiffness = rollingMagnitude / (.25 * s.rough.rollingYieldAngle);
+  state.rollingCap = state.rollingStiffness * s.rough.rollingYieldAngle;
+  state.rollingTorque = g::scale(state.elasticRoll, -state.rollingStiffness);
+  state.elasticEnergy = .5 * state.rollingStiffness * g::dot(state.elasticRoll, state.elasticRoll);
+  g::PersistentContactState history{state};
+  std::vector<g::GapCache> cache(1);
+  cache[0].valid = true;
+  cache[0].normal = normal;
+  const double openingForce = .625 * mass * s.contactGapTolerance / (step * step);
+  const std::vector<g::Vec3> force{{-openingForce, 0., 0.}, {openingForce, 0., 0.}};
+  const std::vector<g::Vec3> torque{g::scale(state.rollingTorque, -1.), state.rollingTorque};
+  const auto d = g::advanceParticles(bodies, force, torque, step, 0., s, &cache, &history);
+  accepted(d);
+  require(d.contactReleases == 1 && d.contactActivations == 0,
+          "an unloaded released contact must not chatter back into its old state");
+  require(!history[0].active, "released contact stays open within the existing gap tolerance");
+  const double slack = g::closestEllipsoidGap(bodies[0], bodies[1]).gap - s.rough.gap;
+  require(slack > .5 * s.contactGapTolerance && slack < .95 * s.contactGapTolerance,
+          "rolling-coupled endpoint lies inside the positive gap tolerance band");
+  near(history[0].normalLoad, 0., 0., 0., "open chatter endpoint has zero normal reaction");
+  nearVector(history[0].elasticSlip, {}, 0., 0., "released slip cannot be resurrected");
+  nearVector(history[0].elasticRoll, {}, 0., 0., "released rolling spring cannot be resurrected");
+  near(history[0].rollingCap, 0., 0., 0., "released birth cap cannot be resurrected");
+  near(history[0].releasedEnergy, state.elasticEnergy, 1.e-29, 1.e-10,
+       "chatter prevention still accounts for released elastic energy once");
+  for (int i = 0; i < 2; ++i) {
+    nearVector(bodies[i].velocity, g::scale(force[i], step / mass), 2.e-11, 1.e-7,
+               "open chatter endpoint satisfies the external linear impulse");
+    near(bodies[i].omega[2], step * torque[i][2] / initial[i].inertiaBody[2],
+         2.e-5, 1.e-6, "open chatter endpoint satisfies the external angular impulse");
+  }
+  // A later resolved compression must still reactivate this genuinely released
+  // pair. This fixture has no current pair attraction, so its newly born rolling
+  // cap is zero: the historical adhesive spring must never reappear.
+  const std::vector<g::Vec3> compression{{load, 0., 0.}, {-load, 0., 0.}}, zero(2);
+  const auto recontact = g::advanceParticles(bodies, compression, zero, step, step,
+                                            s, &cache, &history);
+  accepted(recontact);
+  require(recontact.contactActivations > 0 && history[0].active &&
+              history[0].normalLoad > 1000. * s.forceAbsoluteTolerance,
+          "a later resolved compressive reaction reactivates the released pair");
+  near(history[0].rollingCap, 0., 0., 0., "recontact uses its new zero-adhesion birth cap");
+  nearVector(history[0].elasticRoll, {}, 0., 0., "resolved recontact cannot revive old rolling strain");
+  nearVector(history[0].rollingTorque, {}, 0., 0., "resolved recontact cannot revive old rolling torque");
+  near(history[0].releasedEnergy, 0., 0., 0., "resolved recontact cannot release old energy twice");
 }
 
 void slidingRollingHistoryPersistence() {
@@ -620,6 +808,46 @@ void failedStepDoesNotCommit() {
 }
 
 #ifdef SLURRY_USE_PETSC
+void failedContactReleaseDoesNotCommit() {
+  auto s = settings();
+  // The normal-state update and its new angular balance exceed this budget.
+  // Rejecting that outer step must undo every attempted contact release.
+  s.maxNewtonIterations = 2;
+  TemporaryDiagnostics files;
+  s.solverDiagnosticsPrefix = files.prefix();
+  auto bodies = pairAtGap(s.rough.gap);
+  const auto initial = bodies;
+  const auto state = zeroNormalRollingState(s);
+  g::PersistentContactState history{state};
+  std::vector<g::GapCache> cache(1);
+  cache[0].valid = true;
+  cache[0].normal = {1., 0., 0.};
+  const auto oldCache = cache;
+  const double separatingForce = mass * s.contactGapTolerance / (step * step);
+  const std::vector<g::Vec3> force{{-separatingForce, 0., 0.},
+                                  {separatingForce, 0., 0.}};
+  const std::vector<g::Vec3> torque{g::scale(state.rollingTorque, -1.),
+                                   state.rollingTorque};
+  bool threw = false;
+  try {
+    g::advanceParticles(bodies, force, torque, step, 0., s, &cache, &history);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  require(threw, "limited-budget contact release must report its unfinished angular solve");
+  require(identicalBody(bodies[0], initial[0]) && identicalBody(bodies[1], initial[1]),
+          "rejected contact release preserves the accepted bodies exactly");
+  require(history.size() == 1 && identicalContact(history[0], state),
+          "rejected contact release cannot erase the accepted springs or birth cap");
+  require(cache.size() == 1 && cache[0].normal == oldCache[0].normal &&
+              cache[0].valid == oldCache[0].valid,
+          "rejected contact release preserves the accepted geometric cache");
+  const auto replay = g::particle_detail::readParticleReplay(
+      files.prefix() + "_failure.dat");
+  require(replay.contacts.size() == 1 && identicalContact(replay.contacts[0], state),
+          "failed release replay stores the accepted history, not a trial release");
+}
+
 void recoveredRetryWritesNoDiagnostics() {
   auto s = settings();
   TemporaryDiagnostics files;
@@ -643,11 +871,12 @@ void recoveredRetryWritesNoDiagnostics() {
           "recoverable failed attempts must not write trace, outcome, or replay files");
 }
 
-void savedFrictionBranchReplay(const std::string& input) {
+void savedParticleReplay(const std::string& input, bool requireFrictionCorrection) {
   // The real failure state is supplied explicitly and remains outside the test
   // source tree. Run exactly its saved substep, retaining every physical input,
   // convergence tolerance, and iteration budget without further subdivision.
   auto replay = g::particle_detail::readParticleReplay(input);
+  const auto startingContacts = replay.contacts;
   TemporaryDiagnostics files;
   replay.settings.solverBackend = "petsc";
   replay.settings.solverDiagnosticsPrefix = files.prefix();
@@ -658,23 +887,41 @@ void savedFrictionBranchReplay(const std::string& input) {
       replay.bodies, replay.force, replay.torque, replay.dt, replay.time,
       replay.settings, replay.cache, replay.contacts, output, d, error,
       replay.outerTime, replay.outerDt, replay.count, replay.substep);
-  require(success, "saved friction-boundary substep must converge: " + error);
+  require(success, "saved particle substep must converge: " + error);
   require(std::isfinite(d.maxForceResidualRatio) && d.maxForceResidualRatio <= 1. &&
           std::isfinite(d.maxTorqueResidualRatio) && d.maxTorqueResidualRatio <= 1. &&
           std::isfinite(d.contactGapViolation) &&
           d.contactGapViolation <= replay.settings.contactGapTolerance,
           "saved substep must satisfy its original force, torque, and gap tolerances");
-  require(d.frictionBranchCorrections > 0 &&
-          d.frictionBranchAttempts >= d.frictionBranchCorrections,
-          "saved fixture must exercise an accepted friction-branch correction");
+  require(d.frictionBranchAttempts >= d.frictionBranchCorrections,
+          "accepted friction corrections cannot exceed attempted corrections");
+  if (requireFrictionCorrection)
+    require(d.frictionBranchCorrections > 0,
+            "saved fixture must exercise an accepted friction-branch correction");
   require(d.newtonIterations <= replay.settings.maxNewtonIterations,
           "friction-branch correction must remain within the original iteration budget");
   require(output.size() == replay.bodies.size(), "replay preserves particle count");
   for (const auto& body : output)
     require(g::finite(body.position) && g::finite(body.velocity) && g::finite(body.omega),
             "accepted replay state has finite positions and velocities");
-  for (const auto& contact : replay.contacts) {
-    if (!contact.active) continue;
+  for (std::size_t p = 0; p < replay.contacts.size(); ++p) {
+    const auto& contact = replay.contacts[p];
+    const auto& old = startingContacts[p];
+    if (!contact.active) {
+      near(contact.normalLoad, 0., 0., 0., "open replayed contact has no stored reaction");
+      nearVector(contact.elasticSlip, {}, 0., 0., "open replayed contact has no slip history");
+      nearVector(contact.elasticRoll, {}, 0., 0., "open replayed contact has no rolling history");
+      nearVector(contact.rollingTorque, {}, 0., 0., "open replayed contact has no rolling torque");
+      near(contact.rollingCap, 0., 0., 0., "open replayed contact has no stale birth cap");
+      near(contact.releasedEnergy, old.active ? old.elasticEnergy : 0.,
+           1.e-29, 1.e-12, "replayed release accounts for the accepted history once");
+      continue;
+    }
+    if (old.active)
+      near(contact.rollingCap, old.rollingCap, 1.e-28, 1.e-12,
+           "tentative normal-mask changes cannot reset a retained contact birth cap");
+    near(contact.releasedEnergy, 0., 0., 0.,
+         "retained replayed contact cannot commit a rejected release");
     require(contact.normalLoad >= 0., "replayed contact reaction remains compressive");
     require(g::norm(contact.tangentForce) <= replay.settings.rough.friction *
                 contact.normalLoad + replay.settings.forceAbsoluteTolerance,
@@ -689,6 +936,9 @@ void savedFrictionBranchReplay(const std::string& input) {
             << "; Newton=" << d.newtonIterations
             << "; branch_attempts=" << d.frictionBranchAttempts
             << "; branch_corrections=" << d.frictionBranchCorrections
+            << "; contact_state_updates=" << d.contactStateUpdates
+            << "; contact_activations=" << d.contactActivations
+            << "; contact_releases=" << d.contactReleases
             << "; force_ratio=" << d.maxForceResidualRatio
             << "; torque_ratio=" << d.maxTorqueResidualRatio
             << "; gap_violation_m=" << d.contactGapViolation << '\n';
@@ -772,6 +1022,7 @@ void productionOblateContact() {
 
 int main(int argc, char** argv) {
   std::string selected, replayFixture;
+  bool requireFrictionCorrection = false;
   std::vector<char*> runtimeArguments{argv[0]};
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
@@ -782,8 +1033,20 @@ int main(int argc, char** argv) {
       }
       if (argument == "--case") selected = argv[++i];
       else replayFixture = argv[++i];
+    } else if (argument == "--require-friction-correction") {
+      requireFrictionCorrection = true;
     }
     else runtimeArguments.push_back(argv[i]);
+  }
+  // Preserve the earlier explicit friction-boundary regression command while
+  // allowing engagement/release fixtures through the general replay case.
+  if (selected == "saved_friction_branch_replay") {
+    selected = "saved_particle_replay";
+    requireFrictionCorrection = true;
+  }
+  if (requireFrictionCorrection && replayFixture.empty()) {
+    std::cerr << "--require-friction-correction requires --replay-fixture FILE\n";
+    return 1;
   }
 #ifndef SLURRY_USE_PETSC
   if (!replayFixture.empty()) {
@@ -803,6 +1066,9 @@ int main(int argc, char** argv) {
       {"normal_equilibrium", normalEquilibrium},
       {"approaching_contact", approachingContact},
       {"separating_contact_clears_history", separatingContactClearsHistory},
+      {"zero_normal_load_retains_rolling_until_release", zeroNormalLoadRetainsRollingUntilRelease},
+      {"recontact_creates_fresh_adhesive_history", recontactCreatesFreshAdhesiveHistory},
+      {"released_adhesive_contact_stays_open_inside_gap_tolerance", releasedAdhesiveContactStaysOpenInsideGapTolerance},
       {"sliding_rolling_history_persistence", slidingRollingHistoryPersistence},
       {"integrated_elastic_rolling", [] { integratedRollingResponse(false); }},
       {"integrated_yielded_rolling", [] { integratedRollingResponse(true); }},
@@ -813,13 +1079,15 @@ int main(int argc, char** argv) {
       {"coupled_friction_load_reversal", coupledFrictionLoadReversal},
       {"failed_step_does_not_commit", failedStepDoesNotCommit},
 #ifdef SLURRY_USE_PETSC
+      {"failed_contact_release_does_not_commit", failedContactReleaseDoesNotCommit},
       {"recovered_retry_writes_no_diagnostics", recoveredRetryWritesNoDiagnostics},
 #endif
       {"production_oblate_contact", productionOblateContact}};
 #ifdef SLURRY_USE_PETSC
   if (!replayFixture.empty())
-    tests.emplace_back("saved_friction_branch_replay",
-                       [replayFixture] { savedFrictionBranchReplay(replayFixture); });
+    tests.emplace_back("saved_particle_replay", [replayFixture, requireFrictionCorrection] {
+      savedParticleReplay(replayFixture, requireFrictionCorrection);
+    });
 #endif
   int failed = 0, ran = 0;
   for (const auto& test : tests) {

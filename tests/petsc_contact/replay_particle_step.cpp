@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
   int result = 1;
   try {
     auto replay = g::particle_detail::readParticleReplay(input);
+    const auto startingContacts = replay.contacts;
     if (replay.bodies.empty() || !(replay.dt > 0.) || !std::isfinite(replay.dt)
         || !std::isfinite(replay.time))
       throw std::invalid_argument("Replay requires particles and a finite positive substep duration");
@@ -82,13 +83,30 @@ int main(int argc, char** argv) {
         replay.settings, replay.cache, replay.contacts, output, diagnostics, error,
         replay.outerTime, replay.outerDt, replay.count, replay.substep);
     if (success) {
+      std::size_t retained = 0, activated = 0, released = 0;
+      double releasedEnergy = 0.;
+      for (std::size_t p = 0; p < replay.contacts.size(); ++p) {
+        const bool wasActive = startingContacts[p].active;
+        const bool active = replay.contacts[p].active;
+        retained += wasActive && active;
+        activated += !wasActive && active;
+        released += wasActive && !active;
+        releasedEnergy += replay.contacts[p].releasedEnergy;
+      }
       std::cout << "REPLAY ACCEPTED: Newton=" << diagnostics.newtonIterations
                 << "; Krylov=" << diagnostics.krylovIterations
                 << "; force_ratio=" << diagnostics.maxForceResidualRatio
                 << "; torque_ratio=" << diagnostics.maxTorqueResidualRatio
                 << "; friction_branch_attempts=" << diagnostics.frictionBranchAttempts
                 << "; friction_branch_corrections=" << diagnostics.frictionBranchCorrections
-                << "; gap_violation_m=" << diagnostics.contactGapViolation << '\n';
+                << "; contact_state_updates=" << diagnostics.contactStateUpdates
+                << "; trial_contact_activations=" << diagnostics.contactActivations
+                << "; trial_contact_releases=" << diagnostics.contactReleases
+                << "; gap_violation_m=" << diagnostics.contactGapViolation
+                << "; retained_contacts=" << retained
+                << "; activated_contacts=" << activated
+                << "; released_contacts=" << released
+                << "; released_contact_energy_J=" << releasedEnergy << '\n';
       result = 0;
     } else {
       std::cout << "REPLAY FAILED (one saved substep): " << error << '\n'
