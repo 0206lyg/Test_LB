@@ -191,12 +191,24 @@ def render(report):
         lines.append("Contact state updates: " + display(last.get("contact_state_updates"))
                      + "; activated=" + display(last.get("contact_activations"))
                      + "; released=" + display(last.get("contact_releases")))
+    has_ngmres = "nonlinear_iteration" in last
+    if has_ngmres:
+        lines.append("Nonlinear acceleration: NGMRES iteration="
+                     + display(last.get("nonlinear_iteration"))
+                     + "; actual Newton attempts=" + display(last.get("newton_iteration"))
+                     + "; cumulative Krylov iterations=" + display(last.get("total_ksp_iterations"))
+                     + "; residual evaluations=" + display(last.get("residual_evaluations")))
+        lines.append("Newton candidate SNES reason=" + display(last.get("npc_snes_reason"))
+                     + "; +5/-5 can mark one-step completion, not physical convergence.")
+        lines.append("Step fraction below is the Newton candidate fraction, before NGMRES selection.")
     lines.append("Final iteration rows (force/torque/complementarity ratios pass at <=1):")
     lines.append("  iter       force      torque     contact   step_frac    KSP_residual"
                  + ("   active  added removed expand" if has_contacts else ""))
     for row in attempt["tail"]:
         values = [row.get(key) for key in ("newton_iteration", "force_ratio", "torque_ratio",
-                                         "complementarity_ratio", "step_fraction", "ksp_residual_norm")]
+                                         "complementarity_ratio",
+                                         "newton_step_fraction" if has_ngmres else "step_fraction",
+                                         "ksp_residual_norm")]
         line = "  " + " ".join(display(value).rjust(width)
                                for value, width in zip(values, (4, 11, 11, 11, 11, 15)))
         if has_contacts:
