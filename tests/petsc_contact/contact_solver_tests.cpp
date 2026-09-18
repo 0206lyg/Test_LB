@@ -852,7 +852,47 @@ void recoveredRetryWritesNoDiagnostics() {
   auto s = settings();
   TemporaryDiagnostics files;
   s.solverDiagnosticsPrefix = files.prefix();
+  // A non-principal free rotation is nonlinear even without contact changes.
+  // Four Newton iterations intentionally force a failed large-angle attempt;
+  // smaller physical substeps must recover without writing failure artifacts.
+  s.rough.enabled = false;
   s.maxNewtonIterations = 4;
+  s.maxSubsteps = 32;
+  auto rotor = sphere({8.e-6, 10.e-6, 10.e-6});
+  rotor.axes = {radius, .7 * radius, .4 * radius};
+  rotor.inertiaBody = {.13 * mass * radius * radius,
+                      .232 * mass * radius * radius,
+                      .298 * mass * radius * radius};
+  rotor.omega = {1.5e5, 3.e5, -2.25e5};
+  std::vector<g::Body> bodies{rotor};
+  const auto initialMomentum = g::particle_detail::worldMomentum(rotor);
+  const std::vector<g::Vec3> zero(1);
+  const auto d = g::advanceParticles(bodies, zero, zero, step, 0., s);
+  require(d.substeps > 1 && d.substeps <= s.maxSubsteps,
+          "recovery fixture must actually retry with smaller particle timesteps");
+  require(d.maxForceResidualRatio <= 1. && d.maxTorqueResidualRatio <= 1. &&
+          d.contactGapViolation <= s.contactGapTolerance,
+          "recovered outer step must satisfy all physical criteria");
+  // For zero applied torque, each accepted substep has
+  // |delta L| <= subdt * torqueAbsoluteTolerance / (1-relativeTolerance).
+  // The total bound is independent of the number of accepted substeps.
+  const double angularAllowance = step * s.torqueAbsoluteTolerance /
+      (1. - s.relativeTolerance) + 32. * std::numeric_limits<double>::epsilon() *
+      g::norm(initialMomentum);
+  nearVector(g::particle_detail::worldMomentum(bodies[0]), initialMomentum,
+             angularAllowance, 0., "free rotor preserves angular momentum through retries");
+  nearVector(bodies[0].position, rotor.position, 0., 0.,
+             "rotational retries cannot move a force-free particle centre");
+  require(std::filesystem::is_empty(files.directory),
+          "recoverable failed attempts must not write trace, outcome, or replay files");
+  std::cout << "RECOVERED ROTATION: substeps=" << d.substeps
+            << "; Newton=" << d.newtonIterations
+            << "; Krylov=" << d.krylovIterations << '\n';
+}
+
+void preloadedCollisionWithinProductionBudget() {
+  auto s = settings();
+  s.maxNewtonIterations = 60;
   s.maxSubsteps = 32;
   auto bodies = pairAtGap(s.rough.gap);
   bodies[0].velocity = {1.e-3, 3.e-3, 0.};
@@ -860,15 +900,27 @@ void recoveredRetryWritesNoDiagnostics() {
   bodies[0].omega = {10., 20., 30.};
   bodies[1].omega = {-20., 30., 10.};
   g::PersistentContactState history{preloadedState(s)};
+  const auto initial = bodies;
+  const auto initialContact = history[0];
+  const double initialEnergy = kineticEnergy(bodies) + history[0].elasticEnergy;
   const std::vector<g::Vec3> zero(2);
   const auto d = g::advanceParticles(bodies, zero, zero, step, 0., s, nullptr, &history);
-  require(d.substeps > 1 && d.substeps <= s.maxSubsteps,
-          "recovery fixture must actually retry with smaller particle timesteps");
   require(d.maxForceResidualRatio <= 1. && d.maxTorqueResidualRatio <= 1. &&
           d.contactGapViolation <= s.contactGapTolerance,
-          "recovered outer step must satisfy all physical criteria");
-  require(std::filesystem::is_empty(files.directory),
-          "recoverable failed attempts must not write trace, outcome, or replay files");
+          "preloaded collision satisfies unchanged physical acceptance criteria");
+  require(history.size() == 1 && history[0].active && history[0].normalLoad >= 0.,
+          "preloaded collision retains its compressive rough contact");
+  near(history[0].rollingCap, initialContact.rollingCap, 1.e-27, 1.e-12,
+       "preloaded collision preserves the adhesive birth rolling cap");
+  require(g::norm(history[0].tangentForce) <=
+              s.rough.friction * history[0].normalLoad + s.forceAbsoluteTolerance &&
+          g::norm(history[0].rollingTorque) <=
+              history[0].rollingCap + s.torqueAbsoluteTolerance,
+          "preloaded collision retains Coulomb and rolling limits");
+  nearVector(momentum(bodies), momentum(initial), 1.e-22, 0.,
+             "preloaded collision conserves total linear momentum");
+  require(kineticEnergy(bodies) + history[0].elasticEnergy <= initialEnergy * (1. + 1.e-6),
+          "passive preloaded collision cannot create kinetic plus elastic energy");
 }
 
 void savedParticleReplay(const std::string& input, bool requireFrictionCorrection) {
@@ -1038,11 +1090,11 @@ int main(int argc, char** argv) {
     }
     else runtimeArguments.push_back(argv[i]);
   }
-  // Preserve the earlier explicit friction-boundary regression command while
-  // allowing engagement/release fixtures through the general replay case.
+  // Preserve the earlier case name as a physical replay alias. A different
+  // globalization may solve the same state without invoking a branch predictor;
+  // only the explicit --require-friction-correction flag requires that path.
   if (selected == "saved_friction_branch_replay") {
     selected = "saved_particle_replay";
-    requireFrictionCorrection = true;
   }
   if (requireFrictionCorrection && replayFixture.empty()) {
     std::cerr << "--require-friction-correction requires --replay-fixture FILE\n";
@@ -1081,6 +1133,7 @@ int main(int argc, char** argv) {
 #ifdef SLURRY_USE_PETSC
       {"failed_contact_release_does_not_commit", failedContactReleaseDoesNotCommit},
       {"recovered_retry_writes_no_diagnostics", recoveredRetryWritesNoDiagnostics},
+      {"preloaded_collision_within_production_budget", preloadedCollisionWithinProductionBudget},
 #endif
       {"production_oblate_contact", productionOblateContact}};
 #ifdef SLURRY_USE_PETSC
