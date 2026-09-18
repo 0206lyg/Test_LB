@@ -23,7 +23,8 @@ def write_json(path, value):
 
 def source_inputs():
     files = [OLB / n for n in ('config.mk', 'rules.mk')]
-    files += [BASE / 'slurry/Makefile', BASE / 'slurry/engines.json', BASE / 'slurry/tools/build_slurry.py']
+    files += [BASE / 'slurry/Makefile', BASE / 'slurry/engines.json', BASE / 'slurry/tools/build_slurry.py',
+              BASE / 'slurry/tools/petsc_config.py']
     for directory in (OLB / 'src', OLB / 'examples/slurry'):
         files.extend(p for p in directory.rglob('*') if p.is_file() and p.suffix in ('.h', '.hh', '.hpp', '.cpp', '.c'))
     return {str(p.relative_to(BASE)): digest(p) for p in sorted(set(files))}
@@ -51,4 +52,7 @@ def build_record(executable):
         raise ValueError('Executable checksum does not match its completed build')
     if source_inputs() != record['source_inputs']:
         raise ValueError('C++ source/build configuration changed. Run build_slurry_cpu.sbatch again')
+    for path, expected in record.get('toolchain', {}).get('petsc', {}).get('dependencies_sha256', {}).items():
+        if not Path(path).is_file() or digest(path) != expected:
+            raise ValueError('PETSc dependency changed or is missing: ' + path + '. Rebuild with the matching PETSc installation.')
     return record

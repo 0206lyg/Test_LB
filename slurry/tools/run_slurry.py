@@ -122,6 +122,9 @@ def main():
                     result_dir.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(BASE / 'slurry/tools/particles_to_paraview.py'),
                                  str(result_dir / 'particles_to_paraview.py'))
+                    if engine == 'pure_gr':
+                        shutil.copy2(str(BASE / 'slurry/tools/summarize_particle_solver.py'),
+                                     str(result_dir / 'summarize_particle_solver.py'))
                 args = prefix + ['--config', str(configs[engine]), '--output', str(result_dir)]
                 if rate is not None: args += ['--shear-rate', str(rate)]
                 limit = a.max_steps if a.max_steps is not None else (20 if a.smoke else None)
