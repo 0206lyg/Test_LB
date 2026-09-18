@@ -8,6 +8,11 @@ CORE_NAMES := communication/mpiManager communication/ompManager core/olbInit cor
 CORE_OBJECTS := $(addprefix $(BUILD_DIR)/core/,$(addsuffix .o,$(CORE_NAMES)))
 APP_OBJECT := $(BUILD_DIR)/slurry.o
 INCLUDES := -I$(OLB_ROOT)/src -I$(OLB_ROOT)/external/zlib -I$(OLB_ROOT)/external/tinyxml2 -I$(BUILD_DIR)
+ifeq ($(PARTICLE_SOLVER),petsc)
+  INCLUDES += $(PETSC_CFLAGS)
+  CXXFLAGS += -DSLURRY_USE_PETSC
+  LDFLAGS += $(PETSC_LIBS)
+endif
 
 .PHONY: all
 all: $(BUILD_DIR)/slurry
