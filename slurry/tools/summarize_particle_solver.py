@@ -187,6 +187,10 @@ def render(report):
         lines.append("Friction boundary corrections: attempts="
                      + display(last.get("friction_branch_attempts"))
                      + "; descent directions=" + display(last.get("friction_branch_corrections")))
+    if "contact_state_updates" in last:
+        lines.append("Contact state updates: " + display(last.get("contact_state_updates"))
+                     + "; activated=" + display(last.get("contact_activations"))
+                     + "; released=" + display(last.get("contact_releases")))
     lines.append("Final iteration rows (force/torque/complementarity ratios pass at <=1):")
     lines.append("  iter       force      torque     contact   step_frac    KSP_residual"
                  + ("   active  added removed expand" if has_contacts else ""))
