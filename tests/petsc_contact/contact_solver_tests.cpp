@@ -1131,9 +1131,18 @@ void savedParticleReplay(const std::string& input, bool requireFrictionCorrectio
 }
 #endif
 
-void productionOblateContact() {
+void productionOblateContact(bool localAdhesion = false) {
   auto s = settings();
   s.pair.hamaker = 9.9e-20;
+  if (localAdhesion) {
+    s.pair.sigma = 4.197e-10;
+    s.pair.roughnessGap = s.rough.gap;
+    s.pair.localGap = 3.e-10;
+    s.pair.localGapFraction = 1.;
+    s.pair.localSwitchExcessGap = 2.e-9;
+    s.pair.localCutoffExcessGap = 10.e-9;
+    s.rough.tangentialStiffness = 80.;
+  }
   s.nearField.enabled = true;
   s.nearField.viscosity = .000890;
   s.nearField.matchingGap = 50.e-9;
@@ -1161,6 +1170,9 @@ void productionOblateContact() {
   const auto pair = g::evaluatePair(bodies[0], bodies[1], s.pair);
   const double birthAttraction = g::dot(pair.forceI, pair.normal);
   require(birthAttraction > 0., "production RE2 contact has an adhesive birth force");
+  if (localAdhesion)
+    near(birthAttraction, 936.214833e-9, 2.e-12, 1.e-5,
+         "local graphite adhesion reaches the approved FF force scale");
   const std::vector<g::Vec3> zero(2);
   std::vector<g::GapCache> cache;
   g::PersistentContactState history;
@@ -1170,7 +1182,11 @@ void productionOblateContact() {
     const auto before = bodies;
     const auto d = g::advanceParticles(bodies, zero, zero, actualDt, k*actualDt, s,
                                      &cache, &history);
-    require(d.substeps == 1, "production pair should solve one actual LB interval directly");
+    if (!localAdhesion)
+      require(d.substeps == 1, "production pair should solve one actual LB interval directly");
+    else
+      require(d.substeps > 0 && d.substeps <= s.maxSubsteps,
+              "strong local adhesion stays within the production substep budget");
     require(d.maxForceResidualRatio <= 1. && d.maxTorqueResidualRatio <= 1. &&
             d.contactGapViolation <= s.contactGapTolerance,
             "production oblate step must satisfy the user's physical tolerances");
@@ -1272,7 +1288,8 @@ int main(int argc, char** argv) {
       {"recovered_retry_writes_no_diagnostics", recoveredRetryWritesNoDiagnostics},
       {"preloaded_collision_within_production_budget", preloadedCollisionWithinProductionBudget},
 #endif
-      {"production_oblate_contact", productionOblateContact}};
+      {"production_oblate_contact", [] { productionOblateContact(); }},
+      {"production_oblate_local_adhesion", [] { productionOblateContact(true); }}};
 #ifdef SLURRY_USE_PETSC
   if (!replayFixture.empty())
     tests.emplace_back("saved_particle_replay", [replayFixture, requireFrictionCorrection] {
