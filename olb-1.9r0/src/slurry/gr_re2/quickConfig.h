@@ -27,8 +27,8 @@ struct Config {
   double rolling_length=100e-9,rolling_yield_angle=.01;
   double particle_force_absolute_tolerance=1e-15,particle_torque_absolute_tolerance=1.65e-21;
   double contact_gap_tolerance=1e-12;
-  std::uint64_t max_steps=0,sample_every=20,vtk_every=0,checkpoint_every=200,checkpoint_keep=2;
-  double checkpoint_seconds=900.;
+  std::uint64_t max_steps=0,sample_every=20,vtk_every=0,checkpoint_every=0,checkpoint_keep=2;
+  double checkpoint_seconds=21000.; // 350 minutes of wall time; step-based saves disabled.
   unsigned particle_max_substeps=32,particle_max_iterations=20,particle_max_krylov_iterations=120;
   std::string particle_solver="petsc";
   bool solver_diagnostics=true;

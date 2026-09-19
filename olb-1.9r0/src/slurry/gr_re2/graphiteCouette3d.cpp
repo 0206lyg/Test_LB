@@ -298,7 +298,7 @@ void simulate(const Config& c){
     outputSeconds+=seconds(begin);
   };
   auto saveCheckpoint=[&](){
-    if(savedStep==step)return;
+    if(step==0||savedStep==step)return;
     if(lastSample!=step)sample();
     history.flush();poses.flush();l.setProcessingContext(ProcessingContext::Evaluation);
     checkpoint_detail::State state;state.step=step;state.bodies=bodies;state.cache=pairCache;
@@ -313,7 +313,9 @@ void simulate(const Config& c){
   singleton::mpi().bCast(havePrefix);
 #endif
   if(havePrefix)lastSample=step;else sample();
-  saveCheckpoint();
+  // No startup checkpoint: begin the wall-time interval here on both fresh
+  // and restored runs, without duplicating a loaded checkpoint.
+  lastCheckpoint=Clock::now();
   while(step<stopStep){
     const auto& hydro=coupling.particleHydrodynamics();
     for(std::size_t i=0;i<bodies.size();++i){force[i]=hydro[i].force;torque[i]=hydro[i].torque;}
