@@ -27,11 +27,12 @@ struct Config {
   double rolling_length=100e-9,rolling_yield_angle=.01;
   double particle_force_absolute_tolerance=1e-15,particle_torque_absolute_tolerance=1.65e-21;
   double contact_gap_tolerance=1e-12;
-  std::uint64_t max_steps=0,sample_every=20,vtk_every=0;
+  std::uint64_t max_steps=0,sample_every=20,vtk_every=0,checkpoint_every=200,checkpoint_keep=2;
+  double checkpoint_seconds=900.;
   unsigned particle_max_substeps=32,particle_max_iterations=20,particle_max_krylov_iterations=120;
   std::string particle_solver="petsc";
   bool solver_diagnostics=true;
-  std::string output_dir="run",particles_csv;
+  std::string output_dir="run",particles_csv,restart_dir;
 };
 inline std::string strip(const std::string& s) {
   const auto a=s.find_first_not_of(" \t\r\n");
@@ -58,6 +59,7 @@ inline Config parseConfig(int argc,char**argv) {
     REAL(rho_particle) REAL(rho_fluid) REAL(dynamic_viscosity) REAL(nu_lattice) REAL(target_mach)
     REAL(time_step_s) REAL(epsilon_cells) REAL(hamaker) REAL(sigma_lj) REAL(switch_gap) REAL(cutoff_gap)
     REAL(local_gap) REAL(local_gap_fraction) REAL(local_switch_excess_gap) REAL(local_cutoff_excess_gap)
+    REAL(checkpoint_seconds)
     REAL(end_strain) REAL(particle_tolerance) REAL(lubrication_cutoff_cells)
     REAL(roughness_gap) REAL(sliding_friction) REAL(tangential_stiffness)
     REAL(rolling_length) REAL(rolling_yield_angle)
@@ -76,13 +78,16 @@ inline Config parseConfig(int argc,char**argv) {
       c.rough_contact_enabled=v=="1";continue;
     }
 #define INTEGER(k) if(key==#k){if(v.empty()||v[0]=='-')throw std::runtime_error("Negative config: " #k);c.k=std::stoull(v);continue;}
-    INTEGER(max_steps) INTEGER(sample_every) INTEGER(vtk_every) INTEGER(particle_max_substeps) INTEGER(particle_max_iterations) INTEGER(particle_max_krylov_iterations)
+    INTEGER(max_steps) INTEGER(sample_every) INTEGER(vtk_every) INTEGER(checkpoint_every) INTEGER(checkpoint_keep) INTEGER(particle_max_substeps) INTEGER(particle_max_iterations) INTEGER(particle_max_krylov_iterations)
 #undef INTEGER
     if(key=="output_dir"){c.output_dir=v;continue;}
     if(key=="particles_csv"){c.particles_csv=v;continue;}
+    if(key=="restart_dir"){c.restart_dir=v;continue;}
     throw std::runtime_error("Unknown configuration key: "+key);
   }
   if(overrideSteps)c.max_steps=overrideSteps;
+  if(c.checkpoint_seconds<0.||c.checkpoint_keep<1)
+    throw std::runtime_error("Require checkpoint_seconds >= 0 and checkpoint_keep >= 1");
   if(!(c.shear_rate>0&&c.dx>0&&c.box_x>0&&c.box_y>0&&c.box_z>0&&c.diameter>0&&c.thickness>0
     &&c.thickness<=c.diameter&&c.rho_particle>0&&c.rho_fluid>0&&c.dynamic_viscosity>0&&c.nu_lattice>0
     &&c.target_mach>0&&c.time_step_s>=0&&c.epsilon_cells>0&&c.hamaker>=0&&c.sigma_lj>0
@@ -110,6 +115,7 @@ inline Config parseConfig(int argc,char**argv) {
   if(c.diameter+c.cutoff_gap>=.5*std::min({c.box_x,c.box_y,c.box_z}))
     throw std::runtime_error("diameter + cutoff_gap must be less than half the shortest box length");
   c.output_dir=std::filesystem::absolute(c.output_dir).string();
+  if(!c.restart_dir.empty())c.restart_dir=std::filesystem::absolute(c.restart_dir).string();
   return c;
 }
 struct Units {

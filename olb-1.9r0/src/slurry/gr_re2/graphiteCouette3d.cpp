@@ -9,7 +9,9 @@
 #include "leesEdwards.h"
 #include "particleSubsteps.h"
 #include "bulkStress.h"
+#include "coupledCheckpoint.h"
 #include <chrono>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -32,6 +34,8 @@ using U64=std::uint64_t;
 namespace fs=std::filesystem;
 using Clock=std::chrono::steady_clock;
 static double seconds(Clock::time_point t){return std::chrono::duration<double>(Clock::now()-t).count();}
+static volatile std::sig_atomic_t stopRequested=0;
+static void requestStop(int){stopRequested=1;}
 
 // OpenLB initializes MPI first. PETSc therefore does not own MPI finalization.
 struct ParticleSolverRuntime {
@@ -181,13 +185,26 @@ void simulate(const Config& c){
   solver.rough.rollingLength=c.rolling_length;
   solver.rough.rollingYieldAngle=c.rolling_yield_angle;
   std::vector<graphite::GapCache> pairCache;
-  graphite::PersistentContactState contacts;
+  graphite::PersistentContactState contacts(bodies.size()*(bodies.size()-1)/2);
   auto pair=graphite::evaluateParticleState(bodies,0.,solver,&pairCache,&contacts);
   std::vector<graphite::Vec3> angularAcceleration(bodies.size()),force(bodies.size()),torque(bodies.size());
   const long double desired=std::ceil(static_cast<long double>(c.end_strain)/(c.shear_rate*u.dt));
   if(desired>std::numeric_limits<U64>::max())throw std::runtime_error("Requested strain exceeds step counter capacity");
   const U64 endStep=static_cast<U64>(desired),stopStep=c.max_steps?std::min(endStep,c.max_steps):endStep;
-  U64 step=0;
+  U64 step=0;std::array<double,6> previousTiming{};
+  if(!c.restart_dir.empty()){
+    if(!fs::is_regular_file(fs::path(c.restart_dir)/"checkpoint.json"))
+      throw std::runtime_error("Restart requires a completed pure_gr checkpoint");
+    auto saved=checkpoint_detail::loadState(fs::path(c.restart_dir)/"state.bin",bodies.size(),
+        checkpoint_detail::signature(c,u,bodies.size(),singleton::mpi().getSize()));
+    l.setProcessingContext(ProcessingContext::Evaluation);
+    checkpoint_detail::loadLattice(l,fs::path(c.restart_dir)/checkpoint_detail::rankFile(singleton::mpi().getRank()));
+    step=saved.step;bodies=std::move(saved.bodies);pairCache=std::move(saved.cache);contacts=std::move(saved.contacts);
+    angularAcceleration=std::move(saved.angularAcceleration);pair=saved.diagnostic;previousTiming=saved.timing;
+    syncParticles(ps,bodies);coupling.resetAfterRestart();
+    log<<"Restart restored step="<<step<<" time_s="<<step*u.dt<<" strain="<<step*u.dt*c.shear_rate<<std::endl;
+  }
+  if(stopStep<step)throw std::runtime_error("Run endpoint precedes checkpoint; increase end_strain or max_steps");
   log<<std::setprecision(12)<<"dt_s="<<u.dt<<" imposed_Mach="<<u.mach<<" physical_Re="<<u.rePhysical
       <<" numerical_Re="<<u.reNumeric<<" numerical_St="<<u.stNumeric<<" inertia_scale="<<u.alpha
       <<" particles="<<bodies.size()<<" steps_to_target_strain="<<endStep<<std::endl;
@@ -207,7 +224,7 @@ void simulate(const Config& c){
      <<" max_substeps="<<c.particle_max_substeps<<" max_newton_iterations="<<c.particle_max_iterations
      <<" max_krylov_iterations="<<c.particle_max_krylov_iterations
      <<" solver_diagnostics="<<c.solver_diagnostics<<std::endl;
-  std::ofstream history,poses;
+  std::ofstream history,poses;bool appendHistory=false,appendPoses=false;
   if(singleton::mpi().isMainProcessor()){
     std::ofstream meta(fs::path(c.output_dir)/"mapping.json");
     meta<<std::setprecision(17)<<"{\n\"dt_s\":"<<u.dt<<",\n\"imposed_mach\":"<<u.mach<<",\n\"inertia_scale\":"<<u.alpha
@@ -223,16 +240,26 @@ void simulate(const Config& c){
       <<",\"roughness_gap_m\":"<<c.roughness_gap<<",\"sliding_friction\":"<<c.sliding_friction
       <<",\"tangential_stiffness_N_m\":"<<c.tangential_stiffness
       <<",\"rolling_length_m\":"<<c.rolling_length<<",\"rolling_yield_angle_rad\":"<<c.rolling_yield_angle<<"}\n}\n";
-    history.open(fs::path(c.output_dir)/"history.csv");poses.open(fs::path(c.output_dir)/"particles.csv");
+    appendHistory=!c.restart_dir.empty()&&fs::exists(fs::path(c.output_dir)/"history.csv")
+        &&fs::file_size(fs::path(c.output_dir)/"history.csv")>0;
+    appendPoses=!c.restart_dir.empty()&&fs::exists(fs::path(c.output_dir)/"particles.csv")
+        &&fs::file_size(fs::path(c.output_dir)/"particles.csv")>0;
+    if(appendHistory!=appendPoses)throw std::runtime_error("Restart output CSV pair is incomplete");
+    history.open(fs::path(c.output_dir)/"history.csv",appendHistory?std::ios::app:std::ios::out);
+    poses.open(fs::path(c.output_dir)/"particles.csv",appendPoses?std::ios::app:std::ios::out);
     if(!history||!poses)throw std::runtime_error("Cannot create output CSV");
-    history<<"step,time_s,strain,eta_bulk_Pa_s,eta_relative,stress_total_Pa,stress_fluid_Pa,stress_surface_Pa,stress_pair_attractive_Pa,stress_pair_repulsive_Pa,stress_lubrication_Pa,stress_acceleration_Pa,stress_fluid_reynolds_Pa,stress_particle_reynolds_Pa,stress_noninertial_Pa,stress_inertial_Pa,max_mach,particle_mach_bound,density_drift,porosity_volume_fraction,analytic_volume_fraction,min_gap_m,max_pair_force_N,potential_energy_J,active_pairs,particle_substeps,newton_iterations,krylov_iterations,residual_evaluations,wall_seconds,steps_per_second,fluid_seconds,map_seconds,coupling_seconds,particle_seconds,output_seconds,stress_contact_normal_Pa,stress_contact_tangential_Pa,contact_count,sliding_contact_count,rolling_contact_count,contact_dissipation_W,contact_elastic_energy_J,force_residual_ratio,torque_residual_ratio,contact_gap_violation_m,max_fluid_mach,fluid_density_drift\n";
-    poses<<"step,time_s,id,x_m,y_m,z_m,angle_x_rad,angle_y_rad,angle_z_rad,vx_m_s,vy_m_s,vz_m_s,omega_x_s_inv,omega_y_s_inv,omega_z_s_inv\n";
+    if(!appendHistory)history<<"step,time_s,strain,eta_bulk_Pa_s,eta_relative,stress_total_Pa,stress_fluid_Pa,stress_surface_Pa,stress_pair_attractive_Pa,stress_pair_repulsive_Pa,stress_lubrication_Pa,stress_acceleration_Pa,stress_fluid_reynolds_Pa,stress_particle_reynolds_Pa,stress_noninertial_Pa,stress_inertial_Pa,max_mach,particle_mach_bound,density_drift,porosity_volume_fraction,analytic_volume_fraction,min_gap_m,max_pair_force_N,potential_energy_J,active_pairs,particle_substeps,newton_iterations,krylov_iterations,residual_evaluations,wall_seconds,steps_per_second,fluid_seconds,map_seconds,coupling_seconds,particle_seconds,output_seconds,stress_contact_normal_Pa,stress_contact_tangential_Pa,contact_count,sliding_contact_count,rolling_contact_count,contact_dissipation_W,contact_elastic_energy_J,force_residual_ratio,torque_residual_ratio,contact_gap_violation_m,max_fluid_mach,fluid_density_drift\n";
+    if(!appendPoses)poses<<"step,time_s,id,x_m,y_m,z_m,angle_x_rad,angle_y_rad,angle_z_rad,vx_m_s,vy_m_s,vz_m_s,omega_x_s_inv,omega_y_s_inv,omega_z_s_inv\n";
     history<<std::setprecision(17);poses<<std::setprecision(17);
   }
   SuperVTMwriter3D<T> writer("graphite");SuperLatticePhysVelocity3D<T,D> velocity(l,converter);
   SuperLatticePhysPressure3D<T,D> pressure(l,converter);SuperLatticePhysExternalPorosity3D<T,D> porosity(l,converter);
   writer.addFunctor(velocity);writer.addFunctor(pressure);writer.addFunctor(porosity);if(c.vtk_every)writer.createMasterFile();
-  const auto start=Clock::now();T fluidSeconds=0,mapSeconds=0,couplingSeconds=0,particleSeconds=0,outputSeconds=0;
+  const auto start=Clock::now();auto lastCheckpoint=Clock::now();
+  T fluidSeconds=previousTiming[1],mapSeconds=previousTiming[2],couplingSeconds=previousTiming[3],
+    particleSeconds=previousTiming[4],outputSeconds=previousTiming[5];
+  U64 lastSample=std::numeric_limits<U64>::max(),savedStep=std::numeric_limits<U64>::max();
+  fs::path latest;bool stopped=false;
   // Full communication must precede mapping: mapping fills LE image auxiliary
   // fields in all halos; ordinary periodic communication would overwrite them.
   auto mapAndCouple=[&](){
@@ -247,7 +274,7 @@ void simulate(const Config& c){
     const auto m=graphite::measureBulk(l,g,converter,box,c.shear_rate,u.omega,u.rhoFluid,c.dx,u.dt,bodies,angularAcceleration,
       coupling.stressletSum(),instantaneous.attractiveMoment,instantaneous.repulsiveMoment,instantaneous.lubricationMoment,
       instantaneous.contactNormalMoment,instantaneous.contactTangentialMoment);
-    const T elapsed=seconds(start);
+    const T elapsed=previousTiming[0]+seconds(start);
     if(singleton::mpi().isMainProcessor()){
       history<<step<<','<<step*u.dt<<','<<step*u.dt*c.shear_rate<<','<<m.eta<<','<<m.etaRelative<<','<<m.stressTotal
         <<','<<m.stressFluid<<','<<m.stressSurface<<','<<m.stressPairAttractive<<','<<m.stressPairRepulsive<<','<<m.stressLubrication
@@ -267,9 +294,26 @@ void simulate(const Config& c){
       <<" eta_bulk_Pa_s="<<m.eta<<" Ma="<<m.mach<<" fluid_Ma="<<m.fluidMach<<" min_gap_nm="<<pair.minGap*1e9
       <<" contacts="<<instantaneous.contacts<<" residual_ratio="<<std::max(pair.maxForceResidualRatio,pair.maxTorqueResidualRatio)
       <<" steps/s="<<step/std::max(elapsed,1e-12)<<std::endl;
+    lastSample=step;
     outputSeconds+=seconds(begin);
   };
-  mapAndCouple();sample();
+  auto saveCheckpoint=[&](){
+    if(savedStep==step)return;
+    if(lastSample!=step)sample();
+    history.flush();poses.flush();l.setProcessingContext(ProcessingContext::Evaluation);
+    checkpoint_detail::State state;state.step=step;state.bodies=bodies;state.cache=pairCache;
+    state.contacts=contacts;state.angularAcceleration=angularAcceleration;state.diagnostic=pair;
+    state.timing={previousTiming[0]+seconds(start),fluidSeconds,mapSeconds,couplingSeconds,particleSeconds,outputSeconds};
+    latest=checkpoint_detail::save(l,c,u,state);savedStep=step;lastCheckpoint=Clock::now();
+    log<<"Checkpoint saved: "<<latest.string()<<std::endl;
+  };
+  mapAndCouple();
+  int havePrefix=appendHistory?1:0;
+#ifdef PARALLEL_MODE_MPI
+  singleton::mpi().bCast(havePrefix);
+#endif
+  if(havePrefix)lastSample=step;else sample();
+  saveCheckpoint();
   while(step<stopStep){
     const auto& hydro=coupling.particleHydrodynamics();
     for(std::size_t i=0;i<bodies.size();++i){force[i]=hydro[i].force;torque[i]=hydro[i].torque;}
@@ -287,24 +331,37 @@ void simulate(const Config& c){
       const U64 frame=step/c.vtk_every;if(frame>std::numeric_limits<int>::max())throw std::runtime_error("Too many VTK frames");
       writer.write(static_cast<int>(frame));
     }
+    int stop=stopRequested?1:0,saveNow=0;
+    if(singleton::mpi().isMainProcessor()){
+      if(fs::exists(fs::path(c.output_dir)/"STOP_REQUEST"))stop=1;
+      saveNow=(c.checkpoint_every&&step%c.checkpoint_every==0)
+          ||(c.checkpoint_seconds>0.&&seconds(lastCheckpoint)>=c.checkpoint_seconds);
+    }
+#ifdef PARALLEL_MODE_MPI
+    singleton::mpi().reduceAndBcast(stop,MPI_MAX);singleton::mpi().bCast(saveNow);
+#endif
+    if(saveNow||stop)saveCheckpoint();
+    if(stop){stopped=true;break;}
   }
+  saveCheckpoint();
   if(singleton::mpi().isMainProcessor()){
     std::ofstream status(fs::path(c.output_dir)/"status.json");
-    status<<std::setprecision(17)<<"{\"status\":\""<<(step>=endStep?"COMPLETED":"MAX_STEPS")
+    status<<std::setprecision(17)<<"{\"status\":\""<<(stopped?"CHECKPOINTED":step>=endStep?"COMPLETED":"MAX_STEPS")
       <<"\",\"step\":"<<step<<",\"time_s\":"<<step*u.dt<<",\"strain\":"<<step*u.dt*c.shear_rate
-      <<",\"wall_seconds\":"<<seconds(start)<<"}\n";
+      <<",\"wall_seconds\":"<<previousTiming[0]+seconds(start)<<",\"checkpoint_dir\":"<<std::quoted(latest.string())<<"}\n";
   }
 }
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"revision\":\"local-gap-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"pure_gr_checkpoint_version\":1,\"revision\":\"local-gap-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"revision\":\"local-gap-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"pure_gr_checkpoint_version\":1,\"revision\":\"local-gap-adhesion-1\"}\n";
 #endif
     return 0;
   }
-  initialize(&argc,&argv);
+  initialize(&argc,&argv);stopRequested=0;
+  std::signal(SIGTERM,requestStop);std::signal(SIGINT,requestStop);std::signal(SIGUSR1,requestStop);
   try{
     if(argc==2&&std::string(argv[1])=="--help"){
       if(singleton::mpi().isMainProcessor())std::cout<<"graphiteCouette3d --config run.cfg [--max-steps N]\n";

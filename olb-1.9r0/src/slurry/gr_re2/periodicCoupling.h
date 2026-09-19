@@ -184,6 +184,23 @@ private:
         }
   }
 public:
+  // A loaded lattice already contains the previous particle mask. The sparse
+  // image cache is process-local and starts empty, so clear all auxiliary
+  // particle fields once before rebuilding it; otherwise mapping doubles them.
+  void resetAfterRestart() {
+    _images.clear();_activeImages=0;_mapTime=std::numeric_limits<T>::quiet_NaN();
+    for(int b=0;b<_lattice.getLoadBalancer().size();++b) {
+      const auto& geometry=_geometry.getBlockGeometry(b);
+      const auto extent=geometry.getExtent();const int padding=geometry.getPadding();
+      auto& block=_lattice.getBlock(b);
+      for(int x=-padding;x<extent[0]+padding;++x)
+        for(int y=-padding;y<extent[1]+padding;++y)
+          for(int z=-padding;z<extent[2]+padding;++z) {
+            auto cell=block.get(L{x,y,z});
+            olb::particles::resetAllParticleRelatedFields<D,decltype(cell),T>(cell);
+          }
+    }
+  }
   CachedCoupling(olb::SuperGeometry<T,3>&geometry,olb::SuperLattice<T,D>&lattice,
                  const olb::UnitConverter<T,D>&converter,const V&box,T gamma,
                  const V&semiaxes)
