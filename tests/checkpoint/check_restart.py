@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +21,8 @@ def main():
     parser.add_argument('--executable',type=Path,default=ROOT/'build/slurry/current/slurry')
     parser.add_argument('--work',type=Path)
     parser.add_argument('--ranks',type=int,default=1)
+    parser.add_argument('--checkpoint-seconds',type=float,
+                        help='Override wall-time interval for a short timer-trigger regression')
     args=parser.parse_args()
     work=args.work or Path(tempfile.mkdtemp(prefix='pure-gr-restart-'))
     work.mkdir(parents=True,exist_ok=True)
@@ -30,8 +33,10 @@ def main():
     config['particles']['count']=2
     config['geometry']['dx_m']=1.25e-7
     config['flow']['end_strain']=0.01
-    config['output'].update(sample_every_steps=1,checkpoint_every_steps=4,
-                            checkpoint_every_seconds=0,checkpoint_keep=2)
+    config['output'].update(sample_every_steps=1,checkpoint_every_steps=0,
+                            checkpoint_every_seconds=350*60,checkpoint_keep=2)
+    if args.checkpoint_seconds is not None:
+        config['output']['checkpoint_every_seconds']=args.checkpoint_seconds
     config_path=work/'config.json';driver.write_json(config_path,config)
     cfg,_=driver.resolve(config)
     environment=dict(os.environ,SLURRY_ENGINE='pure_gr')
@@ -55,6 +60,16 @@ def main():
                         '--ranks',str(args.ranks),'--max-steps','16','--output',str(work/'resumed'),
                         '--executable',str(executable)],stdout=log,stderr=subprocess.STDOUT,check=True)
     resumed=work/'resumed/pure_gr/g000_100'
+    for directory,log_name,start,endpoint in [(work/'whole','run.log',0,16),
+                                              (work/'part','run.log',0,8),
+                                              (resumed,'solver.log',8,16)]:
+        saved=[int(value) for value in re.findall(r'Checkpoint saved: .*?/checkpoint_(\d+)',
+                                                (directory/log_name).read_text())]
+        assert saved and saved[-1]==endpoint,(directory,saved)
+        assert all(step>start for step in saved),'Unexpected startup checkpoint: '+str(saved)
+        if args.checkpoint_seconds is None:
+            assert saved==[endpoint],'350-minute interval saved before normal exit: '+str(saved)
+        print('%s: checkpoint steps=%s'%(directory.name,saved))
     timing={'wall_seconds','steps_per_second','fluid_seconds','map_seconds',
             'coupling_seconds','particle_seconds','output_seconds'}
     for name in ('history.csv','particles.csv'):

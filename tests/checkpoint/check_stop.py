@@ -30,6 +30,7 @@ def main():
     work=args.work or Path(tempfile.mkdtemp(prefix='pure-gr-stop-'));work.mkdir(parents=True,exist_ok=True)
     source,data=driver.latest_checkpoint(args.source)
     config=json.loads(args.config.read_text());config['flow']['end_strain']=1
+    config['output'].update(checkpoint_every_steps=0,checkpoint_every_seconds=350*60)
     config_path=work/'config.json';driver.write_json(config_path,config)
     prefix=[sys.executable,str(ROOT/'slurry/tools/run_slurry.py'),'--config',str(config_path),
             '--ranks',str(data['ranks']),'--executable',str(args.executable.resolve())]
@@ -40,10 +41,15 @@ def main():
                                  stdout=log,stderr=subprocess.STDOUT)
         try:
             deadline=time.monotonic()+90
-            while not (result/'latest_checkpoint.txt').is_file():
+            # Startup no longer writes a checkpoint. Wait for the solver's first
+            # completed restored step, after the driver's signal handler is ready.
+            solver_log=result/'solver.log'
+            progress='step=%d '%(data['step']+1)
+            while not (solver_log.is_file() and progress in solver_log.read_text()):
                 if process.poll() is not None:raise RuntimeError('Run exited before stop signal; inspect '+str(work/'stop.log'))
-                if time.monotonic()>deadline:raise RuntimeError('Timed out waiting for initial restored checkpoint')
+                if time.monotonic()>deadline:raise RuntimeError('Timed out waiting for the first restored step')
                 time.sleep(0.05)
+            assert not (result/'latest_checkpoint.txt').exists(),'Unexpected startup/periodic checkpoint'
             process.send_signal(signal.SIGUSR1)
             assert process.wait(timeout=90)==0,'Controller did not stop cleanly'
         finally:

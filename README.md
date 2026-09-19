@@ -145,18 +145,24 @@ CSV 없이 checkpoint만 옮긴 경우 새 CSV는 저장 시각부터 시작합�
 
 ### 저장 주기와 파일
 
-다음 키를 기존 JSON의 `output` 객체에 추가하면 기본 주기를 변경할 수 있습니다.
+기본 주기는 실제 실행 시간(wall time) **350분**이며 step 기준 주기 저장은 꺼져 있습니다.
+현재 `pure_gr.json`에 아래 키가 없으면 자동으로 이 기본값을 사용합니다.
+다른 주기를 원하거나 기존에 명시한 주기가 있다면 `output` 객체에서 수정합니다.
 
 ```json
-"checkpoint_every_steps": 200,
-"checkpoint_every_seconds": 900.0,
+"checkpoint_every_steps": 0,
+"checkpoint_every_seconds": 21000.0,
 "checkpoint_keep": 2
 ```
 
-200 LB step 또는 마지막 저장 이후 wall time 900초 중 먼저 도달한 조건에서 저장합니다.
-저장은 항상 **완료된 LB step 경계**에서 수행하므로 한 step이 오래 걸리면 900초를 넘을 수 있습니다.
-시작, 정상 종료, `--max-steps` 도달에도 저장하고, 최근 완료본 두 개를 보관합니다.
-각 주기를 0으로 설정하면 해당 주기적 저장만 끕니다.
+첫 주기는 신규/재시작 실행의 계산 루프 시작부터, 이후 주기는 마지막 저장 완료부터
+21,000초(350분)를 셉니다. 시뮬레이션상의 물리 시간이 아니라 실제 경과 시간이며,
+Slurm 대기 시간과 재시작 전 중단 시간은 포함하지 않습니다.
+저장은 항상 **완료된 LB step 경계**에서 수행하므로 한 step이 오래 걸리면 350분을 넘을 수 있습니다.
+**0 step과 재시작 직후에는 저장하지 않습니다.** 정상 종료, `--max-steps` 도달,
+종료 요청 시 저장은 유지하고, 최근 완료본 두 개를 보관합니다.
+각 주기를 0으로 설정하면 해당 주기적 저장만 끕니다. step 기준을 다시 활성화하려는 경우에만
+`checkpoint_every_steps`를 양수로 지정합니다. 0 step의 CSV 기록은 계속 남습니다.
 
 sbatch의 `#SBATCH --signal=B:USR1@180` 예고를 받으면 현재 step을 마친 뒤 저장하고
 `CHECKPOINTED`로 종료합니다. 강제 종료가 먼저 발생하거나 입자 풀이가 실패하면 직전 완료
@@ -368,7 +374,10 @@ python3 tests/checkpoint/check_stop.py --source /tmp/gr_restart_check/part --con
 
 MPI 바이너리에서는 첫 명령에 `--ranks 2`를 추가합니다. 두 번째 명령은 source checkpoint의 rank 수를 읽습니다. 첫 검사는 활성 접촉과 접촉 탄성 에너지를 확인하고,
 시간 측정 열을 제외한 물리 CSV와 최종 rank별 lattice 파일을 비교합니다.
-두 번째 검사는 실제 종료 신호 후 저장·재시작 및 손상 파일 거부를 확인합니다.
+기본 350분 주기에서는 짧은 실행이 종료될 때만 저장되는지, 0 step과 재시작 직후 저장이
+없는지도 확인합니다. 첫 명령에 `--checkpoint-seconds 0.001`과 별도 `--work` 경로를 주면
+검사용 시간 간격만 줄여 시간 기준 저장 경로를 실행할 수 있습니다.
+두 번째 검사는 주기 저장이 없는 상태에서 실제 종료 신호 후 저장·재시작 및 손상 파일 거부를 확인합니다.
 
 ### 기록된 검증 결과
 
@@ -387,6 +396,7 @@ MPI 바이너리에서는 첫 명령에 `--ranks 2`를 추가합니다. 두 번�
 | checkpoint/restart | Python 36개(재시작 10개 포함), 전체 직렬 PETSc 및 2-rank OpenMPI legacy 빌드 통과 |
 | 재시작 동등성 | 직렬 PETSc 및 2-rank legacy 각각 물리 CSV 전체 일치, 최종 rank별 lattice byte 일치 |
 | 종료·손상 처리 | 위 두 환경에서 SIGUSR1 전달·CHECKPOINTED 종료·복구, 동일 길이 바이너리 손상 거부 통과 |
+| 350분 저장 주기 | 직렬 PETSc 재빌드·Python 42개 통과. 기본 주기에서 시작 저장 없음·종료 저장·정확한 재시작 확인. 검사용 0.001초 주기로 시간 기준 저장 확인. SIGUSR1 저장·재시작·손상 거부 통과 |
 
 재시작 단위검사는 미완료 `.partial`, 누락 rank 파일, checkpoint 없는 이전 실행,
 물리값/dt/rank 호환성, 누적 종료점, 저장 CSV 경계, 혼합 전단율 batch의 완료 케이스 건너뛰기도
