@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -57,6 +58,9 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
     cfg['numerics'].setdefault('particle_max_krylov_iterations', 120)
     cfg['numerics'].setdefault('solver_diagnostics', True)
     contact = cfg.setdefault('rough_contact',{})
+    for key,value in {'checkpoint_every_steps':200,'checkpoint_every_seconds':900.0,
+                      'checkpoint_keep':2}.items():
+        cfg['output'].setdefault(key,value)
     for key,value in {'enabled':True,'roughness_gap_m':2e-9,'sliding_friction':.5,
                       'tangential_stiffness_N_m':9.0,'rolling_length_m':100e-9,
                       'rolling_yield_angle_rad':.01}.items():
@@ -130,6 +134,9 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
     integer(max_steps, 'max_steps')
     integer(out['sample_every_steps'], 'sample_every_steps', 1)
     integer(out['vtk_every_steps'], 'vtk_every_steps')
+    integer(out['checkpoint_every_steps'], 'checkpoint_every_steps')
+    positive(out['checkpoint_every_seconds'], 'checkpoint_every_seconds', zero=True)
+    integer(out['checkpoint_keep'], 'checkpoint_keep', 1)
     length, dx, diameter, thickness = g['box_length_m'],g['dx_m'],p['diameter_m'],p['thickness_m']
     rate, eta, nu_lb = flow['shear_rate_s_inv'],f['dynamic_viscosity_Pa_s'],n['nu_lattice']
     cells = round(length/dx)
@@ -228,6 +235,8 @@ def solver_values(cfg, output, particles, max_steps):
         'local_cutoff_excess_gap':interaction['local_cutoff_excess_gap_m'],
         'end_strain':flow['end_strain'], 'max_steps':max_steps,
         'sample_every':out['sample_every_steps'], 'vtk_every':out['vtk_every_steps'],
+        'checkpoint_every':out['checkpoint_every_steps'], 'checkpoint_seconds':out['checkpoint_every_seconds'],
+        'checkpoint_keep':out['checkpoint_keep'],
         'output_dir':str(output), 'particles_csv':str(particles)
     }
 
@@ -235,6 +244,93 @@ def solver_values(cfg, output, particles, max_steps):
 def require_local_adhesion_build(cfg, build_info):
     if cfg['interaction']['local_gap_fraction'] > 0 and build_info.get('local_gap_adhesion') is not True:
         raise ValueError('This configuration requires local-gap adhesion. Rebuild with build_slurry_cpu.sbatch before running.')
+
+
+def read_checkpoint(directory):
+    directory=Path(directory).expanduser().resolve()
+    data=json.loads((directory/'checkpoint.json').read_text(encoding='utf-8'))
+    if data.get('engine')!='pure_gr' or data.get('format_version')!=1 or data.get('complete') is not True:
+        raise ValueError('Not a completed pure_gr checkpoint: '+str(directory))
+    integer(data['step'],'checkpoint step')
+    integer(data['ranks'],'checkpoint ranks',1)
+    positive(data['dt_s'],'checkpoint dt_s')
+    positive(data['shear_rate_s_inv'],'checkpoint shear rate')
+    expected={'state.bin','initial_particles.csv'}|{'lattice_rank_%d.bin'%rank for rank in range(data['ranks'])}
+    if set(data['files'])!=expected:
+        raise ValueError('Checkpoint file inventory is incomplete: '+str(directory))
+    for name,size in data['files'].items():
+        integer(size,'checkpoint file size',1)
+        path=directory/name
+        if not path.is_file() or path.stat().st_size!=size:
+            raise ValueError('Missing or truncated checkpoint file: '+str(path))
+    return directory,data
+
+
+def latest_checkpoint(run):
+    run=Path(run).expanduser().resolve()
+    if (run/'checkpoint.json').is_file():
+        return read_checkpoint(run)
+    candidates=[]
+    for directory in (run/'checkpoints').glob('checkpoint_*'):
+        if directory.is_dir() and directory.name[11:].isdigit() and (directory/'checkpoint.json').is_file():
+            candidates.append((int(directory.name[11:]),directory))
+    if not candidates:
+        raise ValueError('No completed pure_gr checkpoint in '+str(run)+
+                         '. Old history.csv/particle failure files do not contain the fluid state.')
+    return read_checkpoint(max(candidates)[1])
+
+
+def restart_targets(folder):
+    folder=Path(folder).expanduser().resolve()
+    if (folder/'checkpoint.json').is_file() or (folder/'checkpoints').is_dir():
+        return [latest_checkpoint(folder)]
+    scope=folder/'pure_gr' if (folder/'pure_gr').is_dir() else folder
+    runs=sorted({path.parent for path in scope.rglob('checkpoints') if path.is_dir()})
+    if not runs:
+        raise ValueError('No pure_gr checkpoint under '+str(folder)+
+                         '. Checkpoints are available only for runs made with the restart update.')
+    return [latest_checkpoint(run) for run in runs]
+
+
+def validate_restart(cfg,meta,checkpoint,ranks,max_steps=0,allow_complete=False):
+    values=solver_values(cfg,Path('run'),Path('particles.csv'),max_steps)
+    values.update(dt_s=meta['dt_s'],particle_count=cfg['particles']['count'],ranks=ranks)
+    changed=[]
+    for key,saved in checkpoint['immutable_config'].items():
+        actual=values.get(key)
+        if actual is None or not math.isclose(float(actual),float(saved),rel_tol=1e-13,abs_tol=0.0):
+            changed.append(key)
+    if changed:
+        raise ValueError('Restart physical settings/MPI layout differ: '+', '.join(changed)+
+                         '. Keep the saved physical settings; end_strain, solver limits/tolerances and output intervals may change.')
+    endpoint=math.ceil(cfg['flow']['end_strain']/(cfg['flow']['shear_rate_s_inv']*meta['dt_s']))
+    if max_steps:endpoint=min(endpoint,max_steps)
+    if endpoint<=checkpoint['step'] and not allow_complete:
+        raise ValueError('Restart endpoint must exceed saved step %d; increase flow.end_strain or --max-steps.'%checkpoint['step'])
+    return endpoint>checkpoint['step']
+
+
+def copy_history_prefix(checkpoint,data,output):
+    # Keep the source run intact. Copy exactly the flushed bytes represented by
+    # the checkpoint, excluding any later samples from an interrupted attempt.
+    source=checkpoint.parent.parent if checkpoint.parent.name=='checkpoints' else None
+    if source is None:return False
+    sizes=data.get('output_bytes',{})
+    if not all((source/name).is_file() for name in ('history.csv','particles.csv')):
+        return False
+    for name in ('history.csv','particles.csv'):
+        size=sizes.get(name,0)
+        integer(size,'checkpoint output size',1)
+        if (source/name).stat().st_size<size:
+            raise ValueError('Source output is shorter than its checkpoint: '+str(source/name))
+    for name in ('history.csv','particles.csv'):
+        left=sizes[name]
+        with (source/name).open('rb') as src,(output/name).open('wb') as dst:
+            while left:
+                block=src.read(min(left,1048576))
+                if not block:raise ValueError('Source output was truncated while copying '+name)
+                dst.write(block);left-=len(block)
+    return True
 
 
 def main():
@@ -250,11 +346,19 @@ def main():
     parser.add_argument('--executable',type=Path,default=Path(__file__).with_name('build')/'current'/'graphiteCouette3d')
     parser.add_argument('--generator',type=Path,default=Path(__file__).with_name('generate_particles.py'))
     parser.add_argument('--ranks',type=int,default=1)
+    parser.add_argument('--restart',type=Path,help='Completed pure_gr checkpoint or previous case directory')
     args=parser.parse_args()
     try:
-        cfg,meta=resolve(json.loads(args.config.read_text(encoding='utf-8')),args.shear_rate,args.max_steps,
+        restart,checkpoint=latest_checkpoint(args.restart) if args.restart else (None,None)
+        rate=args.shear_rate
+        if checkpoint:
+            if rate is not None and not math.isclose(rate,checkpoint['shear_rate_s_inv'],rel_tol=1e-13):
+                raise ValueError('Restart retains the checkpoint shear rate')
+            rate=checkpoint['shear_rate_s_inv']
+        cfg,meta=resolve(json.loads(args.config.read_text(encoding='utf-8')),rate,args.max_steps,
                          args.target_mach,args.time_step,args.end_strain)
         integer(args.ranks,'ranks',1)
+        if checkpoint:validate_restart(cfg,meta,checkpoint,args.ranks,args.max_steps)
         if args.dry_run:
             print(json.dumps({'config':cfg,'derived':meta},indent=2,allow_nan=False))
             return 0
@@ -278,11 +382,13 @@ def main():
         if build_info.get('rough_contact') is not True:
             raise ValueError('Executable predates rough contact and the corrected particle solver; run build_slurry_cpu.sbatch again')
         require_local_adhesion_build(cfg, build_info)
+        if build_info.get('pure_gr_checkpoint_version')!=1:
+            raise ValueError('This driver requires pure_gr checkpoint support. Rebuild with build_slurry_cpu.sbatch.')
         if cfg['numerics']['particle_solver'] == 'petsc' and build_info.get('particle_solver') != 'petsc':
             raise ValueError('This configuration requires the PETSc contact solver. Rebuild with build_slurry_cpu.sbatch before running.')
         if args.ranks>1 and not build_info['mpi_enabled']:
             raise ValueError('--ranks > 1 requires an MPI-enabled executable; use build_slurry_cpu.sbatch')
-        if not generator.is_file():
+        if not restart and not generator.is_file():
             raise ValueError('Particle generator not found: '+str(generator))
         if any((output/name).exists() for name in ('manifest.json','history.csv','resolved_run.cfg','initial_particles.csv')):
             raise ValueError('Output already contains a run; specify a new --output directory')
@@ -295,11 +401,15 @@ def main():
     effective=output/'effective_config.json'
     write_json(effective,cfg)
     particles=output/'initial_particles.csv'
-    generation=subprocess.run([sys.executable,str(generator),'--config',str(effective),'--output',str(particles)])
-    if generation.returncode:
-        return generation.returncode
+    if restart:
+        shutil.copy2(str(restart/'initial_particles.csv'),str(particles))
+        copy_history_prefix(restart,checkpoint,output)
+    else:
+        generation=subprocess.run([sys.executable,str(generator),'--config',str(effective),'--output',str(particles)])
+        if generation.returncode:return generation.returncode
     config_path=output/'resolved_run.cfg'
     values=solver_values(cfg,output,particles,args.max_steps)
+    values['restart_dir']=str(restart) if restart else ''
     with config_path.open('w',encoding='utf-8') as stream:
         for name,value in values.items():
             if '\n' in str(value) or '\r' in str(value):
@@ -309,24 +419,36 @@ def main():
     write_json(output/'manifest.json',{
         'created_utc':datetime.now(timezone.utc).isoformat(), 'slurm_job_id':os.environ.get('SLURM_JOB_ID'),
         'config':cfg,'derived':meta,'ranks':args.ranks,'argv':argv,'executable_build':build_info,
+        'restart_directory':str(restart) if restart else None,
+        'restart_step':checkpoint['step'] if checkpoint else None,
         'petsc_options':os.environ.get('PETSC_OPTIONS',''),
-        'sha256':{'executable':digest(executable),'driver':digest(__file__),'generator':digest(generator),'particles':digest(particles)}
+        'sha256':{'executable':digest(executable),'driver':digest(__file__),
+                  'generator':digest(generator) if generator.is_file() else None,'particles':digest(particles)}
     })
     print(json.dumps(meta,indent=2),flush=True)
     print('Run directory: '+str(output),flush=True)
     start=time.monotonic()
-    # Stream directly to stdout and the log. No signal interception or stop files.
+    requested=[]
+    def request_stop(number,frame):
+        requested.append(number)
+        (output/'STOP_REQUEST').touch()
+        print('Stop requested; saving a collective pure_gr checkpoint at the next completed LB step.',flush=True)
+    for number in (signal.SIGUSR1,signal.SIGTERM,signal.SIGINT):signal.signal(number,request_stop)
     with (output/'solver.log').open('w',encoding='utf-8') as logfile:
         process=subprocess.Popen(argv,cwd=str(output),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                                 universal_newlines=True,bufsize=1)
+                                 universal_newlines=True,bufsize=1,start_new_session=True)
         for line in process.stdout:
             print(line,end='',flush=True)
             logfile.write(line)
             logfile.flush()
         rc=process.wait()
-    solver_status=json.loads((output/'status.json').read_text(encoding='utf-8')) if rc==0 else {}
+    status_path=output/'status.json'
+    solver_status=json.loads(status_path.read_text(encoding='utf-8')) if rc==0 and status_path.is_file() else {}
+    if rc==0 and solver_status.get('status') not in ('COMPLETED','MAX_STEPS','CHECKPOINTED'):
+        print('Solver did not write a valid completion/checkpoint status.',file=sys.stderr);rc=1
     status={'exit_code':rc,'wall_seconds':time.monotonic()-start,
-            'status':solver_status.get('status','FAILED') if rc==0 else 'FAILED'}
+            'status':solver_status.get('status','FAILED') if rc==0 else 'FAILED',
+            'stop_requested':bool(requested),'solver_status':solver_status}
     write_json(output/'driver_status.json',status)
     print(json.dumps(status,indent=2),flush=True)
     summarizer=output/'summarize_particle_solver.py'
