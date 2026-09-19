@@ -61,6 +61,12 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
                       'tangential_stiffness_N_m':9.0,'rolling_length_m':100e-9,
                       'rolling_yield_angle_rad':.01}.items():
         contact.setdefault(key,value)
+    # Missing local_gap_fraction means the original RE2 interaction, including
+    # when running older JSON cases with the new executable.
+    for key,value in {'local_gap_m':.3e-9,'local_gap_fraction':0.0,
+                      'local_switch_excess_gap_m':2e-9,
+                      'local_cutoff_excess_gap_m':10e-9}.items():
+        cfg['interaction'].setdefault(key,value)
     if shear_rate is not None:
         cfg['flow']['shear_rate_s_inv'] = shear_rate
     if end_strain is not None:
@@ -79,6 +85,14 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         for name in names:
             positive(group[name], name)
     positive(interaction['hamaker_J'], 'hamaker_J', zero=True)
+    positive(interaction['local_gap_m'], 'local_gap_m')
+    positive(interaction['local_gap_fraction'], 'local_gap_fraction', zero=True)
+    if interaction['local_gap_fraction'] > 1:
+        raise ValueError('local_gap_fraction must be at most one')
+    positive(interaction['local_switch_excess_gap_m'], 'local_switch_excess_gap_m', zero=True)
+    positive(interaction['local_cutoff_excess_gap_m'], 'local_cutoff_excess_gap_m')
+    if not interaction['local_switch_excess_gap_m'] < interaction['local_cutoff_excess_gap_m']:
+        raise ValueError('Require local_switch_excess_gap_m < local_cutoff_excess_gap_m')
     positive(n['time_step_s'], 'time_step_s', zero=True)
     positive(p['minimum_gap_m'], 'minimum_gap_m', zero=True)
     integer(p['count'], 'particles.count', 1)
@@ -106,6 +120,13 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         raise ValueError('Require contact_gap_tolerance_m < roughness_gap_m < cutoff_gap_m')
     if contact['enabled'] and p['minimum_gap_m'] < contact['roughness_gap_m']:
         raise ValueError('particles.minimum_gap_m must be at least rough_contact.roughness_gap_m')
+    if interaction['local_gap_fraction'] > 0:
+        if not contact['enabled']:
+            raise ValueError('Local-gap adhesion requires rough_contact.enabled=true')
+        if interaction['local_gap_m'] > contact['roughness_gap_m']:
+            raise ValueError('Local-gap adhesion requires local_gap_m <= roughness_gap_m')
+        if contact['roughness_gap_m'] + interaction['local_cutoff_excess_gap_m'] > interaction['switch_gap_m']:
+            raise ValueError('Local-gap adhesion requires roughness_gap_m + local_cutoff_excess_gap_m <= switch_gap_m')
     integer(max_steps, 'max_steps')
     integer(out['sample_every_steps'], 'sample_every_steps', 1)
     integer(out['vtk_every_steps'], 'vtk_every_steps')
@@ -134,6 +155,7 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
     steps = math.ceil(flow['end_strain']/(rate*dt))
     stop = min(steps,max_steps) if max_steps else steps
     metadata = {
+        'interaction':copy.deepcopy(interaction), 'rough_contact':copy.deepcopy(contact),
         'shear_rate_s_inv':rate, 'dt_s':dt,
         'time_mapping':'manual_time_step' if n['time_step_s'] else 'centered_affine_target_mach',
         'target_mach':n['target_mach'], 'affine_mach':math.sqrt(3)*affine_speed*dt/dx,
@@ -201,10 +223,18 @@ def solver_values(cfg, output, particles, max_steps):
         'rolling_yield_angle':contact['rolling_yield_angle_rad'],
         'hamaker':interaction['hamaker_J'], 'sigma_lj':interaction['sigma_lj_m'],
         'switch_gap':interaction['switch_gap_m'], 'cutoff_gap':interaction['cutoff_gap_m'],
+        'local_gap':interaction['local_gap_m'], 'local_gap_fraction':interaction['local_gap_fraction'],
+        'local_switch_excess_gap':interaction['local_switch_excess_gap_m'],
+        'local_cutoff_excess_gap':interaction['local_cutoff_excess_gap_m'],
         'end_strain':flow['end_strain'], 'max_steps':max_steps,
         'sample_every':out['sample_every_steps'], 'vtk_every':out['vtk_every_steps'],
         'output_dir':str(output), 'particles_csv':str(particles)
     }
+
+
+def require_local_adhesion_build(cfg, build_info):
+    if cfg['interaction']['local_gap_fraction'] > 0 and build_info.get('local_gap_adhesion') is not True:
+        raise ValueError('This configuration requires local-gap adhesion. Rebuild with build_slurry_cpu.sbatch before running.')
 
 
 def main():
@@ -247,6 +277,7 @@ def main():
             raise ValueError('Executable did not report its MPI build mode; rebuild this application')
         if build_info.get('rough_contact') is not True:
             raise ValueError('Executable predates rough contact and the corrected particle solver; run build_slurry_cpu.sbatch again')
+        require_local_adhesion_build(cfg, build_info)
         if cfg['numerics']['particle_solver'] == 'petsc' and build_info.get('particle_solver') != 'petsc':
             raise ValueError('This configuration requires the PETSc contact solver. Rebuild with build_slurry_cpu.sbatch before running.')
         if args.ranks>1 and not build_info['mpi_enabled']:
