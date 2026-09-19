@@ -549,7 +549,12 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
 #endif
     checked(SNESLineSearchSetTolerances(line,PETSC_DEFAULT,1.,PETSC_DEFAULT,PETSC_DEFAULT,PETSC_DEFAULT,std::min(1,settings.maxLineSearch)));
     KSP ksp;PC pc;checked(SNESGetKSP(npc,&ksp));checked(KSPSetType(ksp,KSPGMRES));
-    checked(KSPGMRESSetRestart(ksp,settings.maxKrylovIterations));checked(KSPSetTolerances(ksp,.05,1.e-14,PETSC_DEFAULT,settings.maxKrylovIterations));
+    // Close adhesive contacts nearly cancel large pair forces and normal
+    // reactions. A 5% inexact Newton solve can therefore stop before the
+    // remaining force/torque imbalance is resolved, and send the secant/NGMRES
+    // search into a stagnating friction branch. Resolve the linear direction
+    // to 0.1%; nonlinear acceptance and all iteration limits stay unchanged.
+    checked(KSPGMRESSetRestart(ksp,settings.maxKrylovIterations));checked(KSPSetTolerances(ksp,1.e-3,1.e-14,PETSC_DEFAULT,settings.maxKrylovIterations));
     checked(KSPSetPCSide(ksp,PC_RIGHT));checked(KSPSetNormType(ksp,KSP_NORM_UNPRECONDITIONED));
     checked(KSPGetPC(ksp,&pc));checked(PCSetType(pc,PCSHELL));checked(PCShellSetContext(pc,&context));checked(PCShellSetApply(pc,particlePetscPcApply));
     checked(SNESSetFromOptions(objects.snes));
