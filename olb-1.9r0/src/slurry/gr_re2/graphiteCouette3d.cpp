@@ -159,6 +159,11 @@ void simulate(const Config& c){
   graphite::ParticleStepSettings solver;
   solver.box=box;solver.shearRate=c.shear_rate;
   solver.pair={c.hamaker,c.sigma_lj,c.switch_gap,c.cutoff_gap};
+  solver.pair.roughnessGap=c.roughness_gap;
+  solver.pair.localGap=c.local_gap;
+  solver.pair.localGapFraction=c.local_gap_fraction;
+  solver.pair.localSwitchExcessGap=c.local_switch_excess_gap;
+  solver.pair.localCutoffExcessGap=c.local_cutoff_excess_gap;
   solver.nearField.viscosity=c.dynamic_viscosity;solver.nearField.matchingGap=c.lubrication_cutoff_cells*c.dx;
   solver.nearField.enabled=c.lubrication_cutoff_cells>0;
   solver.maxSubsteps=c.particle_max_substeps;solver.maxNewtonIterations=c.particle_max_iterations;solver.relativeTolerance=c.particle_tolerance;
@@ -190,6 +195,11 @@ void simulate(const Config& c){
      <<" sliding_friction="<<c.sliding_friction<<" tangential_stiffness_N_m="<<c.tangential_stiffness
      <<" rolling_length_nm="<<c.rolling_length*1.e9<<" rolling_yield_angle_rad="<<c.rolling_yield_angle
      <<" end_strain="<<c.end_strain<<std::endl;
+  log<<"hamaker_J="<<c.hamaker<<" sigma_lj_nm="<<c.sigma_lj*1.e9
+     <<" local_gap_nm="<<c.local_gap*1.e9<<" local_gap_fraction="<<c.local_gap_fraction
+     <<" local_switch_excess_gap_nm="<<c.local_switch_excess_gap*1.e9
+     <<" local_cutoff_excess_gap_nm="<<c.local_cutoff_excess_gap*1.e9
+     <<" switch_gap_nm="<<c.switch_gap*1.e9<<" cutoff_gap_nm="<<c.cutoff_gap*1.e9<<std::endl;
   log<<"particle_solver="<<c.particle_solver<<" particle_tolerance="<<c.particle_tolerance
      <<" force_absolute_tolerance_N="<<c.particle_force_absolute_tolerance
      <<" torque_absolute_tolerance_N_m="<<c.particle_torque_absolute_tolerance
@@ -203,7 +213,16 @@ void simulate(const Config& c){
     meta<<std::setprecision(17)<<"{\n\"dt_s\":"<<u.dt<<",\n\"imposed_mach\":"<<u.mach<<",\n\"inertia_scale\":"<<u.alpha
       <<",\n\"rho_fluid_numeric_kg_m3\":"<<u.rhoFluid<<",\n\"rho_particle_numeric_kg_m3\":"<<u.rhoParticle
       <<",\n\"Re_physical\":"<<u.rePhysical<<",\n\"Re_numeric\":"<<u.reNumeric<<",\n\"St_numeric\":"<<u.stNumeric
-      <<",\n\"particle_count\":"<<bodies.size()<<",\n\"steps_to_target_strain\":"<<endStep<<"\n}\n";
+      <<",\n\"particle_count\":"<<bodies.size()<<",\n\"steps_to_target_strain\":"<<endStep
+      <<",\n\"interaction\":{\"hamaker_J\":"<<c.hamaker<<",\"sigma_lj_m\":"<<c.sigma_lj
+      <<",\"switch_gap_m\":"<<c.switch_gap<<",\"cutoff_gap_m\":"<<c.cutoff_gap
+      <<",\"local_gap_m\":"<<c.local_gap<<",\"local_gap_fraction\":"<<c.local_gap_fraction
+      <<",\"local_switch_excess_gap_m\":"<<c.local_switch_excess_gap
+      <<",\"local_cutoff_excess_gap_m\":"<<c.local_cutoff_excess_gap<<"}"
+      <<",\n\"rough_contact\":{\"enabled\":"<<(c.rough_contact_enabled?"true":"false")
+      <<",\"roughness_gap_m\":"<<c.roughness_gap<<",\"sliding_friction\":"<<c.sliding_friction
+      <<",\"tangential_stiffness_N_m\":"<<c.tangential_stiffness
+      <<",\"rolling_length_m\":"<<c.rolling_length<<",\"rolling_yield_angle_rad\":"<<c.rolling_yield_angle<<"}\n}\n";
     history.open(fs::path(c.output_dir)/"history.csv");poses.open(fs::path(c.output_dir)/"particles.csv");
     if(!history||!poses)throw std::runtime_error("Cannot create output CSV");
     history<<"step,time_s,strain,eta_bulk_Pa_s,eta_relative,stress_total_Pa,stress_fluid_Pa,stress_surface_Pa,stress_pair_attractive_Pa,stress_pair_repulsive_Pa,stress_lubrication_Pa,stress_acceleration_Pa,stress_fluid_reynolds_Pa,stress_particle_reynolds_Pa,stress_noninertial_Pa,stress_inertial_Pa,max_mach,particle_mach_bound,density_drift,porosity_volume_fraction,analytic_volume_fraction,min_gap_m,max_pair_force_N,potential_energy_J,active_pairs,particle_substeps,newton_iterations,krylov_iterations,residual_evaluations,wall_seconds,steps_per_second,fluid_seconds,map_seconds,coupling_seconds,particle_seconds,output_seconds,stress_contact_normal_Pa,stress_contact_tangential_Pa,contact_count,sliding_contact_count,rolling_contact_count,contact_dissipation_W,contact_elastic_energy_J,force_residual_ratio,torque_residual_ratio,contact_gap_violation_m,max_fluid_mach,fluid_density_drift\n";
@@ -279,9 +298,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"revision\":\"rough-contact-strain10\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"revision\":\"local-gap-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"revision\":\"rough-contact-strain10\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"revision\":\"local-gap-adhesion-1\"}\n";
 #endif
     return 0;
   }

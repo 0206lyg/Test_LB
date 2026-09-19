@@ -18,6 +18,9 @@ struct Config {
   double diameter=3.3e-6,thickness=4e-7,rho_particle=2400,rho_fluid=997,dynamic_viscosity=.000890;
   double nu_lattice=.5,target_mach=.1,time_step_s=0,epsilon_cells=.5;
   double hamaker=.99e-19,sigma_lj=3e-9,switch_gap=400e-9,cutoff_gap=500e-9;
+  // Old configurations retain the uncorrected RE2 law unless explicitly enabled.
+  double local_gap=.3e-9,local_gap_fraction=0.;
+  double local_switch_excess_gap=2e-9,local_cutoff_excess_gap=10e-9;
   double end_strain=10,particle_tolerance=1e-4,lubrication_cutoff_cells=1.;
   bool rough_contact_enabled=true;
   double roughness_gap=2e-9,sliding_friction=.5,tangential_stiffness=9.;
@@ -54,6 +57,7 @@ inline Config parseConfig(int argc,char**argv) {
     REAL(shear_rate) REAL(box_x) REAL(box_y) REAL(box_z) REAL(dx) REAL(diameter) REAL(thickness)
     REAL(rho_particle) REAL(rho_fluid) REAL(dynamic_viscosity) REAL(nu_lattice) REAL(target_mach)
     REAL(time_step_s) REAL(epsilon_cells) REAL(hamaker) REAL(sigma_lj) REAL(switch_gap) REAL(cutoff_gap)
+    REAL(local_gap) REAL(local_gap_fraction) REAL(local_switch_excess_gap) REAL(local_cutoff_excess_gap)
     REAL(end_strain) REAL(particle_tolerance) REAL(lubrication_cutoff_cells)
     REAL(roughness_gap) REAL(sliding_friction) REAL(tangential_stiffness)
     REAL(rolling_length) REAL(rolling_yield_angle)
@@ -89,6 +93,17 @@ inline Config parseConfig(int argc,char**argv) {
     &&c.particle_force_absolute_tolerance>0&&c.particle_torque_absolute_tolerance>0
     &&c.contact_gap_tolerance>0&&c.contact_gap_tolerance<c.roughness_gap))
     throw std::runtime_error("Invalid geometric/material/solver configuration");
+  if(!(c.local_gap>0&&c.local_gap_fraction>=0&&c.local_gap_fraction<=1
+       &&c.local_switch_excess_gap>=0&&c.local_cutoff_excess_gap>c.local_switch_excess_gap))
+    throw std::runtime_error("Require local_gap > 0, 0 <= local_gap_fraction <= 1, and 0 <= local_switch_excess_gap < local_cutoff_excess_gap");
+  if(c.local_gap_fraction>0){
+    if(!c.rough_contact_enabled)
+      throw std::runtime_error("Local-gap adhesion requires rough_contact_enabled=1");
+    if(c.local_gap>c.roughness_gap)
+      throw std::runtime_error("Local-gap adhesion requires local_gap <= roughness_gap");
+    if(c.roughness_gap+c.local_cutoff_excess_gap>c.switch_gap)
+      throw std::runtime_error("Local-gap adhesion requires roughness_gap + local_cutoff_excess_gap <= switch_gap");
+  }
   for(double length:{c.box_x,c.box_y,c.box_z})
     if(length/c.dx<8||std::abs(length/c.dx-std::round(length/c.dx))>1e-7)
       throw std::runtime_error("Box lengths must be integer multiples of dx and at least eight cells");

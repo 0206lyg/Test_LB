@@ -40,6 +40,16 @@ struct ParticleStepSettings {
   double finiteDifferenceStep=1.e-7;
 };
 
+inline void validateParticlePairSettings(const ParticleStepSettings& s) {
+  validatePairParameters(s.pair);
+  if(s.pair.localGapFraction>0. && s.rough.enabled) {
+    const double scale=std::max(std::abs(s.rough.gap),std::abs(s.pair.roughnessGap));
+    if(!std::isfinite(s.rough.gap)
+        || std::abs(s.rough.gap-s.pair.roughnessGap)>32.*std::numeric_limits<double>::epsilon()*scale)
+      throw std::invalid_argument("Local pair adhesion and rough contact must use the same roughness gap");
+  }
+}
+
 struct ParticleStepDiagnostics {
   double minGap=std::numeric_limits<double>::infinity();
   double maxForce=0.,energyAtEnd=0.,lubricationDissipation=0.;
@@ -77,6 +87,20 @@ inline void addMatrix(Mat3& dst,const Mat3& src,double weight) {
 inline double radius(const Body& b) {return *std::max_element(b.axes.begin(),b.axes.end());}
 inline Vec3 worldMomentum(const Body& b) {
   return mul(rotatedDiagonal(b.rotation,b.inertiaBody),b.omega);
+}
+
+inline bool admissibleTrialGap(double gap,const ParticleStepSettings& s) {
+  if(!(gap>0.) || !std::isfinite(gap))return false;
+  if(s.rough.enabled && gap<.8*s.rough.gap)return false;
+  if(s.pair.localGapFraction>0.) {
+    // Both Newton backends may temporarily penetrate the roughness envelope,
+    // but d = D0 + h - h0 must remain positive.  This is a trial-domain guard,
+    // not a change to the accepted unilateral constraint h >= h0.
+    const double margin=32.*std::numeric_limits<double>::epsilon()
+        *std::max(s.pair.roughnessGap,s.pair.localGap);
+    if(!(gap>minimumPairGap(s.pair)+margin))return false;
+  }
+  return true;
 }
 
 // Find the nearest image in the sliding lattice.  Rounding y alone is not a
@@ -145,6 +169,7 @@ struct Residual {
   bool operator()(const Vector& q,Evaluation& e,std::string& error) const {
     ++evaluations;
     try {
+      validateParticlePairSettings(settings);
       const std::size_t n=old.size(),np=n*(n-1)/2;
       e=Evaluation{};e.bodies=old;e.cache=startingCache;
       e.contacts.resize(np);e.gaps.assign(np,std::numeric_limits<double>::infinity());
@@ -174,10 +199,8 @@ struct Residual {
           const auto gap=closestEllipsoidGap(e.bodies[i],image,&e.cache[index]);
           p.gap=gap.gap;p.normal=gap.normal;p.leverI=gap.leverI;p.leverJ=gap.leverJ;
         }
-        if(!(p.gap>0.) || !std::isfinite(p.gap))
-          throw std::domain_error("Particle trial state has a non-positive ellipsoid gap");
-        if(settings.rough.enabled && p.gap<.8*settings.rough.gap)
-          throw std::domain_error("Particle trial exceeds the rough-contact Newton gap domain");
+        if(!admissibleTrialGap(p.gap,settings))
+          throw std::domain_error("Particle trial exceeds the positive local-gap or rough-contact Newton domain");
         e.gaps[index]=p.gap;
         e.diagnostic.minGap=std::min(e.diagnostic.minGap,p.gap);
         force[i]=add(force[i],p.forceI);force[j]=sub(force[j],p.forceI);
@@ -637,6 +660,7 @@ inline ParticleStepDiagnostics evaluateParticleState(
     const std::vector<Body>& bodies,double time,const ParticleStepSettings& settings,
     std::vector<GapCache>* persistentCache=nullptr,
     const PersistentContactState* persistentContacts=nullptr) {
+  validateParticlePairSettings(settings);
   ParticleStepDiagnostics diagnostic;
   const std::size_t pairs=bodies.size()*(bodies.size()-1)/2;
   std::vector<GapCache> localCache;
@@ -693,6 +717,7 @@ inline ParticleStepDiagnostics advanceParticles(
     const std::vector<Vec3>& hydroTorque,double dt,double time,
     const ParticleStepSettings& settings,std::vector<GapCache>* persistentCache=nullptr,
     PersistentContactState* persistentContacts=nullptr) {
+  validateParticlePairSettings(settings);
   if(bodies.empty())return {};
   if(hydroForce.size()!=bodies.size() || hydroTorque.size()!=bodies.size())
     throw std::invalid_argument("Particle hydrodynamic load count does not match particle count");

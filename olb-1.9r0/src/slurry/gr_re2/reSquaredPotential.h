@@ -9,7 +9,31 @@ namespace slurry { namespace gr_re2 {
 namespace graphite {
 struct PairParameters {
   double hamaker=.99e-19,sigma=3e-9,switchGap=400e-9,cutoffGap=500e-9;
+  // The geometric surface remains at roughnessGap. Local adhesion replaces a
+  // fraction of the near-contact RE2 energy with the same interaction at
+  // d=localGap+(h-roughnessGap). The fraction is an effective contribution,
+  // not a measured real-contact area fraction. Zero preserves legacy RE2.
+  double roughnessGap=2e-9,localGap=3e-10,localGapFraction=0.;
+  double localSwitchExcessGap=2e-9,localCutoffExcessGap=10e-9;
 };
+inline void validatePairParameters(const PairParameters&p){
+  if(!std::isfinite(p.hamaker)||!(p.hamaker>=0.)||!std::isfinite(p.sigma)||!(p.sigma>0.)
+     ||!std::isfinite(p.switchGap)||!(p.switchGap>=0.)||!std::isfinite(p.cutoffGap)||!(p.cutoffGap>p.switchGap))
+    throw std::domain_error("Invalid RE2 parameters");
+  if(!std::isfinite(p.localGapFraction)||p.localGapFraction<0.||p.localGapFraction>1.)
+    throw std::domain_error("RE2 local gap fraction must be finite and between zero and one");
+  if(p.localGapFraction>0.
+     &&(!std::isfinite(p.roughnessGap)||!std::isfinite(p.localGap)||!(p.localGap>0.)||!(p.localGap<=p.roughnessGap)
+        ||!std::isfinite(p.localSwitchExcessGap)||!(p.localSwitchExcessGap>=0.)
+        ||!std::isfinite(p.localCutoffExcessGap)||!(p.localCutoffExcessGap>p.localSwitchExcessGap)
+        ||!(p.roughnessGap+p.localCutoffExcessGap<=p.switchGap)))
+    throw std::domain_error("Invalid RE2 local adhesion gaps: require 0<D0<=h0, 0<=local switch<local cutoff, and h0+local cutoff<=far switch");
+}
+// Strict lower bound on the geometric gap: both h and the shifted local d
+// must be positive. Solver trial steps must respect this domain, not clamp d.
+inline double minimumPairGap(const PairParameters&p){
+  return p.localGapFraction>0.?std::max(0.,p.roughnessGap-p.localGap):0.;
+}
 struct PairResult {
   Vec3 forceI{},torqueI{},torqueJ{};
   Vec3 forceAttractiveI{},forceRepulsiveI{};
@@ -68,10 +92,11 @@ inline AD branch(const AD&h,const AD&ell,const Body&i,const Body&j,const PairPar
   if(repulsive)u=u*power(p.sigma/h,6);
   return u;
 }
+inline AD smoothSwitch(const AD&t){return 1.-10.*power(t,3)+15.*power(t,4)-6.*power(t,5);}
 inline void unpack(const AD&u,Vec3&forceI,Vec3&torqueI,Vec3&torqueJ){for(int k=0;k<3;++k){forceI[k]=u.d[k];torqueI[k]=-u.d[3+k];torqueJ[k]=-u.d[6+k];}}
 }
 inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&p=PairParameters{},GapCache*cache=nullptr){
-  if(!(p.hamaker>=0.)||!(p.sigma>0.)||!(p.switchGap>=0.)||!(p.cutoffGap>p.switchGap))throw std::domain_error("Invalid RE2 parameters");
+  validatePairParameters(p);
   PairResult result;
   const Vec3 dr=sub(bj.position,bi.position);const double distance=norm(dr);
   const double bound=*std::max_element(bi.axes.begin(),bi.axes.end())+*std::max_element(bj.axes.begin(),bj.axes.end());
@@ -80,6 +105,7 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
   result.gap=gap.gap;result.normal=gap.normal;result.leverI=gap.leverI;result.leverJ=gap.leverJ;
   if(gap.gap>=p.cutoffGap)return result;
   if(!(gap.gap>0.))throw std::domain_error("RE2 evaluated at overlapping ellipsoids: trial particle step must remain disjoint");
+  if(!(gap.gap>minimumPairGap(p)))throw std::domain_error("RE2 evaluated outside positive local-gap domain: trial particle step must respect the local adhesion gap");
   if(!(distance>0.))throw std::domain_error("Coincident RE2 centres");
   using namespace re2_detail;
   AD h(gap.gap);const Vec3 gi=scale(cross(gap.leverI,gap.normal),-1.),gj=cross(gap.leverJ,gap.normal);
@@ -88,7 +114,18 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
   const AD length=sqrt(re2_detail::dot(r,r));AVec rh{};for(int k=0;k<3;++k)rh[k]=r[k]/length;
   const AD ell=orientationLength(bi,bj,rh,p.sigma);
   AD ua=branch(h,ell,bi,bj,p,false),ur=branch(h,ell,bi,bj,p,true);
-  if(gap.gap>p.switchGap){const AD t=(h-p.switchGap)/(p.cutoffGap-p.switchGap);const AD sw=1.-10.*power(t,3)+15.*power(t,4)-6.*power(t,5);ua=ua*sw;ur=ur*sw;}
+  if(p.localGapFraction>0.&&gap.gap-p.roughnessGap<p.localCutoffExcessGap){
+    const AD s=h-p.roughnessGap,d=s+p.localGap;
+    // Differentiate the entire energy, including the local switch. Replacing
+    // both branches avoids double counting and keeps forces and torques
+    // conservative through the blend as well as at changing orientations.
+    AD weight(p.localGapFraction);
+    if(s.v>p.localSwitchExcessGap)
+      weight=weight*smoothSwitch((s-p.localSwitchExcessGap)/(p.localCutoffExcessGap-p.localSwitchExcessGap));
+    ua=ua+weight*(branch(d,ell,bi,bj,p,false)-ua);
+    ur=ur+weight*(branch(d,ell,bi,bj,p,true)-ur);
+  }
+  if(gap.gap>p.switchGap){const AD t=(h-p.switchGap)/(p.cutoffGap-p.switchGap);const AD sw=smoothSwitch(t);ua=ua*sw;ur=ur*sw;}
   unpack(ua,result.forceAttractiveI,result.torqueAttractiveI,result.torqueAttractiveJ);
   unpack(ur,result.forceRepulsiveI,result.torqueRepulsiveI,result.torqueRepulsiveJ);
   result.forceI=add(result.forceAttractiveI,result.forceRepulsiveI);
