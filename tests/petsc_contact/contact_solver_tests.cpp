@@ -877,7 +877,9 @@ void failedStepDoesNotCommit() {
 #ifdef SLURRY_USE_PETSC
 void nonlinearWorkAccounting(bool failLinearSolve) {
   auto s = settings();
-  s.maxNewtonIterations = failLinearSolve ? 60 : 2;
+  // Feasible initialization now solves this fixture in two Newton attempts.
+  // Inject one allowed attempt to keep testing exhausted-budget rollback.
+  s.maxNewtonIterations = failLinearSolve ? 60 : 1;
   TemporaryDiagnostics files;
   s.solverDiagnosticsPrefix = files.prefix();
   std::vector<std::pair<std::string, std::string>> overrides{
@@ -927,7 +929,7 @@ void nonlinearWorkAccounting(bool failLinearSolve) {
             "an unsuccessful Krylov solve still consumes and records one Newton attempt");
   } else {
     require(attemptedNewton == s.maxNewtonIterations,
-            "nested nonlinear options cannot turn two allowed Newton solves into 999");
+            "nested nonlinear options cannot turn one allowed Newton solve into 999");
   }
   require(history.size() == oldHistory.size() && identicalContact(history[0], oldHistory[0]),
           "an exhausted nested solve cannot commit trial contact history");
