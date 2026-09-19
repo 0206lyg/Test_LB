@@ -156,3 +156,53 @@ rheology result and does not change the committed production case geometry.
 The full 108-particle trajectory and multi-rank MPI execution have not been run
 for this change. These checks establish implementation and integration behavior;
 they do not establish a 500 Pa bulk yield stress.
+
+## MIT job 23075858: adhesive-network Newton stagnation
+
+The supplied rank-0 and rank-10 replay snapshots are byte-identical. They record
+the 10/s run at LB step 3264, with the terminal failure at subdivision count 256,
+index 112 and substep duration 4.5105489780439514e-8 s. The previously accepted
+LB state is at time 0.037689425572698769 s. No MPI rank-state disagreement is
+present in those two snapshots.
+
+The failure was reproduced with real, double-precision PETSc 3.25.5, serial
+MPIUNI. The default linear GMRES relative tolerance of 0.05 accepted the first
+Newton direction after two Krylov iterations, leaving scaled linear residual
+16.9317. The resulting nonlinear path stalled at force/torque ratios
+3.11888/4.93999, despite a passing complementarity ratio 0.812118 and no domain
+rejections. Increasing the number of identical stalled nonlinear iterations
+does not address that inaccurate direction.
+
+Only the default linear GMRES relative tolerance was changed to 0.001. The first
+direction then used six Krylov iterations, leaving scaled linear residual
+0.836586, and the recorded substep converged after one Newton step. Force/torque
+ratios were 0.2413223374/0.2025331374 and gap violation 8.4035373e-13 m. Both
+uploaded snapshots passed. Alpha remained 1; pair/contact physics, force/torque/
+gap acceptance tolerances, substep duration and all iteration limits remained
+unchanged. The NGMRES and Newton line-search architecture was retained.
+
+The exact state is retained as
+`tests/petsc_contact/fixtures/adhesive_network_108.dat`, with reproduction
+instructions alongside it. This verifies the formerly failing particle
+substep; it does not rerun the entire MPI trajectory.
+
+An additional continuation carried the accepted bodies, contact history and gap
+cache through all 144 remaining particle substeps, indices 112 through 255,
+using the original frozen hydrodynamic force/torque and substep duration. All
+144 passed, reaching the original LB-step endpoint. The worst accepted force
+ratio was 0.634466, torque ratio 0.759672 and gap violation 8.4035373e-13 m.
+No substep used more than 19 Newton iterations against its unchanged limit 60.
+
+After the fix, all 25 PETSc contact regression fixtures and all 26 Python tests
+passed, and the full shared OpenLB executable rebuilt successfully with serial
+PETSc. The diagnostics retry test's deliberately injected Newton budget was
+changed from 3 to 2 because the more accurate solver now converges without a
+retry at 3; this test-only setting continues to check actual retry/no-output
+behavior and does not change the production configuration.
+
+The attached history belongs to the 10/s run and ends at sampled stress
+243.99 Pa; it does not contain the separately reported 100/s stress result.
+It also records transient fluid Mach numbers up to 0.622 and fluid density
+deviation up to 39.0%. Those are a separate limitation of the fluid time/velocity
+scaling; the saved-step replay isolates the particle convergence fix and does
+not demonstrate that these fluid transients have been resolved.
