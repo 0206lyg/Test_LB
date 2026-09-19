@@ -1,0 +1,33 @@
+{
+  "base_commit": "642ffc182930c9d9fe5114bf77ab99951dd30009",
+  "preserves": [
+    "slurry/cases/pure_gr.json",
+    "run_slurry_cpu.sbatch",
+    "build_slurry_cpu.sbatch"
+  ],
+  "files": {
+    "README.md": "37e5a5b7b3da870d118e8aed9216c7c2d2e56ed1f00c1c0933ea4599a08e0157",
+    "VALIDATION.md": "465705277741adde1aec2a1fbb15a375562fd1ffe4b04867f9db3be592c2a3f0",
+    "docs/graphite-local-adhesion.md": "3208a8b142e50535eee4340b7fa4c462acaeadc64bdb94c265d9152e6c697f0f",
+    "docs/graphite-restart.md": "1cb5b026c6198245bcfb5f7c5f9ba014eff9027e7a5ef65dc5757c98e3be2089",
+    "olb-1.9r0/examples/slurry/slurry.cpp": "a55bffcfd30a1ad59ed2c54dc736f44c72d3a046e5df3a98d85d7c5cb9dff003",
+    "olb-1.9r0/src/slurry/gr_re2/coupledCheckpoint.h": "d9e1d8c5a9d93e3b60c1076b69e37d61364208976dd8615be2cbc4395a5b8241",
+    "olb-1.9r0/src/slurry/gr_re2/graphiteCouette3d.cpp": "a9538e94dde1822fc5292ec6ae504f16f906924d644360fcf193ab5551c5f5d4",
+    "olb-1.9r0/src/slurry/gr_re2/particlePetscSolver.h": "eda4167adc6c7626fc2b12465aa2609af77552e142fc402c4b0e6f4416d90b17",
+    "olb-1.9r0/src/slurry/gr_re2/particleSubsteps.h": "b7425cecbddc8b485eb9d8e3b7ee2e99ab804d978bc9a46537ab9ebce274cb6e",
+    "olb-1.9r0/src/slurry/gr_re2/periodicCoupling.h": "da1fc404228dd799c1f1204142b8c9192128bd0e67b36d97efa8a7cf68586e45",
+    "olb-1.9r0/src/slurry/gr_re2/quickConfig.h": "9eb36f32e75d293905e591654664a4ed5eb4666c1c818eee07dee89ad39bb3fe",
+    "olb-1.9r0/src/slurry/gr_re2/reSquaredPotential.h": "01a4469c28f1be29521c4ef49374832b0ca74ff5520c516c1e4e8dc9683ea8db",
+    "slurry/drivers/gr_re2/run_graphite.py": "cd0bf56d6eb3778cd237bbdb7f70eb3a2617d17d3c0de92556321f7a89ff9516",
+    "slurry/tests/test_graphite_restart.py": "57e50befef05d44e6391235de7ebcbe0f620c3937988fc8274656837b83d119d",
+    "slurry/tests/test_local_adhesion_config.py": "64678ece462c42314d70da728307f38c3dab82e6493b39748edaf75483db6b38",
+    "slurry/tools/run_slurry.py": "57fb3b65eb6e77e3a7d172319d5a30ef18175e7fd39ec34706d416711a057f87",
+    "tests/checkpoint/check_restart.py": "72154805c4585f8f507df4130c2f531bccf5692ab7348a6549f3edd8e3dc9f97",
+    "tests/checkpoint/check_stop.py": "90456c79799112b49591544d8455050df20a8430f7277ceff266a1673795cc63",
+    "tests/graphite_adhesion/adhesion_tests.cpp": "aa173069d46fcc20d65128c367548190bc4ce8446c35986d0820bd252376eea5",
+    "tests/petsc_contact/contact_solver_tests.cpp": "7e49b85be04d26fde2b777c74aa810fa4096aac95b958b9ae2ef5df7c895a71a",
+    "tests/petsc_contact/fixtures/README.md": "c9ea0351a48f6293dcc454090141d1afda1df5c54c6fef808f101c00cd1d5164",
+    "tests/petsc_contact/fixtures/adhesive_network_108.dat": "a897f8a77e61b91afb9d8848a186bbbe1d35e1b5cf111c97fb5d4ea8f1db7c81",
+    "tests/petsc_contact/local_gap_solver_tests.cpp": "d2db4cd62ca57f2671af01644fff3ab7a5edc34fbb86af4557f2f49c3acb6ed9"
+  }
+}

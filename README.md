@@ -5,7 +5,7 @@ OpenLB 1.9r0과 슬러리 확장 모듈을 포함한 통합 소스 저장소입�
 
 ## 지원 모델
 - pure_cmc: CMC Cross 모델
-- pure_gr: RE² graphite, lubrication, rough contact, Lees–Edwards
+- pure_gr: RE² graphite, lubrication, rough contact, Lees–Edwards, checkpoint/restart
 - gr_baseline: 기존 graphite Couette 및 checkpoint/restart
 
 ## MIT OnDemand 실행
@@ -30,3 +30,7 @@ OpenLB 원본의 LICENSE와 저작권 표시는 해당 소스 트리에 보존�
 
 `pure_gr`의 국소 부착 포텐셜과 새 매개변수는
 [Graphite 국소 부착 설명](docs/graphite-local-adhesion.md)에 정리되어 있습니다.
+
+`pure_gr` 재시작: `sbatch run_slurry_cpu.sbatch --restart 폴더명`
+(`runs/` 아래 폴더). 저장·복구 범위와 설정은
+[Graphite 재시작 설명](docs/graphite-restart.md)을 참고하세요.

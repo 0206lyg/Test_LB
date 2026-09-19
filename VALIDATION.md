@@ -206,3 +206,52 @@ It also records transient fluid Mach numbers up to 0.622 and fluid density
 deviation up to 39.0%. Those are a separate limitation of the fluid time/velocity
 scaling; the saved-step replay isolates the particle convergence fix and does
 not demonstrate that these fluid transients have been resolved.
+
+## pure_gr coupled checkpoint / restart
+
+The restart update saves the complete serializable OpenLB lattice on every
+rank, particle bodies, pair cache, persistent sliding/rolling contact state,
+last angular acceleration, diagnostic state, accumulated timers and LB step.
+Lees–Edwards time is recovered from the saved step and unchanged timestep.
+Loading clears the restored particle auxiliary fields before rebuilding the
+process-local mapping cache; omitting this would double the particle mask.
+Completed checkpoints are published by directory rename after every rank has
+closed its file. The latest two completed checkpoints are retained by default.
+
+Checks used GCC/G++ 13.3 and the existing PETSc 3.25.5 MPIUNI installation.
+A separately installed OpenMPI 4.1.4 toolchain was also located and used for
+real two-rank compilation and execution of the checkpoint path with the
+legacy particle backend. The MPI tests therefore exercise actual rank-local
+lattice files and collective publication/restoration; they do not constitute
+a PETSc-with-MPI or MIT Slurm production test.
+
+| Check | Result |
+| --- | --- |
+| Final complete OpenLB/PETSc serial build | Passed |
+| Complete OpenLB/OpenMPI build, legacy particle backend | Passed |
+| New restart Python tests | 10/10 passed |
+| Full Python configuration/build/diagnostic suite | 36/36 passed |
+| Serial PETSc: continuous 16 steps vs. 8 steps + restart to 16 | All physical CSV fields exactly equal; final lattice bytes identical |
+| Two-rank OpenMPI: continuous 16 steps vs. 8 steps + restart to 16 | All physical CSV fields exactly equal; both rank lattice files identical |
+| SIGUSR1 through common controller and Python driver, serial and two ranks | Clean CHECKPOINTED exit after a complete LB step; subsequent restart passed |
+| Deliberately corrupted state byte with unchanged file length, serial and two ranks | C++ checksum rejected restoration |
+
+The equivalence fixture contains two touching production-size oblate particles
+on an 80³ grid at 100/s, with the configured local adhesion and persistent
+contact elasticity. Contact count and nonzero stored contact elastic energy
+are asserted, so the test is not merely a free-particle restart. All physical
+history columns and particle CSV rows are compared, including the copied
+prefix; only elapsed/performance timing columns are excluded. The same common
+controller invoked by `run_slurry_cpu.sbatch` performs the restart.
+
+Unit checks cover incomplete staging directories, missing rank files, old
+history-only runs, physical/timestep/rank compatibility, cumulative endpoints,
+truncation to the saved CSV boundary, and mixed-rate batches that skip already
+completed runs while preserving the original rate of each resumed run.
+
+Reproduction and user commands are in [graphite-restart.md](docs/graphite-restart.md).
+The old production runs have no coupled checkpoint and cannot be recovered
+exactly from their diagnostic/history files. Native checkpoint version 1
+requires the same OpenLB data layout, physical settings, timestep and MPI rank
+count. Full 32-rank production execution and Slurm's actual timeout delivery
+have not been tested here.
