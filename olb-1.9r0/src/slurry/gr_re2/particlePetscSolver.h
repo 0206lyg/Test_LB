@@ -444,6 +444,48 @@ struct PetscParticleObjects {
   SNES snes=nullptr;Vec x=nullptr,f=nullptr;Mat jacobian=nullptr;
   ~PetscParticleObjects(){if(snes)SNESDestroy(&snes);if(jacobian)MatDestroy(&jacobian);if(f)VecDestroy(&f);if(x)VecDestroy(&x);}
 };
+
+// Check the geometry BEFORE evaluating pair forces at a Newton initial guess.
+// A positive shifted RE2 gap alone is insufficient: velocity extrapolation can
+// put a not-yet-contacting pair arbitrarily close to the repulsive singularity.
+// This changes only the solver's initial guess. The old state, history, time,
+// forces, tolerances and final momentum/contact acceptance remain unchanged.
+// With restore=true, bounded mass-weighted translations restore feasibility at
+// the ADVANCED Lees--Edwards phase, where even zero displacement can overlap.
+inline bool contactFeasiblePredictor(const Residual& r,Vector& q,bool restore,
+                                    std::string& error) {
+  if(!r.settings.rough.enabled)return true;
+  try {
+    auto bodies=r.old;auto cache=r.startingCache;
+    for(std::size_t i=0;i<bodies.size();++i){
+      bodies[i].position=add(r.old[i].position,scale(Vec3{q[6*i],q[6*i+1],q[6*i+2]},r.lengthScale));
+      bodies[i].rotation=rotateLaboratory(r.old[i].rotation,Vec3{q[6*i+3],q[6*i+4],q[6*i+5]});
+      if(!finite(bodies[i].position))return false;
+    }
+    const int passes=restore?r.settings.maxLineSearch:0;
+    for(int pass=0;pass<=passes;++pass){
+      bool feasible=true;std::size_t p=0;
+      for(std::size_t i=0;i<bodies.size();++i)for(std::size_t j=i+1;j<bodies.size();++j,++p){
+        const auto image=closestImage(bodies[i],bodies[j],r.time+r.dt,r.settings);
+        const double bound=radius(bodies[i])+radius(image)+r.settings.rough.gap;
+        if(dot(sub(image.position,bodies[i].position),sub(image.position,bodies[i].position))>bound*bound)continue;
+        const auto gap=closestEllipsoidGap(bodies[i],image,&cache[p]);
+        if(!std::isfinite(gap.gap)){error="Non-finite initial predictor gap";return false;}
+        if(gap.gap>=r.settings.rough.gap-r.settings.contactGapTolerance)continue;
+        feasible=false;
+        if(!restore||pass==passes)return false;
+        const double deficit=r.settings.rough.gap-gap.gap,totalMass=bodies[i].mass+bodies[j].mass;
+        const Vec3 moveI=scale(gap.normal,-deficit*bodies[j].mass/totalMass);
+        const Vec3 moveJ=scale(gap.normal, deficit*bodies[i].mass/totalMass);
+        bodies[i].position=add(bodies[i].position,moveI);bodies[j].position=add(bodies[j].position,moveJ);
+        for(int k=0;k<3;++k){q[6*i+k]+=moveI[k]/r.lengthScale;q[6*j+k]+=moveJ[k]/r.lengthScale;}
+      }
+      if(feasible)return true;
+    }
+  }catch(const std::exception& ex){error=ex.what();}
+  return false;
+}
+
 inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec3>& force,
     const std::vector<Vec3>& torque,double dt,double time,const ParticleStepSettings& settings,
     std::vector<GapCache>& cache,PersistentContactState& contacts,std::vector<Body>& output,
@@ -499,9 +541,17 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     context.frictionAttemptOffset=totalFrictionAttempts;context.frictionCorrectionOffset=totalFrictionCorrections;
     context.previousTraceContacts=previousTraceEngagement;
     Evaluation initial;bool valid=false;
-    for(int attempt=0;attempt<12;++attempt){if(context.evaluate(q,initial)){valid=true;break;}for(std::size_t k=0;k<6*n;++k)q[k]*=.5;}
-    if(!valid){for(std::size_t k=0;k<6*n;++k)q[k]=0.;valid=context.evaluate(q,initial);}
-    if(!valid){error=context.error;break;}
+    for(int attempt=0;attempt<settings.maxLineSearch;++attempt){
+      if(contactFeasiblePredictor(residual,q,false,context.error)&&context.evaluate(q,initial)){valid=true;break;}
+      for(std::size_t k=0;k<6*n;++k)q[k]*=.5;
+    }
+    if(!valid){
+      for(std::size_t k=0;k<6*n;++k)q[k]=0.;
+      valid=contactFeasiblePredictor(residual,q,true,context.error)&&context.evaluate(q,initial);
+    }
+    if(!valid){error="Cannot construct a contact-feasible Newton initial guess at the advanced shear phase";
+      if(!context.error.empty())error+=": "+context.error;
+      break;}
     if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;
       q.resize(6*n+activeCount,0.);++candidateExpansions;continue;}
     // Freeze physical tolerance row scales for this solve so the line search
