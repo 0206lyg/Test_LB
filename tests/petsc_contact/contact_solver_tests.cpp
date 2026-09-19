@@ -982,7 +982,7 @@ void recoveredRetryWritesNoDiagnostics() {
   TemporaryDiagnostics files;
   s.solverDiagnosticsPrefix = files.prefix();
   // Keep the original four-Newton physical fixture. Acceleration can solve it
-  // directly, so a second independent call injects a three-Newton budget, one
+  // directly, so a second independent call injects a two-Newton budget, one
   // below the full interval's measured cost, to exercise actual retry/no-I/O.
   s.rough.enabled = false;
   s.maxNewtonIterations = 4;
@@ -1001,13 +1001,13 @@ void recoveredRetryWritesNoDiagnostics() {
   const double angularAllowance = step * s.torqueAbsoluteTolerance /
       (1. - s.relativeTolerance) + 32. * std::numeric_limits<double>::epsilon() *
       g::norm(initialMomentum);
-  for (const int budget : {4, 3}) {
+  for (const int budget : {4, 2}) {
     s.maxNewtonIterations = budget;
     std::vector<g::Body> bodies{rotor};
     const auto d = g::advanceParticles(bodies, zero, zero, step, 0., s);
     require(d.substeps >= 1 && d.substeps <= s.maxSubsteps,
             "rotor must converge within its unchanged particle subdivision limit");
-    if (budget == 3)
+    if (budget == 2)
       require(d.substeps > 1, "injected budget must actually trigger a recovered retry");
     require(d.maxForceResidualRatio <= 1. && d.maxTorqueResidualRatio <= 1. &&
             d.contactGapViolation <= s.contactGapTolerance,
