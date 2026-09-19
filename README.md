@@ -27,3 +27,6 @@ CMC와 Gr을 순차 실행하려면:
 설정은 `slurry/cases/`에서 관리합니다.
 결과는 `runs/`에 저장되며 Git 관리 대상에서 제외합니다.
 OpenLB 원본의 LICENSE와 저작권 표시는 해당 소스 트리에 보존합니다.
+
+`pure_gr`의 국소 부착 포텐셜과 새 매개변수는
+[Graphite 국소 부착 설명](docs/graphite-local-adhesion.md)에 정리되어 있습니다.

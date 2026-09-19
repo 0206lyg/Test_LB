@@ -100,3 +100,59 @@ The real serial PETSc 3.25.5 compile/link/runtime probe passed again.
 The installed prefix is reused with the same compiler/MPI modules, even when the
 previous attempt failed before writing `build/petsc/env.sh`. No force-law or solver
 algorithm changes were made for this correction.
+
+## Graphite local-gap adhesion
+
+This change starts from `642ffc182930c9d9fe5114bf77ab99951dd30009` and explicitly
+changes the graphite pair potential and the `pure_gr` physical settings. The
+unchanged-force statements in the historical sections above describe those
+earlier solver/build updates, not this adhesion update.
+
+The production case now uses sigma = 0.4197 nm, D0 = 0.30 nm, local fraction = 1,
+and tangential stiffness = 80 N/m. Hamaker, geometric roughness gap, sliding
+friction, rolling length/angle, particle dimensions, timestep and solver
+tolerances retain their previous values. The local potential smoothly replaces
+the near-contact contribution, including both attraction and repulsion; forces
+and torques differentiate the complete energy. See
+[the model and run instructions](docs/graphite-local-adhesion.md).
+
+Checks used GCC/G++ 13.3.0 and real, double-precision PETSc 3.25.5 with serial
+MPIUNI. No MPI compiler was available in this environment.
+
+| Check | Result |
+| --- | --- |
+| Standalone adhesion physics groups | 6/6 passed |
+| PETSc contact regression fixtures | 25/25 passed |
+| Local-gap solver domain and replay checks, linked with PETSc | Passed |
+| Python configuration/build/diagnostic tests | 26/26 passed |
+| Complete shared OpenLB executable, serial PETSc build | Passed |
+| Executable capability metadata | `local_gap_adhesion: true`, PETSc 3.25.5 |
+| Actual OpenLB integration: two FF particles, seven LB steps | Passed |
+
+The physics groups check legacy alpha=0 results, contact-force magnitudes,
+translation/rotation finite differences of energy, total angular momentum,
+smooth local-switch release, parameter/domain rejection, and the independent
+effects of tangential stiffness and sliding/rolling caps. The FF result is
+936.214833 nN with the rounded input sigma, consistent with the small-gap
+Derjaguin limit. EF and EE forces are 25.950663 nN and 13.748022 nN.
+
+The new PETSc fixture advances the production oblate pair with water lubrication,
+the production timestep/tolerances, and corrected adhesive rolling history.
+The domain/replay checks exercise residual-domain rejection, unchanged committed
+history after failed trials, corrected contact-birth strength, exact new-format
+replay, and old-format replay with local adhesion disabled.
+
+The actual OpenLB integration used the new `pure_gr` physical settings with a
+temporary two-particle, 80-cubed-grid fixture (125 nm spacing), shear rate 100/s,
+and end strain 0.002. The final strain was 0.00202073 after seven LB steps, all
+accepted with one particle substep. All eight sampled history rows were finite.
+The final pair force was 936.2185 nN and gap 1.99999999971 nm; the maximum gap
+violation was 9.94e-14 m against the unchanged 1e-12 m tolerance. The maximum
+accepted normalized force residual was 0.9784, below its acceptance limit of 1.
+Output metadata confirmed all new interaction settings and retained contact
+parameters. This fixture checks the actual application path; it is not a bulk
+rheology result and does not change the committed production case geometry.
+
+The full 108-particle trajectory and multi-rank MPI execution have not been run
+for this change. These checks establish implementation and integration behavior;
+they do not establish a 500 Pa bulk yield stress.
