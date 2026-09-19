@@ -46,7 +46,12 @@ class RestartTests(unittest.TestCase):
     def test_periodic_defaults_and_invalid_retention(self):
         original=case();snapshot=copy.deepcopy(original)
         cfg,_=RUNNER.resolve(original)
+        self.assertEqual(cfg['output']['checkpoint_every_steps'],0)
+        self.assertEqual(cfg['output']['checkpoint_every_seconds'],350*60)
         self.assertEqual(cfg['output']['checkpoint_keep'],2)
+        values=RUNNER.solver_values(cfg,self.root,self.root/'initial_particles.csv',8)
+        self.assertEqual(values['checkpoint_every'],0)
+        self.assertEqual(values['checkpoint_seconds'],350*60)
         self.assertEqual(original,snapshot)
         for key,value in [('checkpoint_every_steps',-1),('checkpoint_every_seconds',float('nan')),
                           ('checkpoint_keep',0)]:

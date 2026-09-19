@@ -58,7 +58,7 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
     cfg['numerics'].setdefault('particle_max_krylov_iterations', 120)
     cfg['numerics'].setdefault('solver_diagnostics', True)
     contact = cfg.setdefault('rough_contact',{})
-    for key,value in {'checkpoint_every_steps':200,'checkpoint_every_seconds':900.0,
+    for key,value in {'checkpoint_every_steps':0,'checkpoint_every_seconds':21000.0,
                       'checkpoint_keep':2}.items():
         cfg['output'].setdefault(key,value)
     for key,value in {'enabled':True,'roughness_gap_m':2e-9,'sliding_friction':.5,
