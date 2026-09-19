@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Common batch controller. Original case drivers retain all physical mapping."""
 import argparse
+import importlib.util
 from datetime import datetime, timezone
 import json
 import math
@@ -18,6 +19,21 @@ def positives(text):
         raise ValueError('Shear rates must be finite positive numbers')
     return sorted(set(values))
 
+def restart_folder(value):
+    path=value.expanduser()
+    candidates=[path] if path.is_absolute() else [BASE/path,BASE/'runs'/path]
+    for candidate in candidates:
+        if candidate.is_dir():
+            if candidate.resolve()==(BASE/'runs').resolve():
+                raise ValueError('Select one run folder under runs, not the entire runs directory')
+            return candidate.resolve()
+    raise ValueError('Restart folder not found: '+str(value))
+
+def graphite_restart_driver():
+    spec=importlib.util.spec_from_file_location('slurry_gr_restart',BASE/'slurry/drivers/gr_re2/run_graphite.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--settings', type=Path, default=BASE / 'slurry/cases/run.json')
@@ -34,7 +50,7 @@ def main():
     p.add_argument('--target-mach', type=float, help='Existing RE2 option')
     p.add_argument('--time-step', type=float, help='Existing RE2 option in seconds')
     p.add_argument('--end-strain', type=float, help='Existing RE2 option')
-    p.add_argument('--restart', type=Path, help='Existing gr_baseline checkpoint; same integrated binary/ranks')
+    p.add_argument('--restart', type=Path, help='Previous pure_gr run folder (name under runs or path); resumes its latest complete checkpoint')
     p.add_argument('--output', type=Path)
     p.add_argument('--executable', type=Path, default=BASE / 'build/slurry/current/slurry')
     p.add_argument('--dry-run', action='store_true')
@@ -42,20 +58,27 @@ def main():
     p.add_argument('--keep-going', action='store_true')
     a = p.parse_args()
     settings = json.loads(a.settings.expanduser().resolve().read_text(encoding='utf-8'))
-    cases = [x.strip() for x in a.cases.split(',')] if a.cases else settings['cases']
+    cases = [x.strip() for x in a.cases.split(',')] if a.cases else (['pure_gr'] if a.restart else settings['cases'])
     registry = {e['id']: e for e in json.loads((BASE / 'slurry/engines.json').read_text())}
     if not cases or len(cases) != len(set(cases)): p.error('Choose at least one case, without duplicates')
     for engine in cases:
         if engine not in registry: p.error('Unknown/unimplemented case: ' + engine + ' (Gr+CMC is not implemented)')
     graphites = [e for e in cases if e != 'pure_cmc']
     if a.config and len(graphites) != 1: p.error('--config requires exactly one graphite case')
-    if a.restart and (cases != ['gr_baseline'] or a.shear_rates):
-        p.error('--restart requires only gr_baseline and its original configuration/shear rate')
+    if a.restart and (cases not in (['pure_gr'],['gr_baseline']) or a.shear_rates or a.smoke):
+        p.error('--restart requires only pure_gr (default) or gr_baseline; it retains the saved shear rate and cannot use --smoke')
+    restart_runs=[];restart_skipped=[];restart_driver=None
+    if a.restart:
+        a.restart=restart_folder(a.restart)
+        if cases==['pure_gr']:
+            restart_driver=graphite_restart_driver()
+            restart_runs=restart_driver.restart_targets(a.restart)
     if any(x is not None for x in (a.target_mach, a.time_step, a.end_strain)) and 'pure_gr' not in cases:
         p.error('--target-mach/--time-step/--end-strain require pure_gr')
     if a.max_steps is not None and a.max_steps < 0: p.error('--max-steps must be nonnegative')
     rates = positives(a.shear_rates) if a.shear_rates else settings.get('shear_rates_s_inv')
     if rates is not None: rates = positives(','.join(str(x) for x in rates))
+    if a.restart:rates=None
     if a.smoke and rates is None: rates = [100.0]
     allocation = int(os.environ.get('SLURM_NTASKS', '1'))
     ranks = {}
@@ -86,6 +109,20 @@ def main():
         path = path.expanduser().resolve()
         json.loads(path.read_text(encoding='utf-8'))
         configs[engine] = path
+    if restart_runs:
+        current=json.loads(configs['pure_gr'].read_text(encoding='utf-8'))
+        pending=[]
+        for directory,checkpoint in restart_runs:
+            cfg,meta=restart_driver.resolve(current,checkpoint['shear_rate_s_inv'],a.max_steps or 0,
+                                           a.target_mach,a.time_step,a.end_strain)
+            if restart_driver.validate_restart(cfg,meta,checkpoint,ranks['pure_gr'],a.max_steps or 0,
+                                               allow_complete=True):
+                pending.append((directory,checkpoint))
+            else:
+                restart_skipped.append(str(directory))
+        if not pending:
+            p.error('All selected checkpoints have reached the requested endpoint; increase flow.end_strain or --max-steps')
+        restart_runs=pending
     if not a.dry_run:
         output.mkdir(parents=True)
         snapshot = output / 'input'
@@ -115,7 +152,8 @@ def main():
             if a.cmc_max_steps: args += ['--max-steps', str(a.cmc_max_steps)]
             jobs.append({'engine': engine, 'argv': args})
         else:
-            for index, rate in enumerate(rates or [None]):
+            selections=[(data['shear_rate_s_inv'],directory) for directory,data in restart_runs] if engine=='pure_gr' and restart_runs else [(rate,None) for rate in (rates or [None])]
+            for index, (rate,restart_case) in enumerate(selections):
                 name = engine + ('/g%03d_%s' % (index, format(rate, '.12g')) if rate is not None else '')
                 result_dir = output / name
                 if not a.dry_run:
@@ -132,10 +170,12 @@ def main():
                 if engine == 'pure_gr':
                     for key in ('target_mach', 'time_step', 'end_strain'):
                         if getattr(a, key) is not None: args += ['--' + key.replace('_', '-'), str(getattr(a, key))]
-                if a.restart: args += ['--restart', str(a.restart.expanduser().resolve())]
+                if a.restart: args += ['--restart', str(restart_case or a.restart)]
                 jobs.append({'engine': engine, 'argv': args})
     plan = {'created_utc': datetime.now(timezone.utc).isoformat(), 'jobs': jobs, 'ranks': ranks,
             'output': str(output), 'executable': str(executable), 'git': git_state(),
+            'restart_source':str(a.restart) if a.restart else None,
+            'restart_skipped_complete':restart_skipped,
             'controller_sha256': digest(__file__), 'build_id': record['build_id'] if record else None}
     if a.dry_run:
         print(json.dumps(plan, indent=2)); return 0
@@ -145,7 +185,7 @@ def main():
     write_json(output / 'batch_status.json', state)
     child, current, stop = None, None, []
     def forward(number, frame):
-        if number == signal.SIGUSR1 and current != 'gr_baseline':
+        if number == signal.SIGUSR1 and current not in ('pure_gr','gr_baseline'):
             print('Slurm time notice received; selected case retains its original stop behavior.', flush=True)
             return
         stop.append(number)
@@ -164,7 +204,7 @@ def main():
     state['status'] = 'STOPPED' if stop else ('FAILED' if failed else 'COMPLETED')
     write_json(output / 'batch_status.json', state)
     print('BATCH ' + state['status'] + ': ' + str(output), flush=True)
-    return 128 + stop[0] if stop else (1 if failed else 0)
+    return (0 if stop[0]==signal.SIGUSR1 and not failed else 128+stop[0]) if stop else (1 if failed else 0)
 
 if __name__ == '__main__':
     try: sys.exit(main())

@@ -12,6 +12,7 @@ import subprocess
 import sys
 from common import BASE, OLB, digest, fingerprint, git_state, source_inputs, tool_output, write_json
 from petsc_config import discover as discover_petsc, preflight as petsc_preflight, wrapper_command
+from consolidate_docs import archive_obsolete_docs
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -49,6 +50,13 @@ def main():
     build_root.mkdir(parents=True, exist_ok=True)
     with (build_root / 'build.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        documentation = archive_obsolete_docs(BASE)
+        if documentation['archive']:
+            print('DOCUMENTATION CONSOLIDATED: ' + str(len(documentation['removed'])) +
+                  ' obsolete files archived to ' + documentation['archive'], flush=True)
+        if documentation['skipped']:
+            print('Documentation paths preserved (symlink or non-regular path): ' +
+                  ', '.join(documentation['skipped']), flush=True)
         inputs = source_inputs()
         build_id = fingerprint({'source': inputs, 'toolchain': toolchain})
         release = build_root / 'releases' / build_id
