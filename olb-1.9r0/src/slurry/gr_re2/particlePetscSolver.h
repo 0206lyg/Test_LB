@@ -149,10 +149,18 @@ inline double fischerBurmeister(double a,double b) {
   if(a>=0.&&b>=0.)return r+a+b>0.?-2.*a*b/(r+a+b):0.;
   return r-a-b;
 }
-inline std::pair<double,double> fischerDerivative(double a,double b) {
-  const double r=std::hypot(a,b);
-  if(r>0.)return {a/r-1.,b/r-1.};
-  const double corner=1./std::sqrt(2.)-1.;return {corner,corner};
+// Solver map only: min(a,b)=0 is equivalent to a>=0, b>=0, a*b=0.
+// At a penetrated, compressive contact its active row is the gap itself.
+// A Fischer--Burmeister tangent can instead predict gap-error removal by a
+// large load increment, although the exact FB value merely approaches -a.
+// That spurious correction can cross a Coulomb branch and stall Newton.
+// Keep the original FB function above for independent physical acceptance.
+inline double normalComplementarityResidual(double a,double b) {
+  return std::min(a,b);
+}
+inline std::pair<double,double> normalComplementarityDerivative(double a,double b) {
+  // At a tie choose the gap branch, a valid generalized derivative of min.
+  return a<=b?std::pair<double,double>{1.,0.}:std::pair<double,double>{0.,1.};
 }
 struct NcpPreconditioner {
   BlockPreconditioner blocks;Vector bodyWeight;std::vector<double> gapFactor,loadFactor,schur;
@@ -163,7 +171,7 @@ struct NcpPreconditioner {
     for(const auto& c:blocks.contact) {
       const auto p=std::find_if(e.pairs.begin(),e.pairs.end(),[&](const PairLinearization& v){return v.slot==c.slot;});
       if(p==e.pairs.end())return false;
-      const auto d=fischerDerivative((p->gap-r.settings.rough.gap)/r.settings.contactGapTolerance,
+      const auto d=normalComplementarityDerivative((p->gap-r.settings.rough.gap)/r.settings.contactGapTolerance,
                                      e.normalLoads[p->index]/r.settings.forceAbsoluteTolerance);
       const double a=d.first*r.lengthScale/r.settings.contactGapTolerance;
       const double b=d.second*r.reactionScale/r.settings.forceAbsoluteTolerance;
@@ -202,7 +210,7 @@ struct PetscParticleContext {
     out=e.residual;const std::size_t n=residual.old.size();
     for(std::size_t k=0;k<6*n;++k)out[k]*=weights[k];
     for(std::size_t p=0;p<residual.activeSlot.size();++p)if(residual.activeSlot[p]>=0)
-      out[6*n+residual.activeSlot[p]]=fischerBurmeister((e.gaps[p]-residual.settings.rough.gap)/residual.settings.contactGapTolerance,
+      out[6*n+residual.activeSlot[p]]=normalComplementarityResidual((e.gaps[p]-residual.settings.rough.gap)/residual.settings.contactGapTolerance,
                   q[6*n+residual.activeSlot[p]]*residual.reactionScale/residual.settings.forceAbsoluteTolerance);
   }
   double complementarity(const Evaluation& e)const {

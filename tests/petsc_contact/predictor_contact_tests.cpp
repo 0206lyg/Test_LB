@@ -1,5 +1,5 @@
-// Production failure regression: geometry-safe Newton initialization, including
-// an advanced Lees--Edwards phase and continuation to the original LB endpoint.
+// Production failure regressions: geometry-safe Newton initialization and
+// coupled normal/friction transitions, continued to the original LB endpoint.
 #include "particleSubsteps.h"
 #ifndef SLURRY_USE_PETSC
 #error "This regression requires the real PETSc backend"
@@ -94,6 +94,8 @@ int main(int argc,char** argv){
     checkAdvancedShearPhase();
     continueFixture(directory/"predictor_contact_108.dat");
     continueFixture(directory/"adhesive_network_108.dat");
+    continueFixture(directory/"normal_friction_corner_108.dat");
+    continueFixture(directory/"normal_friction_corner_followup_108.dat");
   }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';result=1;}
   const auto finalize=PetscFinalize();return finalize?1:result;
 }

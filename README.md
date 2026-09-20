@@ -211,6 +211,60 @@ build/petsc-tests/replay_particle_step /결과폴더/particle_solver_rank0_failu
 
 `--max-newton 80` 등의 replay 옵션은 원인 분리용 비교 설정이며 생산 JSON을 바꾸지 않습니다.
 
+### MIT job 23181002: 법선 상보조건의 Newton 선형화와 마찰 전환
+
+100/s, target Ma=0.02에서 step 33556을 계산하던 중 subdivision 256의 index 104에서
+정체했습니다. 힘/토크 잔차 비율은 3.07228/1.01268이었고, Newton 60회 동안 수렴하지
+않았습니다. SECANT를 full Newton으로 바꾼 비교 실험은 그 지점을 통과했지만 index 115에서
+다시 실패했습니다. 따라서 line-search 종류 변경은 수정에 포함하지 않았습니다.
+
+원인은 약한 법선 반력과 작은 gap 위반을 함께 푸는 Fischer–Burmeister(FB) 식의
+유한 Newton 보정에 있었습니다. index 115의 입자 17–64에서 gap 위반은 1.0579 pm,
+N은 0.01070 nN이었습니다. FB 선형화는 gap을 0.0196 pm만 복구하면서 N을 2.1338 nN
+늘리면 상보성 잔차가 거의 사라진다고 예측했습니다. 실제 FB 잔차는 1.0631에서 1.0383으로
+거의 줄지 않았고, 커진 Coulomb 상한이 sliding→sticking 전환을 일으켜 힘 잔차도 악화했습니다.
+현재 분기 내부의 Jacobian이 맞아도 유한 보정의 예측은 이처럼 크게 틀릴 수 있습니다.
+
+수정은 `particlePetscSolver.h`의 solver용 법선 잔차와 그 미분입니다.
+
+```text
+a = (h - h0) / contact_gap_tolerance
+b = N / force_absolute_tolerance
+solver normal residual = min(a, b)
+derivative = (1, 0) if a <= b, otherwise (0, 1)
+```
+
+`min(a,b)=0`과 기존 FB=0은 모두 `h>=h0, N>=0, (h-h0)*N=0`을 뜻합니다.
+음의 gap·양의 반력 분기에서는 잔차가 gap 자체여서, 반력만 늘려 gap 오차가 해결될 것처럼
+예측하는 경로가 없어집니다. Jacobian과 block preconditioner에도 같은 미분을 사용합니다.
+**최종 합격 판정과 trace의 complementarity ratio는 기존 FB 검사 그대로**입니다.
+힘·토크·gap·음의 반력 검사, 물리 파라미터, 시간 간격, subdivision 수와 반복 상한도 같습니다.
+`residual_norm`은 새 solver 잔차의 norm이므로 이전 FB solver norm과 직접 비교하지 않습니다.
+
+독립 재현 결과(PETSc 3.25.5, serial, 기존 합격 기준):
+
+| 입력 | Newton 횟수 | force ratio | torque ratio | gap 위반 |
+| --- | ---: | ---: | ---: | ---: |
+| 원본 실패 index 104 | 3 | 0.01399 | 0.009885 | 1.81e-17 m |
+| full Newton 비교 실험의 후속 실패 index 115 | 11 | 0.001131 | 0.000963 | 4.24e-18 m |
+| index 104–255 전체 152개 substep | 합계 231 | 최대 0.9253 | 최대 0.8877 | 최대 1.95e-15 m |
+| 후속 실패 index 115–255 전체 141개 substep | 합계 232 | 최대 0.9619 | 최대 0.9964 | 최대 1.77e-15 m |
+
+회귀 입력은 `normal_friction_corner_108.dat`와
+`normal_friction_corner_followup_108.dat`이며, 기존 `predictor_contact_tests.cpp`가
+이 두 상태와 이전 두 실패 상태를 각각 원래 LB endpoint까지 연속 계산합니다.
+네 fixture의 총 517개 substep과 기존 접촉 회귀 25개가 통과했습니다.
+통합 OpenLB 실행 파일의 serial/PETSc 빌드도 통과했습니다.
+
+```bash
+python3 slurry/tools/compile_petsc_test.py tests/petsc_contact/predictor_contact_tests.cpp --run
+```
+
+이 검사는 해당 LB step 동안 고정된 유체 하중을 사용합니다. 새 유체장을 계산하는 장시간
+coupled restart의 검증은 별도이며, 이전 저전단 유체 Mach 폭주나 다른 domain 오류까지
+해결했다는 뜻은 아닙니다. 이번 로그에는 step 33129 checkpoint 저장이 기록되어 있습니다.
+기존 JSON 그대로 재빌드 후 해당 run의 checkpoint에서 이어 실행할 수 있습니다.
+
 ### 확인된 과거 오류: MIT job 23075858
 
 10/s, LB step 3264, subdivision 256의 index 112에서 실패한 108입자 상태를 그대로 재현했습니다.
