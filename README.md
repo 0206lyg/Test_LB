@@ -211,7 +211,62 @@ build/petsc-tests/replay_particle_step /결과폴더/particle_solver_rank0_failu
 
 `--max-newton 80` 등의 replay 옵션은 원인 분리용 비교 설정이며 생산 JSON을 바꾸지 않습니다.
 
-### MIT job 23181002: 법선 상보조건의 Newton 선형화와 마찰 전환
+### MIT job 23255422: min-map의 힘·거리 스케일 수정
+
+이전 min-map 수정만으로 실제 실행의 수렴 문제가 해결된 것은 아니었습니다.
+이번 실행은 checkpoint 33129에서 재시작하여 33316까지 완료한 뒤, step 33317의
+subdivision 256 / index 31에서 실패했습니다. 이전 실행보다 239 step 이릅니다.
+현재 min-map 코드로 같은 실패를 재현했습니다: Newton 60, Krylov 842,
+force/torque ratio 49.8724/37.6167. Gap 위반은 6.71e-16 m,
+기존 FB complementarity ratio는 0.00127로, 법선 조건은 이미 충분히 작았습니다.
+
+문제는 법선식의 형태뿐 아니라 **힘과 거리를 비교하는 수치 스케일**에도 있었습니다.
+기존 solver 식 `min((h-h0)/eps_g, N/eps_F)`는 `eps_g/eps_F=10 m/N`으로
+두 항을 환산합니다. 해당 substep의 코드상 관성 기준은
+`C_ref = L/reactionScale = subdt^2/m_ref = 4.5071e-6 m/N`이므로 약 222만 배
+차이가 났습니다. 여기서 `m_ref`는 기존 `reactionScale`에 쓰이는 첫 입자의 관성 질량입니다.
+
+현재 solver 식과 Jacobian/preconditioner는 같은 관성 기준을 사용합니다.
+
+```text
+g = h - h0
+C_ref = L / reactionScale = subdt^2 / m_ref
+solver normal residual = min(g, C_ref*N) / contact_gap_tolerance
+```
+
+`C_ref>0`이므로 영점은 여전히 `g>=0, N>=0, g*N=0`입니다.
+이 환산은 Newton 반복에만 사용하며 접촉 spring이나 새로운 힘을 추가하지 않습니다.
+**최종 판정은 이전의 FB 함수와 force/torque/gap 허용오차, 음의 N 금지 검사 그대로**입니다.
+물리 파라미터, dt, 최대 subdivision 256, Newton 60, Krylov 120도 유지합니다.
+`residual_norm`의 수치 의미는 바뀌지만 `complementarity_ratio`는 기존 FB 기준입니다.
+
+원인 분리 시험에서 NGMRES는 잔차 74.3을 56.0으로 낮춘 Newton 후보를 다시 361.5로
+악화시키기도 했습니다. 그러나 plain Newton/backtracking도 마찰 경계에서 정체했고,
+trust-region 비교안은 index 31을 통과한 뒤 index 32에서 실패했습니다.
+따라서 solver 이름이나 line-search 옵션만 바꾸는 안은 포함하지 않았습니다.
+현재 수정은 기존 NGMRES/SECANT 구조를 유지하며 위 정규화와 일관된 미분만 바꿉니다.
+
+PETSc 3.25.5 serial 재현 결과(원래 물리 합격 기준, 각 LB endpoint까지 연속 계산):
+
+| 입력 | 남은 substep | 최대 force ratio | 최대 torque ratio |
+| --- | ---: | ---: | ---: |
+| 이번 실패 index 31 | 225 | 0.9044 | 0.9562 |
+| trust-region 비교안의 후속 실패 index 32 | 224 | 0.9276 | 0.8998 |
+| 이전 네 실패 fixture | 517 | 0.9701 | 0.9649 |
+
+총 966개 substep을 통과했습니다. 새 실패 단독은 Newton 12 / Krylov 190,
+후속 실패 단독은 Newton 4 / Krylov 58입니다. 새 입력은
+`normal_release_metric_108.dat`, `normal_release_followup_108.dat`이며
+기존 `predictor_contact_tests.cpp`에 포함했습니다. 기존 접촉 회귀 25개도 통과했습니다.
+
+이 검증은 **입자 실패 상태를 원래 LB step 끝까지 재현한 범위**입니다.
+첨부 dump에는 재시작에 필요한 전체 LB 분포장이 없으므로, 유체를 갱신하는 장시간
+완전 결합 계산의 안정성을 확인한 결과로 해석하면 안 됩니다.
+이번 history의 마지막 fluid Ma는 0.0592, density drift는 11.71%였으며,
+수렴 수정이 유체 정확도까지 보장하지는 않습니다.
+설정 파일 변경 없이 `sbatch build_slurry_cpu.sbatch`로 빌드합니다.
+
+### 이전 수정 기록 — MIT job 23181002: 법선 상보조건의 Newton 선형화와 마찰 전환
 
 100/s, target Ma=0.02에서 step 33556을 계산하던 중 subdivision 256의 index 104에서
 정체했습니다. 힘/토크 잔차 비율은 3.07228/1.01268이었고, Newton 60회 동안 수렴하지
@@ -225,7 +280,8 @@ N은 0.01070 nN이었습니다. FB 선형화는 gap을 0.0196 pm만 복구하면
 거의 줄지 않았고, 커진 Coulomb 상한이 sliding→sticking 전환을 일으켜 힘 잔차도 악화했습니다.
 현재 분기 내부의 Jacobian이 맞아도 유한 보정의 예측은 이처럼 크게 틀릴 수 있습니다.
 
-수정은 `particlePetscSolver.h`의 solver용 법선 잔차와 그 미분입니다.
+당시 수정은 `particlePetscSolver.h`의 solver용 법선 잔차와 그 미분이었습니다.
+아래 당시 식의 힘 스케일은 위 job 23255422 수정으로 대체되었습니다.
 
 ```text
 a = (h - h0) / contact_gap_tolerance

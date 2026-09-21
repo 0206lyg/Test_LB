@@ -96,6 +96,8 @@ int main(int argc,char** argv){
     continueFixture(directory/"adhesive_network_108.dat");
     continueFixture(directory/"normal_friction_corner_108.dat");
     continueFixture(directory/"normal_friction_corner_followup_108.dat");
+    continueFixture(directory/"normal_release_metric_108.dat");
+    continueFixture(directory/"normal_release_followup_108.dat");
   }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';result=1;}
   const auto finalize=PetscFinalize();return finalize?1:result;
 }

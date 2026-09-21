@@ -155,6 +155,14 @@ inline double fischerBurmeister(double a,double b) {
 // large load increment, although the exact FB value merely approaches -a.
 // That spurious correction can cross a Coulomb branch and stall Newton.
 // Keep the original FB function above for independent physical acceptance.
+// The two arguments of the solver map use the SAME displacement scale:
+// a = (h-h0)/eps_g, b = C_ref*N/eps_g, C_ref = L/reactionScale = dt^2/m_ref.
+// This is the existing inertial nondimensionalization, not a normal spring.
+// Using N/eps_F here instead would make the contact-branch metric depend on
+// eps_g/eps_F (10 m/N for the production tolerances), rather than the step's
+// inertial compliance (~4.5e-6 m/N in job 23255422). Near N=0 that imbalance
+// misdirects the coupled normal/friction iteration. All physical acceptance
+// tests below still use the original force, gap and FB tolerances.
 inline double normalComplementarityResidual(double a,double b) {
   return std::min(a,b);
 }
@@ -172,9 +180,9 @@ struct NcpPreconditioner {
       const auto p=std::find_if(e.pairs.begin(),e.pairs.end(),[&](const PairLinearization& v){return v.slot==c.slot;});
       if(p==e.pairs.end())return false;
       const auto d=normalComplementarityDerivative((p->gap-r.settings.rough.gap)/r.settings.contactGapTolerance,
-                                     e.normalLoads[p->index]/r.settings.forceAbsoluteTolerance);
+                                     e.normalLoads[p->index]*r.lengthScale/(r.reactionScale*r.settings.contactGapTolerance));
       const double a=d.first*r.lengthScale/r.settings.contactGapTolerance;
-      const double b=d.second*r.reactionScale/r.settings.forceAbsoluteTolerance;
+      const double b=d.second*r.lengthScale/r.settings.contactGapTolerance;
       const double denominator=a*c.schur-b;
       if(!std::isfinite(denominator)||std::abs(denominator)<1.e-30)return false;
       gapFactor.push_back(a);loadFactor.push_back(b);schur.push_back(denominator);
@@ -211,7 +219,7 @@ struct PetscParticleContext {
     for(std::size_t k=0;k<6*n;++k)out[k]*=weights[k];
     for(std::size_t p=0;p<residual.activeSlot.size();++p)if(residual.activeSlot[p]>=0)
       out[6*n+residual.activeSlot[p]]=normalComplementarityResidual((e.gaps[p]-residual.settings.rough.gap)/residual.settings.contactGapTolerance,
-                  q[6*n+residual.activeSlot[p]]*residual.reactionScale/residual.settings.forceAbsoluteTolerance);
+                  q[6*n+residual.activeSlot[p]]*residual.lengthScale/residual.settings.contactGapTolerance);
   }
   double complementarity(const Evaluation& e)const {
     double worst=0.;for(std::size_t p=0;p<residual.activeSlot.size();++p)if(residual.activeSlot[p]>=0)
