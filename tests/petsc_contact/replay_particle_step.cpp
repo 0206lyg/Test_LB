@@ -78,6 +78,7 @@ int main(int argc, char** argv) {
     std::vector<g::Body> output;
     g::ParticleStepDiagnostics diagnostics;
     std::string error;
+    g::particle_detail::ParticleDiagnosticScope attempts(replay.settings);
     const bool success = g::particle_detail::dispatchImplicitStep(
         replay.bodies, replay.force, replay.torque, replay.dt, replay.time,
         replay.settings, replay.cache, replay.contacts, output, diagnostics, error,
@@ -102,6 +103,7 @@ int main(int argc, char** argv) {
                 << "; contact_state_updates=" << diagnostics.contactStateUpdates
                 << "; trial_contact_activations=" << diagnostics.contactActivations
                 << "; trial_contact_releases=" << diagnostics.contactReleases
+                << "; normal_guess_restarts=" << attempts.normalGuessRestarts
                 << "; gap_violation_m=" << diagnostics.contactGapViolation
                 << "; retained_contacts=" << retained
                 << "; activated_contacts=" << activated
@@ -109,6 +111,7 @@ int main(int argc, char** argv) {
                 << "; released_contact_energy_J=" << releasedEnergy << '\n';
       result = 0;
     } else {
+      attempts.flushFailure();
       std::cout << "REPLAY FAILED (one saved substep): " << error << '\n'
                 << "Diagnostics prefix: " << replay.settings.solverDiagnosticsPrefix << '\n';
       result = 2;

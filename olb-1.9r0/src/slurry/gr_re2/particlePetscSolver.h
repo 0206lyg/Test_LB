@@ -8,6 +8,7 @@ struct ParticleAttemptTrace {
   int iteration=0,kspIterations=0,activeContacts=0,slidingContacts=0,rollingContacts=0,activated=0,released=0,domainErrors=0,kspReason=0,candidateExpansion=0;
   int frictionBranchAttempts=0,frictionBranchCorrections=0;
   int contactStateUpdates=0,contactActivations=0,contactReleases=0;
+  int normalGuessRestarts=0;
   int nonlinearIteration=0,npcReason=0,totalKspIterations=0,residualEvaluations=0;
   double forceRatio=0.,torqueRatio=0.,gapViolation=0.,complementarityRatio=0.;
   double residualNorm=0.,fraction=1.,kspResidual=0.;
@@ -23,6 +24,9 @@ inline ParticleDiagnosticScope*& pendingParticleDiagnostics() {
 struct ParticleDiagnosticScope {
   const ParticleStepSettings& settings;ParticleDiagnosticScope* previous;
   std::deque<ParticleAttemptBundle> attempts;std::size_t rows=0;
+  // Runtime-only diagnostic: ParticleStepDiagnostics is serialized verbatim
+  // in existing checkpoints and its layout must not change for this counter.
+  int normalGuessRestarts=0;
   explicit ParticleDiagnosticScope(const ParticleStepSettings& s):settings(s),previous(pendingParticleDiagnostics()) {pendingParticleDiagnostics()=this;}
   ~ParticleDiagnosticScope(){pendingParticleDiagnostics()=previous;}
   void add(ParticleAttemptBundle attempt) {
@@ -42,7 +46,7 @@ inline void writeAttemptTrace(const ParticleStepSettings& s,
   const std::string path=s.solverDiagnosticsPrefix+"_trace.csv";
   std::ifstream existing(path);const bool header=!existing.good()||existing.peek()==std::ifstream::traits_type::eof();
   std::ofstream file(path,std::ios::app);if(!file)return;
-  if(header)file<<"outer_time_s,outer_dt_s,subdivision_count,substep_index,subdt_s,newton_iteration,force_ratio,torque_ratio,gap_violation_m,complementarity_ratio,residual_norm,step_fraction,ksp_iterations,ksp_residual_norm,snes_reason,status,message,active_contacts,sliding_contacts,rolling_contacts,activated_contacts,released_contacts,domain_errors,ksp_reason,candidate_expansion,friction_branch_attempts,friction_branch_corrections,contact_state_updates,contact_activations,contact_releases,nonlinear_iteration,npc_snes_reason,total_ksp_iterations,residual_evaluations,newton_step_fraction\n";
+  if(header)file<<"outer_time_s,outer_dt_s,subdivision_count,substep_index,subdt_s,newton_iteration,force_ratio,torque_ratio,gap_violation_m,complementarity_ratio,residual_norm,step_fraction,ksp_iterations,ksp_residual_norm,snes_reason,status,message,active_contacts,sliding_contacts,rolling_contacts,activated_contacts,released_contacts,domain_errors,ksp_reason,candidate_expansion,friction_branch_attempts,friction_branch_corrections,contact_state_updates,contact_activations,contact_releases,nonlinear_iteration,npc_snes_reason,total_ksp_iterations,residual_evaluations,newton_step_fraction,normal_guess_restarts\n";
   file<<std::setprecision(17);
   for(const auto& r:trace)file<<outerTime<<','<<outerDt<<','<<count<<','<<substep<<','<<subdt<<','
     <<r.iteration<<','<<r.forceRatio<<','<<r.torqueRatio<<','<<r.gapViolation<<','<<r.complementarityRatio<<','
@@ -50,9 +54,10 @@ inline void writeAttemptTrace(const ParticleStepSettings& s,
     <<','<<r.activated<<','<<r.released<<','<<r.domainErrors<<','<<r.kspReason<<','<<r.candidateExpansion
     <<','<<r.frictionBranchAttempts<<','<<r.frictionBranchCorrections
     <<','<<r.contactStateUpdates<<','<<r.contactActivations<<','<<r.contactReleases
-    <<','<<r.nonlinearIteration<<','<<r.npcReason<<','<<r.totalKspIterations<<','<<r.residualEvaluations<<','<<r.fraction<<'\n';
+    <<','<<r.nonlinearIteration<<','<<r.npcReason<<','<<r.totalKspIterations<<','<<r.residualEvaluations<<','<<r.fraction<<','<<r.normalGuessRestarts<<'\n';
   file<<outerTime<<','<<outerDt<<','<<count<<','<<substep<<','<<subdt
-      <<",-1,0,0,0,0,0,0,0,0,"<<reason<<",failed_attempt,"<<csvQuoted(error)<<",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n";
+      <<",-1,0,0,0,0,0,0,0,0,"<<reason<<",failed_attempt,"<<csvQuoted(error)<<",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"
+      <<(trace.empty()?0:trace.back().normalGuessRestarts)<<'\n';
 }
 inline void ParticleDiagnosticScope::flushFailure() {
   auto* saved=pendingParticleDiagnostics();pendingParticleDiagnostics()=nullptr;
@@ -203,6 +208,12 @@ struct NcpPreconditioner {
   }
 };
 struct PetscParticleContext {
+  struct CycleIterate {
+    Vector residual;
+    std::vector<unsigned char> branches;
+    int attempt=0,branchEpoch=0;
+    double norm=0.;
+  };
   Residual& residual;Vector weights,baseQ;Evaluation base;NcpPreconditioner pc;
   std::vector<unsigned char> engagement;std::deque<ParticleAttemptTrace> trace;
   std::string error;int totalKrylov=0,newtonAttempts=0,domainErrors=0,candidateExpansion=0,iterationBudget=0;
@@ -211,6 +222,9 @@ struct PetscParticleContext {
   int frictionBranchAttempts=0,frictionBranchCorrections=0,frictionBranchKrylov=0;
   int frictionAttemptOffset=0,frictionCorrectionOffset=0;
   int iterationOffset=0,contactStateUpdates=0,contactActivations=0,contactReleases=0;
+  int normalGuessRestarts=0;
+  bool restartNormalGuess=false;
+  std::deque<CycleIterate> cycleHistory;
   std::vector<unsigned char> previousTraceContacts;
   std::vector<std::size_t> newCandidates;
   PetscParticleContext(Residual& r):residual(r),iterationBudget(r.settings.maxNewtonIterations){}
@@ -250,6 +264,47 @@ struct PetscParticleContext {
       if(load>s.forceAbsoluteTolerance && std::abs(gap)>s.contactGapTolerance)return false;
       if(gap>s.contactGapTolerance && e.contacts[p].active)return false;
     }return true;
+  }
+  bool repeatedContactCycle(const Vector& q,const Evaluation& e) {
+    // Only the outer nonlinear iterates enter this history. A recurring norm
+    // alone is not a cycle: every residual component and contact branch must
+    // recur after the solver has visited a different constitutive branch.
+    if(normalGuessRestarts || newtonAttempts>=iterationBudget
+        || (e.diagnostic.maxForceResidualRatio<=1. && e.diagnostic.maxTorqueResidualRatio<=1.))return false;
+    if(!cycleHistory.empty() && cycleHistory.back().attempt==newtonAttempts)return false;
+    CycleIterate current;
+    current.attempt=newtonAttempts;
+    transform(q,e,current.residual);
+    const std::size_t nb=6*residual.old.size();
+    current.branches.resize(q.size()-nb);
+    const auto& s=residual.settings;
+    for(std::size_t p=0;p<residual.activeSlot.size();++p)if(residual.activeSlot[p]>=0) {
+      const std::size_t slot=residual.activeSlot[p];
+      const double gap=(e.gaps[p]-s.rough.gap)/s.contactGapTolerance;
+      const double load=q[nb+slot]*residual.lengthScale/s.contactGapTolerance;
+      const auto& contact=e.contacts[p];
+      current.branches[slot]=static_cast<unsigned char>((gap<=load?1:0)
+          |(contact.active?2:0)|(contact.sliding?4:0)|(contact.rolling?8:0));
+      // Compare normal residuals using the ORIGINAL physical tolerances, not
+      // the inertial min-map metric used to compute Newton directions.
+      current.residual[nb+slot]=fischerBurmeister(gap,e.normalLoads[p]/s.forceAbsoluteTolerance);
+    }
+    current.norm=length(current.residual);
+    if(!std::isfinite(current.norm))return false;
+    if(!cycleHistory.empty())current.branchEpoch=cycleHistory.back().branchEpoch
+        +(current.branches!=cycleHistory.back().branches);
+    for(const auto& previous:cycleHistory) {
+      if(current.attempt-previous.attempt<2 || current.branchEpoch-previous.branchEpoch<2
+          || current.branches!=previous.branches
+          || current.norm<(1.-s.relativeTolerance)*previous.norm)continue;
+      bool indistinguishable=true;
+      for(std::size_t k=0;k<current.residual.size();++k)
+        if(std::abs(current.residual[k]-previous.residual[k])>1.){indistinguishable=false;break;}
+      if(indistinguishable)return true;
+    }
+    cycleHistory.push_back(std::move(current));
+    while(cycleHistory.size()>static_cast<std::size_t>(iterationBudget))cycleHistory.pop_front();
+    return false;
   }
   bool evaluate(const Vector& q,Evaluation& e) {
     if(!residual(q,e,error)){++domainErrors;return false;}
@@ -428,6 +483,17 @@ inline PetscErrorCode particlePetscConverged(SNES snes,PetscInt iteration,PetscR
   if(changed){Evaluation projected;if(c.evaluate(q,projected)&&c.convergedInner(projected)){
       petscWrite(solution,q);c.baseQ=q;c.base=std::move(projected);*reason=SNES_CONVERGED_FNORM_ABS;return 0;}}
   if(!changed && c.convergedInner(e)){c.baseQ=q;c.base=std::move(e);*reason=SNES_CONVERGED_FNORM_ABS;return 0;}
+  if(c.repeatedContactCycle(petscRead(solution),e)) {
+    c.restartNormalGuess=true;
+#if PETSC_VERSION_GE(3,25,0)
+    *reason=SNES_DIVERGED_USER;
+#else
+    // Older PETSc releases still use the explicit flag to distinguish this
+    // controlled restart from actual exhaustion of the shared work budget.
+    *reason=SNES_DIVERGED_MAX_IT;
+#endif
+    return 0;
+  }
   if(c.newtonAttempts>=c.iterationBudget)*reason=SNES_DIVERGED_MAX_IT;
   return 0;
 }
@@ -454,6 +520,7 @@ inline PetscErrorCode particlePetscMonitor(SNES snes,PetscInt iteration,PetscRea
   t.frictionBranchAttempts=c.frictionAttemptOffset+c.frictionBranchAttempts;
   t.frictionBranchCorrections=c.frictionCorrectionOffset+c.frictionBranchCorrections;
   t.contactStateUpdates=c.contactStateUpdates;t.contactActivations=c.contactActivations;t.contactReleases=c.contactReleases;
+  t.normalGuessRestarts=c.normalGuessRestarts;
   c.trace.push_back(t);if(c.trace.size()>256)c.trace.pop_front();return 0;
 }
 struct PetscParticleObjects {
@@ -536,7 +603,9 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
   auto previousTraceEngagement=engagement;
   std::deque<ParticleAttemptTrace> allTrace;int totalNewton=0,totalKrylov=0,totalEvaluations=0;int finalReason=0;
   int totalFrictionAttempts=0,totalFrictionCorrections=0;
-  int stateUpdates=0,activations=0,releases=0,candidateExpansions=0;
+  int stateUpdates=0,activations=0,releases=0,candidateExpansions=0,normalGuessRestarts=0;
+  bool preserveTrialGeometry=false;
+  Vector restartWeights;
   // Each inner solve owns one immutable engagement regime. Opening/closing
   // restarts the merit function only outside SNES, with the same beginning-of-
   // substep history. Neither a line search nor a derivative may release history.
@@ -545,7 +614,8 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
   for(std::size_t outer=0;outer<=np+static_cast<std::size_t>(settings.maxNewtonIterations);++outer) {
     if(totalNewton>=settings.maxNewtonIterations) {
       std::ostringstream message;message<<"PETSc contact solve exhausted shared Newton budget across contact states: Newton="
-        <<totalNewton<<", state updates="<<stateUpdates<<", activations="<<activations<<", releases="<<releases;
+        <<totalNewton<<", state updates="<<stateUpdates<<", activations="<<activations<<", releases="<<releases
+        <<", normal guess restarts="<<normalGuessRestarts;
       error=message.str();finalReason=SNES_DIVERGED_MAX_IT;break;
     }
     Residual residual{old,force,torque,settings,cache,contacts,slots,dt,time,L,reactionScale,activeCount};residual.complementarity=true;
@@ -554,30 +624,45 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     context.iterationBudget=settings.maxNewtonIterations-totalNewton;context.iterationOffset=totalNewton;
     context.krylovOffset=totalKrylov;context.evaluationOffset=totalEvaluations;
     context.contactStateUpdates=stateUpdates;context.contactActivations=activations;context.contactReleases=releases;
+    context.normalGuessRestarts=normalGuessRestarts;
     context.frictionAttemptOffset=totalFrictionAttempts;context.frictionCorrectionOffset=totalFrictionCorrections;
     context.previousTraceContacts=previousTraceEngagement;
     Evaluation initial;bool valid=false;
-    for(int attempt=0;attempt<settings.maxLineSearch;++attempt){
-      if(contactFeasiblePredictor(residual,q,false,context.error)&&context.evaluate(q,initial)){valid=true;break;}
-      for(std::size_t k=0;k<6*n;++k)q[k]*=.5;
-    }
-    if(!valid){
-      for(std::size_t k=0;k<6*n;++k)q[k]=0.;
-      valid=contactFeasiblePredictor(residual,q,true,context.error)&&context.evaluate(q,initial);
+    if(preserveTrialGeometry) {
+      // The cycle iterate already passed a full residual evaluation. Changing
+      // only its trial multipliers cannot invalidate the pair-potential domain.
+      // Do not run predictor restoration here: the body iterate must be kept.
+      valid=context.evaluate(q,initial);
+      preserveTrialGeometry=false;
+    }else {
+      for(int attempt=0;attempt<settings.maxLineSearch;++attempt){
+        if(contactFeasiblePredictor(residual,q,false,context.error)&&context.evaluate(q,initial)){valid=true;break;}
+        for(std::size_t k=0;k<6*n;++k)q[k]*=.5;
+      }
+      if(!valid){
+        for(std::size_t k=0;k<6*n;++k)q[k]=0.;
+        valid=contactFeasiblePredictor(residual,q,true,context.error)&&context.evaluate(q,initial);
+      }
     }
     if(!valid){error="Cannot construct a contact-feasible Newton initial guess at the advanced shear phase";
       if(!context.error.empty())error+=": "+context.error;
       break;}
     if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;
-      q.resize(6*n+activeCount,0.);++candidateExpansions;continue;}
+      q.resize(6*n+activeCount,0.);restartWeights.clear();++candidateExpansions;continue;}
     // Freeze physical tolerance row scales for this solve so the line search
     // compares one merit function. Final acceptance still uses current loads.
-    context.weights.resize(6*n);
-    for(std::size_t i=0;i<n;++i){
-      const double fs=old[i].mass*L/(dt*dt),ts=*std::max_element(old[i].inertiaBody.begin(),old[i].inertiaBody.end())/(dt*dt);
-      const double fw=fs/(settings.forceAbsoluteTolerance+settings.relativeTolerance*initial.forceReference[i]);
-      const double tw=ts/(settings.torqueAbsoluteTolerance+settings.relativeTolerance*initial.torqueReference[i]);
-      for(int k=0;k<3;++k){context.weights[6*i+k]=fw;context.weights[6*i+k+3]=tw;}}
+    if(!restartWeights.empty()) {
+      // A different multiplier guess in the SAME engagement regime must not
+      // also change the merit function. Retain its frozen physical row scales.
+      context.weights.swap(restartWeights);
+    }else {
+      context.weights.resize(6*n);
+      for(std::size_t i=0;i<n;++i){
+        const double fs=old[i].mass*L/(dt*dt),ts=*std::max_element(old[i].inertiaBody.begin(),old[i].inertiaBody.end())/(dt*dt);
+        const double fw=fs/(settings.forceAbsoluteTolerance+settings.relativeTolerance*initial.forceReference[i]);
+        const double tw=ts/(settings.torqueAbsoluteTolerance+settings.relativeTolerance*initial.torqueReference[i]);
+        for(int k=0;k<3;++k){context.weights[6*i+k]=fw;context.weights[6*i+k+3]=tw;}}
+    }
     PetscParticleObjects objects;PetscErrorCode ierr=0;
     auto checked=[&](PetscErrorCode code){if(code){std::ostringstream msg;msg<<"PETSc setup failed with error "<<code;throw std::runtime_error(msg.str());}};
     checked(VecCreateSeq(PETSC_COMM_SELF,static_cast<PetscInt>(q.size()),&objects.x));
@@ -662,7 +747,21 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
     q=petscRead(objects.x);
     for(const auto& row:context.trace){allTrace.push_back(row);if(allTrace.size()>256)allTrace.pop_front();}
     if(context.missingCandidate){for(auto p:context.newCandidates)if(slots[p]<0)slots[p]=activeCount++;
-      q.resize(6*n+activeCount,0.);++candidateExpansions;continue;}
+      q.resize(6*n+activeCount,0.);restartWeights.clear();++candidateExpansions;continue;}
+    if(context.restartNormalGuess && normalGuessRestarts==0 && totalNewton<settings.maxNewtonIterations) {
+      // The warm multiplier guess can keep revisiting a coupled stick/slip
+      // cycle. Discard that guess and the NGMRES memory exactly once, while
+      // preserving the CURRENT positions/orientations and fixed contact
+      // history. All work before this restart remains charged to the same
+      // configured budget; candidate or engagement changes do not renew it.
+      for(std::size_t k=6*n;k<q.size();++k)q[k]=0.;
+      restartWeights=context.weights;
+      ++normalGuessRestarts;
+      if(!allTrace.empty())allTrace.back().normalGuessRestarts=normalGuessRestarts;
+      if(auto* scope=pendingParticleDiagnostics())++scope->normalGuessRestarts;
+      preserveTrialGeometry=true;
+      continue;
+    }
     Evaluation final;
     if(!ierr && reason>0 && context.evaluate(q,final) && context.convergedInner(final)) {
       // An OFF candidate's tolerance-sized normal reaction is unresolved, not
@@ -729,6 +828,7 @@ inline bool implicitStepPetsc(const std::vector<Body>& old,const std::vector<Vec
       <<", Krylov="<<totalKrylov<<", residual evaluations="<<totalEvaluations
       <<", friction branch predictors=disabled"
       <<", contact state updates="<<stateUpdates<<", activations="<<activations<<", releases="<<releases;
+    message<<", normal guess restarts="<<normalGuessRestarts;
     if(context.evaluate(q,final))message<<", force residual ratio="<<final.diagnostic.maxForceResidualRatio
       <<", torque residual ratio="<<final.diagnostic.maxTorqueResidualRatio<<", gap violation="<<final.diagnostic.contactGapViolation
       <<" m, complementarity ratio="<<context.complementarity(final);

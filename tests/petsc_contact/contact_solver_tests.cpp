@@ -875,6 +875,40 @@ void failedStepDoesNotCommit() {
 }
 
 #ifdef SLURRY_USE_PETSC
+void normalGuessRestartPreservesBudgetAndHistory() {
+  const auto file = std::filesystem::path(__FILE__).parent_path() /
+                    "fixtures/normal_mode_cycle_108.dat";
+  auto replay = g::particle_detail::readParticleReplay(file.string());
+  const auto history = replay.contacts;
+  // The saved cycle is detected before this limit, but its restarted solve
+  // needs additional work. A restart may not silently grant another budget.
+  replay.settings.maxNewtonIterations = 32;
+  TemporaryDiagnostics files;
+  replay.settings.solverDiagnosticsPrefix = files.prefix();
+  g::particle_detail::ParticleDiagnosticScope attempts(replay.settings);
+  std::vector<g::Body> output;
+  g::ParticleStepDiagnostics info;
+  std::string error;
+  const bool success = g::particle_detail::implicitStepPetsc(
+      replay.bodies, replay.force, replay.torque, replay.dt, replay.time,
+      replay.settings, replay.cache, replay.contacts, output, info, error,
+      replay.outerTime, replay.outerDt, replay.count, replay.substep);
+  require(!success && output.empty(), "Exhausted restarted solve must not publish a state");
+  require(attempts.normalGuessRestarts == 1, "Fixture must exercise one cold multiplier restart");
+  require(!attempts.attempts.empty(), "Restarted failure must retain its work trace");
+  int used = 0;
+  bool recordedRestart = false;
+  for (const auto& attempt : attempts.attempts) for (const auto& row : attempt.trace) {
+    used = std::max(used, row.iteration);
+    recordedRestart = recordedRestart || row.normalGuessRestarts == 1;
+    require(row.iteration <= 32, "Warm and cold work must share the same budget");
+  }
+  require(used == 32 && recordedRestart, "Trace must include both phases through budget exhaustion");
+  for (std::size_t p = 0; p < history.size(); ++p)
+    require(identicalContact(history[p], replay.contacts[p]),
+            "Restart may not erase or commit any contact history on failure");
+}
+
 void nonlinearWorkAccounting(bool failLinearSolve) {
   auto s = settings();
   // Feasible initialization now solves this fixture in two Newton attempts.
@@ -1286,6 +1320,7 @@ int main(int argc, char** argv) {
 #ifdef SLURRY_USE_PETSC
       {"npc_iteration_override_respects_shared_budget", [] { nonlinearWorkAccounting(false); }},
       {"failed_krylov_attempt_is_counted", [] { nonlinearWorkAccounting(true); }},
+      {"normal_guess_restart_preserves_budget_and_history", normalGuessRestartPreservesBudgetAndHistory},
       {"failed_contact_release_does_not_commit", failedContactReleaseDoesNotCommit},
       {"recovered_retry_writes_no_diagnostics", recoveredRetryWritesNoDiagnostics},
       {"preloaded_collision_within_production_budget", preloadedCollisionWithinProductionBudget},

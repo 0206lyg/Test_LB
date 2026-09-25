@@ -65,24 +65,31 @@ void checkAdvancedShearPhase(){
   std::cout<<"PASS: geometry-only restoration at advanced Lees--Edwards phase\n";
 }
 
-void continueFixture(const std::filesystem::path& file){
+void continueFixture(const std::filesystem::path& file,bool expectFirstRestart=false){
   auto x=d::readParticleReplay(file.string());x.settings.solverBackend="petsc";
+  d::ParticleDiagnosticScope diagnostics(x.settings);
   int newton=0,krylov=0;double maxForce=0.,maxTorque=0.,maxGap=0.;
   for(int k=x.substep;k<x.count;++k){
     std::vector<g::Body> next;g::ParticleStepDiagnostics info;std::string error;
+    const int restartsBefore=diagnostics.normalGuessRestarts;
     const bool success=d::dispatchImplicitStep(x.bodies,x.force,x.torque,x.dt,x.outerTime+k*x.dt,x.settings,
                                                x.cache,x.contacts,next,info,error,x.outerTime,x.outerDt,x.count,k);
     require(success,file.filename().string()+" substep "+std::to_string(k)+": "+error);
     require(info.maxForceResidualRatio<=1.&&info.maxTorqueResidualRatio<=1.
             &&info.contactGapViolation<=x.settings.contactGapTolerance,"Original physical acceptance criteria failed");
     require(info.newtonIterations<=x.settings.maxNewtonIterations,"Original Newton budget exceeded");
+    const int restarts=diagnostics.normalGuessRestarts-restartsBefore;
+    require(restarts<=1,"A substep may restart its normal guess only once");
+    if(expectFirstRestart&&k==x.substep)
+      require(restarts==1,"Saved cycling case must exercise the normal-guess restart");
     x.bodies=std::move(next);newton+=info.newtonIterations;krylov+=info.krylovIterations;
     maxForce=std::max(maxForce,info.maxForceResidualRatio);maxTorque=std::max(maxTorque,info.maxTorqueResidualRatio);
     maxGap=std::max(maxGap,info.contactGapViolation);
   }
   std::cout<<std::setprecision(12)<<"PASS: "<<file.filename().string()<<" remaining="<<x.count-x.substep
            <<" Newton="<<newton<<" Krylov="<<krylov<<" force_ratio="<<maxForce
-           <<" torque_ratio="<<maxTorque<<" gap_violation_m="<<maxGap<<'\n';
+           <<" torque_ratio="<<maxTorque<<" gap_violation_m="<<maxGap
+           <<" normal_guess_restarts="<<diagnostics.normalGuessRestarts<<std::endl;
 }
 
 int main(int argc,char** argv){
@@ -98,6 +105,7 @@ int main(int argc,char** argv){
     continueFixture(directory/"normal_friction_corner_followup_108.dat");
     continueFixture(directory/"normal_release_metric_108.dat");
     continueFixture(directory/"normal_release_followup_108.dat");
+    continueFixture(directory/"normal_mode_cycle_108.dat",true);
   }catch(const std::exception& error){std::cerr<<"FAIL: "<<error.what()<<'\n';result=1;}
   const auto finalize=PetscFinalize();return finalize?1:result;
 }
