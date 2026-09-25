@@ -19,10 +19,14 @@ def case():
 
 def metadata(config,step,rate=100):
     cfg,derived=RUNNER.resolve(config,rate)
+    values = RUNNER.solver_values(cfg, Path('run'), Path('particles.csv'), 0)
+    keys = RUNNER.SURFACE_CHECKPOINT_KEYS if cfg['interaction']['surface_adhesion'] else ('local_gap_fraction',)
+    values['interaction_model_version'] = RUNNER.SURFACE_ADHESION_VERSION
+    immutable = {key: values[key] for key in keys}
+    immutable.update(shear_rate=rate, dt_s=derived['dt_s'], particle_count=cfg['particles']['count'], ranks=1)
     return {'engine':'pure_gr','format_version':1,'complete':True,'step':step,'ranks':1,
             'dt_s':derived['dt_s'],'shear_rate_s_inv':rate,
-            'immutable_config':{'shear_rate':rate,'local_gap_fraction':cfg['interaction']['local_gap_fraction'],
-                                'dt_s':derived['dt_s'],'particle_count':cfg['particles']['count'],'ranks':1},
+            'immutable_config':immutable,
             'files':{'state.bin':1,'initial_particles.csv':1,'lattice_rank_0.bin':1},
             'output_bytes':{'history.csv':9,'particles.csv':9}}
 
@@ -89,14 +93,43 @@ class RestartTests(unittest.TestCase):
 
     def test_changed_force_timestep_or_ranks_is_rejected(self):
         data=metadata(case(),8)
-        for change in ('alpha','time','ranks'):
+        for change in ('work','range','curvature_switch','curvature_cutoff','time','ranks'):
             with self.subTest(change=change),self.assertRaisesRegex(ValueError,'differ'):
                 changed=case()
-                if change=='alpha':
-                    changed['interaction']['local_gap_fraction']=0 if data['immutable_config']['local_gap_fraction'] else 0.8
+                if change=='work':changed['interaction']['adhesion_work_J_m2'] *= 0.5
+                if change=='range':changed['interaction']['adhesion_range_m'] *= 0.5
+                if change=='curvature_switch':changed['interaction']['curvature_switch_gap_m'] *= 1.1
+                if change=='curvature_cutoff':changed['interaction']['curvature_cutoff_gap_m'] *= 1.1
                 if change=='time':changed['numerics']['time_step_s']=1e-7
                 cfg,derived=RUNNER.resolve(changed)
                 RUNNER.validate_restart(cfg,derived,data,2 if change=='ranks' else 1)
+
+    def test_model_migration_is_rejected_in_both_directions(self):
+        legacy = case()
+        legacy['interaction'].pop('surface_adhesion')
+        for key in RUNNER.SURFACE_ADHESION_DEFAULTS:
+            legacy['interaction'].pop(key)
+        legacy['interaction'].update(RUNNER.LOCAL_ADHESION_DEFAULTS)
+        legacy['interaction']['local_gap_fraction'] = 1.0
+        for old, new in ((legacy, case()), (case(), legacy)):
+            with self.subTest(old_surface=old['interaction'].get('surface_adhesion',False)):
+                cfg, derived = RUNNER.resolve(new)
+                with self.assertRaisesRegex(ValueError, 'interaction law differs'):
+                    RUNNER.validate_restart(cfg, derived, metadata(old, 8), 1)
+        cfg, derived = RUNNER.resolve(legacy)
+        self.assertTrue(RUNNER.validate_restart(cfg, derived, metadata(legacy, 8), 1))
+
+    def test_surface_fingerprint_cannot_silently_omit_parameters(self):
+        cfg, derived = RUNNER.resolve(case())
+        for key in RUNNER.SURFACE_CHECKPOINT_KEYS:
+            saved = metadata(case(), 8)
+            saved['immutable_config'].pop(key)
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                RUNNER.validate_restart(cfg, derived, saved, 1)
+        saved = metadata(case(), 8)
+        saved['immutable_config']['interaction_model_version'] += 1
+        with self.assertRaisesRegex(ValueError, 'version/fingerprint'):
+            RUNNER.validate_restart(cfg, derived, saved, 1)
 
     def test_endpoint_is_cumulative_and_complete_can_be_skipped(self):
         cfg,derived=RUNNER.resolve(case());data=metadata(case(),16)

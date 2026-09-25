@@ -1,6 +1,7 @@
 #ifndef SLURRY_GR_RE2_GRAPHITE_RE_SQUARED_POTENTIAL_H
 #define SLURRY_GR_RE2_GRAPHITE_RE_SQUARED_POTENTIAL_H
 #include "ellipsoidGap.h"
+#include "contactCurvature.h"
 #include <limits>
 
 // SLURRY SCOPE BEGIN
@@ -15,7 +16,20 @@ struct PairParameters {
   // not a measured real-contact area fraction. Zero preserves legacy RE2.
   double roughnessGap=2e-9,localGap=3e-10,localGapFraction=0.;
   double localSwitchExcessGap=2e-9,localCutoffExcessGap=10e-9;
+  // Version 1: local-curvature Derjaguin background, matched to far RE2,
+  // plus a finite-range Dugdale surface traction. Legacy configurations and
+  // replay fixtures keep the old evaluator unless explicitly enabled.
+  bool surfaceAdhesion=false;
+  double adhesionWork=.0219,adhesionRange=.67e-9;
+  double curvatureSwitchGap=5e-9,curvatureCutoffGap=20e-9;
 };
+// Planar work already present in the geometric-gap LJ background. This is a
+// surface energy (J/m^2), not the complete curved-pair separation work (J).
+inline double surfaceBackgroundWork(const PairParameters&p){
+  constexpr double pi=3.1415926535897932384626433832795;
+  return p.hamaker/(12.*pi*p.roughnessGap*p.roughnessGap)
+      *(1.-std::pow(p.sigma/p.roughnessGap,6)/30.);
+}
 inline void validatePairParameters(const PairParameters&p){
   if(!std::isfinite(p.hamaker)||!(p.hamaker>=0.)||!std::isfinite(p.sigma)||!(p.sigma>0.)
      ||!std::isfinite(p.switchGap)||!(p.switchGap>=0.)||!std::isfinite(p.cutoffGap)||!(p.cutoffGap>p.switchGap))
@@ -28,11 +42,26 @@ inline void validatePairParameters(const PairParameters&p){
         ||!std::isfinite(p.localCutoffExcessGap)||!(p.localCutoffExcessGap>p.localSwitchExcessGap)
         ||!(p.roughnessGap+p.localCutoffExcessGap<=p.switchGap)))
     throw std::domain_error("Invalid RE2 local adhesion gaps: require 0<D0<=h0, 0<=local switch<local cutoff, and h0+local cutoff<=far switch");
+  if(p.surfaceAdhesion){
+    if(p.localGapFraction!=0.)
+      throw std::domain_error("Surface adhesion cannot be combined with legacy local-gap adhesion");
+    if(!std::isfinite(p.roughnessGap)||!(p.roughnessGap>0.)
+       ||!std::isfinite(p.adhesionWork)||!(p.adhesionWork>0.)
+       ||!std::isfinite(p.adhesionRange)||!(p.adhesionRange>0.)
+       ||!std::isfinite(p.curvatureSwitchGap)||!std::isfinite(p.curvatureCutoffGap)
+       ||!(p.roughnessGap+p.adhesionRange<=p.curvatureSwitchGap)
+       ||!(p.curvatureSwitchGap<p.curvatureCutoffGap)||!(p.curvatureCutoffGap<=p.switchGap))
+      throw std::domain_error("Invalid surface adhesion: require h0>0, range>0, h0+range<=curvature switch<curvature cutoff<=far switch");
+    const double background=surfaceBackgroundWork(p);
+    if(!std::isfinite(background)||background<0.||p.adhesionWork<background)
+      throw std::domain_error("Surface adhesion work must be at least the nonnegative planar background work; repulsive screening is a separate model");
+  }
 }
-// Strict lower bound on the geometric gap: both h and the shifted local d
-// must be positive. Solver trial steps must respect this domain, not clamp d.
+// Strict lower bound on the geometric gap. Only the legacy local-gap model
+// has an extra shifted-gap singularity. Surface adhesion uses a polynomial
+// continuation for trial h<h0; the accepted rough constraint remains h>=h0.
 inline double minimumPairGap(const PairParameters&p){
-  return p.localGapFraction>0.?std::max(0.,p.roughnessGap-p.localGap):0.;
+  return !p.surfaceAdhesion&&p.localGapFraction>0.?std::max(0.,p.roughnessGap-p.localGap):0.;
 }
 struct PairResult {
   Vec3 forceI{},torqueI{},torqueJ{};
@@ -92,6 +121,12 @@ inline AD branch(const AD&h,const AD&ell,const Body&i,const Body&j,const PairPar
   if(repulsive)u=u*power(p.sigma/h,6);
   return u;
 }
+// Integral of the planar LJ surface energy over a local quadratic gap. Both
+// attraction and repulsion use the same actual contact curvature.
+inline AD derjaguinBranch(const AD&h,const AD&ell,const PairParameters&p,bool repulsive){
+  if(repulsive)return (p.hamaker/2520.)*(ell/h)*power(p.sigma/h,6);
+  return (-p.hamaker/12.)*(ell/h);
+}
 inline AD smoothSwitch(const AD&t){return 1.-10.*power(t,3)+15.*power(t,4)-6.*power(t,5);}
 inline void unpack(const AD&u,Vec3&forceI,Vec3&torqueI,Vec3&torqueJ){for(int k=0;k<3;++k){forceI[k]=u.d[k];torqueI[k]=-u.d[3+k];torqueJ[k]=-u.d[6+k];}}
 }
@@ -114,6 +149,29 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
   const AD length=sqrt(re2_detail::dot(r,r));AVec rh{};for(int k=0;k<3;++k)rh[k]=r[k]/length;
   const AD ell=orientationLength(bi,bj,rh,p.sigma);
   AD ua=branch(h,ell,bi,bj,p,false),ur=branch(h,ell,bi,bj,p,true);
+  if(p.surfaceAdhesion&&gap.gap<p.curvatureCutoffGap){
+    const auto curvature=contactCurvature(bi,bj,gap);
+    AD localLength(curvature.length);localLength.d=curvature.lengthDerivative;
+    const AD nearA=derjaguinBranch(h,localLength,p,false);
+    const AD nearR=derjaguinBranch(h,localLength,p,true);
+    if(gap.gap<=p.curvatureSwitchGap){ua=nearA;ur=nearR;}
+    else{
+      const AD sw=smoothSwitch((h-p.curvatureSwitchGap)/(p.curvatureCutoffGap-p.curvatureSwitchGap));
+      ua=ua+sw*(nearA-ua);ur=ur+sw*(nearR-ur);
+    }
+    const AD s=h-p.roughnessGap;
+    if(s.v<p.adhesionRange){
+      constexpr double pi=3.1415926535897932384626433832795;
+      const double excessWork=p.adhesionWork-surfaceBackgroundWork(p);
+      const AD opening=1.-s/p.adhesionRange;
+      // G=pi*lambda_D=2*pi/sqrt(det_t K). The quadratic pair energy is
+      // the Derjaguin integral of phi_coh=-DeltaW*(1-s/range)_+.
+      // Its energy AND force vanish at the cutoff. For Newton trial points
+      // s<0 use the same analytic polynomial; accepted states obey h>=h0.
+      // Differentiating localLength includes moving-contact force and torque.
+      ua=ua-(.5*pi*excessWork*p.adhesionRange)*localLength*opening*opening;
+    }
+  }
   if(p.localGapFraction>0.&&gap.gap-p.roughnessGap<p.localCutoffExcessGap){
     const AD s=h-p.roughnessGap,d=s+p.localGap;
     // Differentiate the entire energy, including the local switch. Replacing

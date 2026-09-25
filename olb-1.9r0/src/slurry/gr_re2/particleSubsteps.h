@@ -42,11 +42,13 @@ struct ParticleStepSettings {
 
 inline void validateParticlePairSettings(const ParticleStepSettings& s) {
   validatePairParameters(s.pair);
-  if(s.pair.localGapFraction>0. && s.rough.enabled) {
+  if(s.pair.surfaceAdhesion&&!s.rough.enabled)
+    throw std::invalid_argument("Surface adhesion requires the unilateral rough-contact constraint");
+  if((s.pair.surfaceAdhesion||s.pair.localGapFraction>0.) && s.rough.enabled) {
     const double scale=std::max(std::abs(s.rough.gap),std::abs(s.pair.roughnessGap));
     if(!std::isfinite(s.rough.gap)
         || std::abs(s.rough.gap-s.pair.roughnessGap)>32.*std::numeric_limits<double>::epsilon()*scale)
-      throw std::invalid_argument("Local pair adhesion and rough contact must use the same roughness gap");
+      throw std::invalid_argument("Pair adhesion and rough contact must use the same roughness gap");
   }
 }
 

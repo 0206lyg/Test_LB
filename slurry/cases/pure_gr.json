@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "description": "Graphite-water quick magnitude check: RE-squared with conservative local-gap adhesion (D0=0.30 nm, alpha=1), geometric rough contact at 2 nm, sliding stiffness 80 N/m and adhesive rolling resistance, Lees-Edwards shear. Random initial placement; attraction and shear start together. Target Mach 0.02, end strain 10.",
+  "description": "Graphite-water shear: curvature-corrected near-field dispersion plus conservative finite-range surface adhesion (effective work 21.9 mJ/m2, opening range 0.67 nm), geometric rough contact at 2 nm, sliding stiffness 80 N/m and adhesive rolling resistance. Random initial placement; attraction and shear start together. Target Mach 0.02, end strain 10.",
   "fluid": {
     "density_kg_m3": 997.0,
     "dynamic_viscosity_Pa_s": 0.00089,
@@ -44,10 +44,11 @@
     "sigma_lj_m": 4.197e-10,
     "switch_gap_m": 4e-07,
     "cutoff_gap_m": 5e-07,
-    "local_gap_m": 3e-10,
-    "local_gap_fraction": 1.0,
-    "local_switch_excess_gap_m": 2e-09,
-    "local_cutoff_excess_gap_m": 1e-08
+    "surface_adhesion": true,
+    "adhesion_work_J_m2": 0.0219,
+    "adhesion_range_m": 6.7e-10,
+    "curvature_switch_gap_m": 5e-09,
+    "curvature_cutoff_gap_m": 2e-08
   },
   "output": {
     "sample_every_steps": 20,

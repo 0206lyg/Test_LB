@@ -8,13 +8,14 @@ OpenLB 원본과 외부 라이브러리의 문서·LICENSE는 각 소스 트리�
 | 모델 | 내용 | 설정 파일 |
 | --- | --- | --- |
 | `pure_cmc` | CMC Cross 유체 | `slurry/cases/run.json`의 `cmc`, `cmc250k_cross_parameters.csv` |
-| `pure_gr` | RE² graphite, 국소 부착, lubrication, rough contact, Lees–Edwards, checkpoint/restart | `slurry/cases/pure_gr.json` |
+| `pure_gr` | RE² graphite, 곡률 기반 근접 인력·표면 응착, lubrication, rough contact, Lees–Edwards, checkpoint/restart | `slurry/cases/pure_gr.json` |
 | `gr_baseline` | 기존 graphite Couette 및 기존 checkpoint/restart | `slurry/cases/gr_baseline.json` |
 
 ## 1. 설치, 빌드, 실행
 
 MIT 작업 루트는 `/home/lyjania/OpenLB`입니다. 이 안에 `olb-1.9r0/`, `slurry/`,
-두 sbatch 파일이 있어야 합니다. 소스 업데이트를 적용한 뒤 다음 명령 하나로 빌드합니다.
+두 sbatch 파일이 있어야 합니다. 배포 ZIP은 이 OpenLB 폴더 안에서 덮어풉니다.
+소스 업데이트를 적용한 뒤 다음 명령 하나로 빌드합니다.
 
 ```bash
 cd /home/lyjania/OpenLB
@@ -68,37 +69,48 @@ in-place PETSc 빌드에는 `PETSC_ARCH`도 지정합니다. 저장된 환경은
 
 ## 2. pure_gr 설정과 부착력 조절
 
-설정 단위는 SI이며 입력은 `slurry/cases/pure_gr.json`입니다. 아래는 저장소의 기준값입니다.
-사용자가 바꾼 설정은 실제 실행에 사용한 JSON과 결과 폴더의 설정 기록을 기준으로 확인합니다.
+설정 단위는 SI이며 입력은 `slurry/cases/pure_gr.json`입니다. 현재 기본값은
+**실제 접촉점 곡률을 사용하는 근접 포텐셜 + 유한 범위 표면 응착**입니다.
+기존 α·국소 간격 혼합항을 이 법칙으로 교체했습니다. 사용자가 바꾼 설정은 실제 실행에
+사용한 JSON과 결과 폴더의 설정 기록을 기준으로 확인합니다.
 
 | JSON 키 | 기준값 | 의미 |
 | --- | ---: | --- |
-| `interaction.hamaker_J` | `9.9e-20` J | Hamaker 상수 |
-| `interaction.sigma_lj_m` | `4.197e-10` m | LJ 반발 길이, 0.4197 nm |
-| `interaction.local_gap_m` | `3e-10` m | 기하학적 접촉에서의 국소 간격 D₀ |
-| `interaction.local_gap_fraction` | `1.0` | 국소 보정의 유효 기여율 α |
-| `interaction.local_switch_excess_gap_m` | `2e-9` m | h−h₀에 대한 감쇠 시작 |
-| `interaction.local_cutoff_excess_gap_m` | `1e-8` m | h−h₀에 대한 보정 종료 |
+| `interaction.surface_adhesion` | `true` | 새 곡률·표면 응착 법칙 사용 |
+| `interaction.hamaker_J` | `9.9e-20` J | 장거리·근접 분산력의 Hamaker 상수 |
+| `interaction.sigma_lj_m` | `4.197e-10` m | 배경 LJ 반발 길이, 0.4197 nm |
+| `interaction.adhesion_work_J_m2` | `0.0219` J/m² | 총 유효 부착일 W_eff, 21.9 mJ/m² |
+| `interaction.adhesion_range_m` | `6.7e-10` m | 접촉 기준에서 응착이 사라질 때까지의 개방 거리 δ, 0.67 nm |
+| `interaction.curvature_switch_gap_m` | `5e-9` m | 실제 gap h에서 곡률 근접식과 RE²의 연결 시작 |
+| `interaction.curvature_cutoff_gap_m` | `2e-8` m | 실제 gap h에서 기존 RE²로 완전히 복귀 |
+| `interaction.switch_gap_m` | `4e-7` m | 기존 원거리 switch 시작 |
+| `interaction.cutoff_gap_m` | `5e-7` m | 기존 pair 상호작용 종료 |
 | `rough_contact.roughness_gap_m` | `2e-9` m | 기하학적 접촉 간격 h₀ |
 | `rough_contact.sliding_friction` | `1.0` | 마찰계수 μ |
 | `rough_contact.tangential_stiffness_N_m` | `80.0` N/m | 접선 탄성 강성 kₜ |
-| `rough_contact.rolling_length_m` | `1e-7` m | rolling 길이 |
-| `rough_contact.rolling_yield_angle_rad` | `0.01` rad | rolling 항복각 |
+| `rough_contact.rolling_length_m` | `1e-7` m | 기존 rolling 길이 |
+| `rough_contact.rolling_yield_angle_rad` | `0.01` rad | 기존 rolling 항복각 |
 
-**새 부착 보정을 낮추려면 `interaction.local_gap_fraction`을 낮춥니다.**
-예를 들어 `1.0 → 0.8`은 동일한 입자 간격과 배향에서 추가 보정 항을 20% 줄입니다.
-D₀, σ, h₀, μ를 함께 바꿀 필요는 없습니다.
+**부착력의 크기는 `interaction.adhesion_work_J_m2`로 조절합니다.**
+예를 들어 `0.0219 → 0.01752`는 같은 centered FF 접촉의 순인력을 약 20% 낮춥니다.
+부착 범위 δ는 이와 별도이며, 접촉이 열릴 때 힘이 감소하는 거리와 pair 분리 에너지를
+정합니다. 벌크 응력은 접촉망·배향에도 의존하므로 같은 비율로 변한다고 가정하지 않습니다.
 
-| α | 동일한 FF 접촉의 총 순인력 |
-| ---: | ---: |
-| 1.0 | 936.215 nN |
-| 0.8 | 754.586 nN |
-| 0.7 | 663.772 nN |
-| 0.5 | 482.144 nN |
+W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 유효 물성**입니다.
+21.9 mJ/m²와 δ=0.67 nm는 이전 centered FF 접촉의 힘·포텐셜 깊이 규모를 유지하도록
+정한 출발값이며, 해당 graphite 분말에서 직접 측정한 값은 아닙니다. δ는 이전
+`local_gap_m`의 D₀=0.30 nm와 다른 물리량입니다. 근거와 식은 5절에 설명합니다.
 
-이 접촉에서는 총 순인력이 `28.073 + α × (936.215 − 28.073)` nN입니다.
-벌크 응력은 접촉망과 배향 변화에도 의존하므로 같은 비율로 줄어든다고 가정하지 않습니다.
-국소 간격 항이 없는 이전 설정은 α=0으로 읽어 기존 RE²를 사용합니다.
+새 법칙은 `W_eff ≥ W_bg ≥ 0` 및
+`h₀ + δ ≤ curvature_switch_gap_m < curvature_cutoff_gap_m ≤ switch_gap_m`을 요구합니다.
+현재 W_bg는 약 0.657 mJ/m²입니다. 응착 범위는 곡률 근접식이 완전히 적용되는 영역에 둡니다.
+5/20 nm 연결 길이는 측정 물성이 아니라 근접 점근식과 원거리 근사의 수치적 연결 선택입니다.
+
+새 모드에서 이전 `local_gap_m`, `local_gap_fraction`, `local_switch_excess_gap_m`,
+`local_cutoff_excess_gap_m`를 함께 지정하면 오류로 중단합니다. α=0을 명시한 경우도
+혼용하지 않습니다. `surface_adhesion`이 없거나 `false`인 기존 JSON은 이전 힘 법칙을
+사용하며, 이 모드에는 새 부착일·범위·곡률 연결 키를 넣을 수 없습니다.
+이전 결과 재현에는 당시의 JSON을 별도 `--config`로 지정합니다.
 
 ## 3. pure_gr 재시작
 
@@ -134,8 +146,12 @@ strain 4.2에서 중단하고 `end_strain=10`이면 4.2부터 10까지 진행합
 sbatch run_slurry_cpu.sbatch --restart 폴더명 --end-strain 20
 ```
 
-α, D₀, σ, 마찰, 접촉 강성 등을 바꾸면 호환성 검사에서 중단합니다.
-부착력 변경 비교는 새 계산으로 시작합니다. 이전 실행에 `--ranks`를 지정했다면
+힘 법칙의 종류, W_eff, δ, 곡률 연결 길이, A_H, σ, h₀, 마찰, 접촉 강성 등을
+바꾸면 호환성 검사에서 중단합니다. **이전 α·국소 간격 모델의 checkpoint를 새 표면 응착
+법칙으로 이어 실행할 수 없습니다.** 이번 기본 JSON으로는 새 계산을 시작합니다.
+기존 계산은 당시 JSON을 `--config`로 지정해 이전 법칙으로 이어갈 수 있습니다.
+새 법칙에서 생성한 checkpoint는 같은 새 물리 설정으로 재시작합니다.
+부착력 변경 비교도 새 계산으로 시작합니다. 이전 실행에 `--ranks`를 지정했다면
 재시작에서도 동일한 값을 사용합니다.
 
 결과는 새 `runs/slurry_...` 폴더에 저장합니다. 원래 결과를 보존하고 `history.csv`와
@@ -178,7 +194,8 @@ checkpoint를 사용합니다. 오래 걸리는 step과 파일 쓰기가 180초 
 LB step으로 `checkpoints/checkpoint_00000000000000000200`처럼 이름을 붙입니다.
 모든 rank가 파일을 닫은 뒤 `.partial`을 완료 폴더로 바꾸고 `latest_checkpoint.txt`를 갱신합니다.
 복원 시 바이너리 checksum을 검사합니다. 형식 1은 같은 OpenLB 자료형 배치와 MPI rank 수를
-전제로 합니다. 유체 전체를 저장하므로 용량은 입자 수보다 격자 크기에 좌우됩니다.
+전제로 합니다. 바이너리 형식은 유지하며, 새 힘 법칙의 종류·버전·물리값을 호환성 기록에
+추가하여 서로 다른 법칙의 재시작을 차단합니다. 유체 전체를 저장하므로 용량은 입자 수보다 격자 크기에 좌우됩니다.
 
 ## 4. 입자 solver, 실패 기록, 재현
 
@@ -212,7 +229,13 @@ build/petsc-tests/replay_particle_step /결과폴더/particle_solver_rank0_failu
 
 `--max-newton 80` 등의 replay 옵션은 원인 분리용 비교 설정이며 생산 JSON을 바꾸지 않습니다.
 
-### MIT job 23391692: 반복하는 접촉 분기에서 법선 반력 추정 재시작
+### 과거 solver 수정·검증 기록
+
+아래 MIT job 기록은 **이전 α·국소 간격 힘 법칙**에서 수행한 수정과 검증입니다.
+그때의 힘 법칙·checkpoint 호환성·검증 결과를 보존한 기록이며, 새 표면 응착 법칙의
+생산 실행 검증 결과가 아닙니다. 새 물리 설정과 재시작 조건은 2·3절을 따릅니다.
+
+### 이전 수정 기록 — MIT job 23391692: 반복하는 접촉 분기에서 법선 반력 추정 재시작
 
 이전 스케일 수정은 아래의 새 실패를 막지 못했습니다. 최신 Git의 solver로
 동일한 실패를 재현했습니다: step 56393까지 완료한 뒤 56394로 진행하는 중,
@@ -404,7 +427,7 @@ python3 slurry/tools/compile_petsc_test.py tests/petsc_contact/replay_particle_s
 성공 기준은 `REPLAY ACCEPTED`와 물리 잔차 통과입니다. 반복 횟수는 컴파일러/PETSc에 따라
 달라질 수 있습니다. 이 명령은 저장된 입자 substep 하나를 풀며 앞선 전체 LB 경로를 재실행하지 않습니다.
 
-### MIT job 23100417: 비침투 조건을 검사하지 않은 Newton 초기 예측값
+### 이전 수정 기록 — MIT job 23100417: 비침투 조건을 검사하지 않은 Newton 초기 예측값
 
 이번 1/s, α=0.8 실행은 네 번째 LB step에서 실패했습니다. 최종 subdivision은 256,
 실패 index는 176, subdt는 `4.5105489780439514e-7` s입니다. 첫 Newton 갱신 전에
@@ -468,57 +491,123 @@ python3 slurry/tools/compile_petsc_test.py tests/petsc_contact/predictor_contact
 입자 solver 실패의 회복을 확인한 결과입니다. 유체의 시간·속도 해상도와 장시간 물리 정확도가
 충분하다는 판정으로 확대하지 않습니다.
 
-## 5. 국소 부착 모델의 정의와 범위
+## 5. 곡률 기반 근접 포텐셜과 표면 응착
 
-기하학적 접촉 간격 h₀는 유지하면서 국소 표면이 D₀까지 접근하는 효과를 유효 포텐셜로
-표현합니다. 조도 형상을 직접 해상하거나 해당 graphite 분말의 측정 부착력에 맞춘 모델은 아닙니다.
-α=1은 다음 혼합식에서 국소 상호작용을 전부 사용하는 기준 조건이며, 실제 접촉 면적률 ψ가 아닙니다.
+이번 변경은 세 부분을 함께 적용합니다. (1) 중심선에 의존하던 근접 형상 계수를 실제
+최소 간격점의 곡률로 교체하고, (2) 기존 α·국소 간격 혼합항을 제거하여 장거리 분산력과
+표면 응착의 중복을 차감하며, (3) 총 유효 부착일과 개방 거리로 정해지는 Dugdale형
+표면 traction을 추가합니다. 전체 pair 에너지에서 힘과 두 입자의 토크를 함께 미분합니다.
 
-q를 배향과 나머지 기하 정보라 하면:
+### 실제 접촉점 곡률과 장거리 RE²의 연결
+
+h는 두 타원체 표면의 실제 최소 간격입니다. 최소 간격점의 공통 접평면에서 상대 곡률
+텐서를 C라 두면, 간격의 국소 근사는 `h(x)=h+½ xᵀCx`입니다.
 
 ```text
-s = h − h₀
-d = D₀ + s
-U(h,q) = U_RE²(h,q) + α S(s) [U_RE²(d,q) − U_RE²(h,q)]
+λ_D(q) = 2 / sqrt(det C(q))
+G(q)   = π λ_D(q) = 2π / sqrt(det C(q))
+U_D^A  = −A_H λ_D / (12h)
+U_D^R  =  A_H λ_D σ^6 / (2520h^7)
+U_D    = U_D^A + U_D^R
 ```
 
-두 RE² 항은 같은 Hamaker 상수와 σ, 배향 인자를 쓰며 인력과 반발을 모두 포함합니다.
-α=1, S=1에서는 기존 근접 기여를 국소 기여로 교체합니다.
-기하학적 구속조건은 계속 h≥h₀이고 입자 모양이나 모멘트 팔은 줄이지 않습니다.
+q는 위치·배향을 포함합니다. C는 중심선 방향의 곡률이 아니라 실제 최근접점에서
+계산하므로, 면끼리 가까이 마주 보면서 옆으로 어긋난 flake의 형상을 반영합니다.
+이는 매끄러운 타원체의 국소 포물면 근사이며 실제 평평한 다각형 flake나 표면 요철을
+해상하는 모델은 아닙니다.
 
-S=1은 s≤2 nm, S=0은 s≥10 nm에 적용하며 중간은
-`t=(s−2 nm)/(8 nm)`, `S=1−10t³+15t⁴−6t⁵`입니다.
-즉 실제 h=4 nm부터 감쇠해 h=12 nm에서 보정이 끝납니다.
-기존 장거리 switch/cutoff 400/500 nm는 유지합니다.
-힘과 양쪽 입자의 토크는 switch와 배향을 포함한 전체 에너지의 미분으로 구합니다.
-출력의 인력·반발 성분, 에너지와 virial도 같은 보정 평가를 사용합니다.
+h≤5 nm에서는 U_D를 사용하고 h≥20 nm에서는 기존 U_RE²를 사용합니다.
+그 사이에는 에너지 수준에서 다음 quintic 연결을 사용합니다.
 
-적분된 LJ 12-6 평판 에너지의 평형 간격은 `D₀=(2/15)^(1/6) σ`입니다.
-D₀=0.30 nm에 대응하는 σ=0.419725 nm를 입력에서는 0.4197 nm로 반올림했습니다.
-반발을 포함한 기준 부착일은 `w=A_H/(16πD₀²)≈21.9 mJ/m²`입니다.
-이는 가정한 분자 간격에서 유도한 기준이며 독립적인 분말 측정값은 아닙니다.
+```text
+t = (h − 5 nm) / (20 nm − 5 nm)
+B = 1 − 10t^3 + 15t^4 − 6t^5
+U_bg = B U_D + (1 − B) U_RE²
+```
 
-반축 (1.65, 1.65, 0.20) µm의 정렬된 접촉에서 계산한 순인력은 다음과 같습니다.
+B는 근접 쪽에서 1, 원거리 쪽에서 0입니다. 끝점의 1·2차 미분이 0이므로 연결점의
+에너지·힘이 연속입니다. 기존 400/500 nm의 원거리 switch/cutoff는 유지합니다.
+5/20 nm는 모델의 연결 선택이며 모든 배향에서 오차가 제한됨을 보증하는 길이가 아닙니다.
+특히 곡률 반경이 작은 edge 배치에서는 국소 점근식의 적용성을 별도로 평가해야 합니다.
 
-| 배향 | 이전 σ=3 nm, α=0 | 현재 σ, α=0 | 현재 σ, α=1 |
-| --- | ---: | ---: | ---: |
-| FF | 17.469 nN | 28.073 nN | 936.215 nN |
-| EF | 0.48275 nN | 0.77837 nN | 25.951 nN |
-| EE | 0.25504 nN | 0.41247 nN | 13.748 nN |
+gap, 최근접점 법선, C와 λ_D, 연결 함수의 위치·배향 의존성을 모두 미분합니다.
+법선 힘만 곡률 비율로 곱하는 방식이 아니며, 같은 에너지에서 접선 방향 힘과 두 입자의
+토크도 계산합니다. 따라서 offset 보정은 회전·병진 힘의 보존성을 함께 유지합니다.
 
-FF 값은 유효 곡률 반경 약 6.806 µm와 `2πR_eff w`에서 얻는 크기와 일치합니다.
-이를 벌크 항복응력의 같은 배율 증가나 500 Pa 재현으로 해석하지 않습니다.
+### 총 부착일에 맞춘 표면 traction
 
-Sliding 상한은 μN이며 새 pair 힘이 법선 평형의 반력 N에 들어갑니다.
-Rolling 상한은 `rolling_length × adhesiveBirthForce`이며, 생성 시 보정된 총 순인력을 사용하고
-생성 후 cap과 강성을 고정하는 기존 방식은 유지합니다.
-kₜ=80 N/m, N=936 nN, μ=1인 FF 접촉의 항복 접선변위는 약 11.7 nm입니다.
-kₜ는 항복 전 탄성 변위를 정하며 **μN 자체를 높이지 않습니다.**
-Newton 중간 시도의 d≤0은 거부하고 수락 상태에는 h≥h₀를 요구합니다.
+응착 모델의 개방 거리는 `s=h−h₀`이며, 수락 상태에는 `s≥0`을 요구합니다.
+평행 평면의 배경 에너지와 그 분리 일은 다음과 같습니다.
 
-물리식의 출처는 [Everaers–Ejtehadi RE²](https://doi.org/10.1103/PhysRevE.67.041710),
-[Li et al.의 graphite–water Hamaker 상수](https://doi.org/10.1103/PhysRevB.71.235412)입니다.
-국소 간격 혼합식과 α=1의 선택은 이 코드에서 채택한 유효 접촉 가정입니다.
+```text
+φ_bg(s) = −A_H / [12π(h₀+s)^2] + A_H σ^6 / [360π(h₀+s)^8]
+W_bg    = −φ_bg(0)
+ΔW      = W_eff − W_bg
+```
+
+새 입력 W_eff는 배경 vdW 기여를 포함한 **총 유효 부착일**입니다. 이미 포함된 W_bg를
+차감한 ΔW만 추가합니다. 이 차감은 평면 표면 에너지와 근접 Derjaguin 근사를 기준으로
+정의하며, 모든 유한 입자 배향의 pull-off force를 독립적으로 측정값에 일치시키는 조건은
+아닙니다.
+
+Dugdale형 추가 traction은 `0≤s<δ`에서 일정한 인장 압력 `−ΔW/δ`이고, `s≥δ`에서 0입니다.
+이를 먼저 단위 면적 에너지 φ_c로 적분한 다음, 실제 곡률을 사용해 pair 에너지로 적분합니다.
+`(x)_+`는 `max(x,0)`입니다.
+
+```text
+φ_c(s)       = −ΔW (1 − s/δ)_+
+U_c(s,q)     = G(q) ∫[s,∞] φ_c(u) du
+             = −G(q) ΔW δ / 2 × (1 − s/δ)_+^2
+U_pair       = S_far(h) [U_bg(h,q) + U_c(s,q)]
+```
+
+s≥δ에서 U_c와 그 첫 미분은 0입니다. 표면 traction 자체의 경계는 Dugdale식의
+계단형이지만 곡률 적분 후 pair 에너지와 힘은 연속입니다. 기본값의 추가 응착은
+h=2.67 nm에서 끝나며, 20 nm 이상에서는 이전 RE²와 정확히 같은 법칙입니다.
+곡률 연결과 응착 범위는 서로 다른 역할을 갖습니다.
+
+이 법칙의 물리적 해석은 가까워진 graphite 표면의 **유효 분리 일**입니다. 표면 traction과
+adhesion을 서로 다른 새 힘으로 두 번 더하지 않습니다. h₀는 유효 기하학적 접촉 기준이며,
+거칠기·표면 상태의 미해상 효과는 W_eff에 포함합니다. 정상 탄성 압입, 돌기 눌림·파쇄,
+실접촉 면적의 성장을 계산하는 모델은 아닙니다. 따라서 이를 탄성 접촉까지 푸는
+JKR 또는 완전한 Maugis 모델로 부르지 않습니다.
+
+### 기본값의 연결 근거와 남는 범위
+
+W_eff=21.9 mJ/m²는 이전 `A_H=9.9e−20 J`, `D₀=0.30 nm`의 평면 LJ 표면 에너지
+규모를 이어받은 값입니다. 배경 σ=0.4197 nm와 A_H는 유지합니다. δ는 최소 분자 간격이
+아니라 개방 범위입니다. 이전 α=1 centered FF 쌍의 접촉 힘과 포텐셜 깊이를 기준으로
+새 법칙을 맞추면 약 0.669574 nm가 되며, 입력에는 0.67 nm로 반올림했습니다.
+이는 명시적인 기존 모델과의 대응 규칙이며 graphite 분말의 독립 측정 결과는 아닙니다.
+
+반축 (1.65, 1.65, 0.20) µm의 centered FF 접촉은 다음 기준값을 가집니다.
+
+| 양 | 이전 α=1 국소 간격 법칙 | 새 곡률·표면 응착 법칙 |
+| --- | ---: | ---: |
+| 접촉 순인력 | 약 936.215 nN | 약 936.55 nN |
+| 접촉 pair 에너지 | 약 −3.60297e−16 J | 약 −3.60491e−16 J |
+
+중앙 정렬 기준의 크기를 유지하면서 offset에 따른 형상 의존성을 고칩니다. 예를 들어
+기존 중심선 기반 근접 계수는 같은 h에서 offset a/4 및 a에 대해 실제 곡률 기준의
+약 0.498배와 0.0753배였습니다. 새 근접식은 두 배치 모두 실제 접촉점의 λ_D를 사용합니다.
+이 비율을 벌크 응력이나 항복응력의 증가 배율로 환산하지 않습니다.
+
+정상 접촉은 기존 강체 조건 `s≥0, N≥0, Ns=0`을 유지합니다. Sliding 상한은 μN이고,
+응착력은 법선 힘 평형을 통해 압축 반력 N에 반영됩니다. `μ(N+F_adh)`로 다시 더하지 않습니다.
+kₜ=80 N/m, N≈936 nN, μ=1인 FF 접촉의 항복 접선변위는 약 11.7 nm입니다.
+kₜ는 항복 전 탄성 변위를 정하며 μN 자체를 높이지 않습니다.
+
+**Rolling 법칙은 이번 세 변경에 포함하지 않습니다.** 기존의
+`rolling_length × adhesiveBirthForce`로 cap을 만들고 생성 후 cap·강성을 고정하는
+방식이 그대로 남습니다. 따라서 접촉을 유지한 채 EF↔FF로 재배향하면 rolling 한계가
+현재 배향의 응착력을 따라 갱신되지 않는 기존 한계가 있습니다. 새 정상 응착 법칙이
+이 rolling 이력 가정을 물리적으로 검증하거나 해결한 것은 아닙니다.
+
+물리식의 출처는 [Everaers–Ejtehadi RE²와 근접 곡률 근사](https://doi.org/10.1103/PhysRevE.67.041710),
+[Li et al.의 graphite–water Hamaker 상수](https://doi.org/10.1103/PhysRevB.71.235412),
+[Maugis의 Dugdale형 표면 traction](https://doi.org/10.1016/0021-9797(92)90285-T)입니다.
+본 코드의 강체 접촉, RE² 연결, 배경 에너지 차감의 조합은 이 프로젝트의 유효 구성법입니다.
+W_eff·δ의 분말별 동정 및 CMC의 흡착·입체/정전기 반발은 이 세 변경과 별도입니다.
 
 ## 6. 검증 명령과 확인 범위
 
@@ -526,12 +615,21 @@ Newton 중간 시도의 d≤0은 거부하고 수락 상태에는 h≥h₀를 �
 
 ```bash
 python3 -m unittest discover -s slurry/tests
+g++ -std=c++17 -O2 -I olb-1.9r0/src/slurry/gr_re2 tests/graphite_adhesion/surface_adhesion_tests.cpp -o /tmp/surface_adhesion_tests
+/tmp/surface_adhesion_tests
 g++ -std=c++17 -O2 -I olb-1.9r0/src/slurry/gr_re2 tests/graphite_adhesion/adhesion_tests.cpp -o /tmp/graphite_adhesion_tests
 /tmp/graphite_adhesion_tests
 source build/petsc/env.sh
 python3 slurry/tools/compile_petsc_test.py tests/petsc_contact/contact_solver_tests.cpp --run
 python3 slurry/tools/compile_petsc_test.py tests/petsc_contact/local_gap_solver_tests.cpp --run
+python3 slurry/tools/compile_petsc_test.py tests/petsc_contact/surface_adhesion_solver_tests.cpp --run
 ```
+
+`surface_adhesion_tests.cpp`는 새 법칙의 곡률·offset 의존성, 에너지–힘–토크 미분,
+응착 종료점과 곡률 연결점, 원거리 일치 및 기준 FF 값을 검사합니다.
+`surface_adhesion_solver_tests.cpp`는 새 힘 법칙을 사용하는 접촉 풀이·물리 잔차·이력 처리를
+검사합니다. 기존 `adhesion_tests.cpp`, `local_gap_solver_tests.cpp` 및 과거 failure fixture는
+이전 법칙의 회귀 검사로 보존합니다. 새 법칙과 이전 법칙의 검사 결과를 구분합니다.
 
 의도적으로 직렬 MPIUNI PETSc를 쓰는 개발 환경에서는 C++ 검사 명령에 `--compiler g++ --serial`을
 추가합니다. MPI 생산 빌드에서 이 옵션을 사용할 필요는 없습니다.
@@ -550,9 +648,39 @@ MPI 바이너리에서는 첫 명령에 `--ranks 2`를 추가합니다. 두 번�
 검사용 시간 간격만 줄여 시간 기준 저장 경로를 실행할 수 있습니다.
 두 번째 검사는 주기 저장이 없는 상태에서 실제 종료 신호 후 저장·재시작 및 손상 파일 거부를 확인합니다.
 
-### 기록된 검증 결과
+### 이번 곡률·표면 응착 업데이트의 검증
 
-아래는 각 변경 당시 실제 수행한 결과입니다. 현재 모든 MPI 생산 조건을 검증했다는 뜻은 아닙니다.
+기준 Git은 `5587a4233794927cdfa03d8d49b20cc0fbeb7536`입니다. 배포 ZIP은
+이 버전의 OpenLB 루트에 덮어푸는 소스 업데이트이며, `pure_gr.json`도 새 기본값으로
+포함합니다. 재빌드는 기존 `sbatch build_slurry_cpu.sbatch` 하나로 수행합니다.
+실행 바이너리는 클러스터에서 다시 빌드하며 별도 설치용 빌드나 README는 추가하지 않습니다.
+
+G++ 13.3 / real double PETSc 3.25.5 MPIUNI에서 다음 검사를 수행했습니다.
+
+| 검사 | 결과 |
+| --- | --- |
+| 새 pair 법칙 7개 검사군 | 9개 자유도의 힘·토크와 곡률 미분, 회전·입자 교환 대칭, 각운동량, FF 크기, offset 보정, cutoff 연속성 통과 |
+| 재현 가능한 근접/원거리 연결 sweep | 고정 및 난수 배향의 9,750개 배치에서 분리 에너지 단조성·인력 유지 통과 |
+| 별도 독립 검토 | 361,500개 배치에서 인위적 반발 장벽/비유한 계산 없음. 2,100개 배치의 전체 미분에서 힘 상대 오차 최대 2.89e−7, 토크 2.48e−6 |
+| 실제 PETSc 새 접촉 법칙 | FF 반력 평형, μN 중복 가산 없음, trial 이력 불변, 접촉 생성·해제, offset/tilted 쌍의 응착 cutoff 양방향 통과 |
+| 기존 법칙 회귀 | pair 6개 검사군 및 접촉 solver 26/26 통과 |
+| 설정·빌드·재시작 Python 검사 | 50/50 통과, C++ 설정 parser 직접 검사 포함 |
+| 실패 replay | v1/v2 읽기 호환 및 v3의 새 물리량·힘·에너지 round trip 통과 |
+| 통합 빌드 | OpenLB 전체 serial/PETSc 빌드·링크 통과 |
+| 새 법칙의 유체–입자 재시작 | 접촉 2입자/80³/100 s⁻¹: 연속 16 step과 8→저장→16 step의 물리 CSV 및 최종 lattice가 byte 수준으로 일치 |
+| 기본 생산 크기의 짧은 실행 | 108입자/200³/100 s⁻¹, Ma target=0.02의 원래 물성·solver 설정으로 4 step 및 checkpoint 저장 완료. 2번째 step에서 접촉 생성, 기존 adaptive 경로에서 최대 16 subdivisions 사용 |
+
+새 접촉 시험의 강한 FF 초기 상태는 outer dt를 유지하고 기존 adaptive 경로의
+2개 subdivision으로 통과했습니다. 생산 물성·solver 반복 상한·허용오차는 바꾸지 않았습니다.
+108입자 검사의 최대 gap 위반은 3.17e−17 m, 최대 fluid Ma는 0.02178입니다.
+종료 시 fluid density drift는 1.115%였고, 짧은 startup 시험이므로 정상상태 응력이나
+장시간 유체 정확도의 판정에는 사용하지 않습니다.
+이 검증은 코드의 식·연결·실제 풀이와 재시작 일관성을 확인합니다. MIT 32-rank 장시간 실행,
+벌크 500 Pa 재현 또는 실제 graphite 분말의 미시 접착 기작을 독립 검증한 결과는 아닙니다.
+
+### 이전 힘 법칙에서 기록된 검증 결과
+
+아래는 새 곡률·표면 응착 도입 이전에 각 변경 당시 실제 수행한 결과입니다. 현재 모든 MPI 생산 조건을 검증했다는 뜻은 아닙니다.
 직렬 환경은 Linux/G++ 13.3, real double PETSc 3.25.5 MPIUNI이며,
 재시작 MPI 검사는 별도 OpenMPI 4.1.4와 legacy 입자 backend를 사용했습니다.
 

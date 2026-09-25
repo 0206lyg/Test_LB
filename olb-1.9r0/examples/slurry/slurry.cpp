@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
 #else
     std::cout << "false";
 #endif
-    std::cout << ",\"rough_contact\":true,\"local_gap_adhesion\":true,\"pure_gr_checkpoint_version\":1,\"revision\":\"slurry-local-gap-adhesion-1\"";
+    std::cout << ",\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"slurry-surface-adhesion-1\"";
 #ifdef SLURRY_USE_PETSC
     std::cout << ",\"particle_solver\":\"petsc\",\"petsc_version\":\""
               << PETSC_VERSION_MAJOR << '.' << PETSC_VERSION_MINOR << '.' << PETSC_VERSION_SUBMINOR << '"';

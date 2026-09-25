@@ -43,6 +43,18 @@ def integer(value, name, minimum=0):
     return value
 
 
+SURFACE_ADHESION_VERSION = 1
+LOCAL_ADHESION_DEFAULTS = {
+    'local_gap_m': .3e-9, 'local_gap_fraction': 0.0,
+    'local_switch_excess_gap_m': 2e-9, 'local_cutoff_excess_gap_m': 10e-9}
+SURFACE_ADHESION_DEFAULTS = {
+    'adhesion_work_J_m2': .0219, 'adhesion_range_m': 6.7e-10,
+    'curvature_switch_gap_m': 5e-9, 'curvature_cutoff_gap_m': 2e-8}
+SURFACE_CHECKPOINT_KEYS = (
+    'surface_adhesion', 'interaction_model_version', 'adhesion_work', 'adhesion_range',
+    'curvature_switch_gap', 'curvature_cutoff_gap')
+
+
 def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=None, end_strain=None):
     cfg = copy.deepcopy(config)
     if cfg.get('schema_version') != 2:
@@ -65,12 +77,23 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
                       'tangential_stiffness_N_m':9.0,'rolling_length_m':100e-9,
                       'rolling_yield_angle_rad':.01}.items():
         contact.setdefault(key,value)
-    # Missing local_gap_fraction means the original RE2 interaction, including
-    # when running older JSON cases with the new executable.
-    for key,value in {'local_gap_m':.3e-9,'local_gap_fraction':0.0,
-                      'local_switch_excess_gap_m':2e-9,
-                      'local_cutoff_excess_gap_m':10e-9}.items():
-        cfg['interaction'].setdefault(key,value)
+    interaction = cfg['interaction']
+    interaction.setdefault('surface_adhesion', False)
+    if not isinstance(interaction['surface_adhesion'], bool):
+        raise ValueError('interaction.surface_adhesion must be a JSON boolean')
+    if interaction['surface_adhesion']:
+        mixed = sorted(set(interaction) & set(LOCAL_ADHESION_DEFAULTS))
+        if mixed:
+            raise ValueError('Surface adhesion replaces local-gap adhesion; remove legacy fields: '+', '.join(mixed))
+        for key, value in SURFACE_ADHESION_DEFAULTS.items():
+            interaction.setdefault(key, value)
+    else:
+        inactive = sorted(set(interaction) & set(SURFACE_ADHESION_DEFAULTS))
+        if inactive:
+            raise ValueError('Surface adhesion parameters require interaction.surface_adhesion=true: '+', '.join(inactive))
+        # Older JSON cases retain the exact original interaction and checkpoint signature.
+        for key, value in LOCAL_ADHESION_DEFAULTS.items():
+            interaction.setdefault(key, value)
     if shear_rate is not None:
         cfg['flow']['shear_rate_s_inv'] = shear_rate
     if end_strain is not None:
@@ -89,14 +112,18 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         for name in names:
             positive(group[name], name)
     positive(interaction['hamaker_J'], 'hamaker_J', zero=True)
-    positive(interaction['local_gap_m'], 'local_gap_m')
-    positive(interaction['local_gap_fraction'], 'local_gap_fraction', zero=True)
-    if interaction['local_gap_fraction'] > 1:
-        raise ValueError('local_gap_fraction must be at most one')
-    positive(interaction['local_switch_excess_gap_m'], 'local_switch_excess_gap_m', zero=True)
-    positive(interaction['local_cutoff_excess_gap_m'], 'local_cutoff_excess_gap_m')
-    if not interaction['local_switch_excess_gap_m'] < interaction['local_cutoff_excess_gap_m']:
-        raise ValueError('Require local_switch_excess_gap_m < local_cutoff_excess_gap_m')
+    if interaction['surface_adhesion']:
+        for name in SURFACE_ADHESION_DEFAULTS:
+            positive(interaction[name], name)
+    else:
+        positive(interaction['local_gap_m'], 'local_gap_m')
+        positive(interaction['local_gap_fraction'], 'local_gap_fraction', zero=True)
+        if interaction['local_gap_fraction'] > 1:
+            raise ValueError('local_gap_fraction must be at most one')
+        positive(interaction['local_switch_excess_gap_m'], 'local_switch_excess_gap_m', zero=True)
+        positive(interaction['local_cutoff_excess_gap_m'], 'local_cutoff_excess_gap_m')
+        if not interaction['local_switch_excess_gap_m'] < interaction['local_cutoff_excess_gap_m']:
+            raise ValueError('Require local_switch_excess_gap_m < local_cutoff_excess_gap_m')
     positive(n['time_step_s'], 'time_step_s', zero=True)
     positive(p['minimum_gap_m'], 'minimum_gap_m', zero=True)
     integer(p['count'], 'particles.count', 1)
@@ -124,13 +151,28 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         raise ValueError('Require contact_gap_tolerance_m < roughness_gap_m < cutoff_gap_m')
     if contact['enabled'] and p['minimum_gap_m'] < contact['roughness_gap_m']:
         raise ValueError('particles.minimum_gap_m must be at least rough_contact.roughness_gap_m')
-    if interaction['local_gap_fraction'] > 0:
+    if not interaction['surface_adhesion'] and interaction['local_gap_fraction'] > 0:
         if not contact['enabled']:
             raise ValueError('Local-gap adhesion requires rough_contact.enabled=true')
         if interaction['local_gap_m'] > contact['roughness_gap_m']:
             raise ValueError('Local-gap adhesion requires local_gap_m <= roughness_gap_m')
         if contact['roughness_gap_m'] + interaction['local_cutoff_excess_gap_m'] > interaction['switch_gap_m']:
             raise ValueError('Local-gap adhesion requires roughness_gap_m + local_cutoff_excess_gap_m <= switch_gap_m')
+    if interaction['surface_adhesion']:
+        if not contact['enabled']:
+            raise ValueError('Surface adhesion requires rough_contact.enabled=true')
+        h0 = contact['roughness_gap_m']
+        if not (h0 + interaction['adhesion_range_m'] <= interaction['curvature_switch_gap_m']
+                < interaction['curvature_cutoff_gap_m'] <= interaction['switch_gap_m']):
+            raise ValueError('Require roughness_gap_m + adhesion_range_m <= curvature_switch_gap_m '
+                             '< curvature_cutoff_gap_m <= switch_gap_m')
+        try:
+            w_bg = interaction['hamaker_J']/(12*math.pi*h0*h0) * (1-(interaction['sigma_lj_m']/h0)**6/30)
+        except (OverflowError, ZeroDivisionError):
+            raise ValueError('Surface adhesion background work cannot be represented by these material parameters')
+        if not math.isfinite(w_bg) or w_bg < 0 or interaction['adhesion_work_J_m2'] < w_bg:
+            raise ValueError('Surface adhesion requires a nonnegative background work and '
+                             'adhesion_work_J_m2 >= background work at roughness_gap_m')
     integer(max_steps, 'max_steps')
     integer(out['sample_every_steps'], 'sample_every_steps', 1)
     integer(out['vtk_every_steps'], 'vtk_every_steps')
@@ -204,7 +246,7 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
 def solver_values(cfg, output, particles, max_steps):
     f,g,p,flow,n,interaction,out = (cfg[k] for k in ('fluid','geometry','particles','flow','numerics','interaction','output'))
     contact = cfg['rough_contact']
-    return {
+    values = {
         'shear_rate':flow['shear_rate_s_inv'],
         'box_x':g['box_length_m'], 'box_y':g['box_length_m'], 'box_z':g['box_length_m'], 'dx':g['dx_m'],
         'diameter':p['diameter_m'], 'thickness':p['thickness_m'],
@@ -230,9 +272,6 @@ def solver_values(cfg, output, particles, max_steps):
         'rolling_yield_angle':contact['rolling_yield_angle_rad'],
         'hamaker':interaction['hamaker_J'], 'sigma_lj':interaction['sigma_lj_m'],
         'switch_gap':interaction['switch_gap_m'], 'cutoff_gap':interaction['cutoff_gap_m'],
-        'local_gap':interaction['local_gap_m'], 'local_gap_fraction':interaction['local_gap_fraction'],
-        'local_switch_excess_gap':interaction['local_switch_excess_gap_m'],
-        'local_cutoff_excess_gap':interaction['local_cutoff_excess_gap_m'],
         'end_strain':flow['end_strain'], 'max_steps':max_steps,
         'sample_every':out['sample_every_steps'], 'vtk_every':out['vtk_every_steps'],
         'checkpoint_every':out['checkpoint_every_steps'], 'checkpoint_seconds':out['checkpoint_every_seconds'],
@@ -240,8 +279,25 @@ def solver_values(cfg, output, particles, max_steps):
         'output_dir':str(output), 'particles_csv':str(particles)
     }
 
+    if interaction['surface_adhesion']:
+        values.update(surface_adhesion=1,
+                      adhesion_work=interaction['adhesion_work_J_m2'],
+                      adhesion_range=interaction['adhesion_range_m'],
+                      curvature_switch_gap=interaction['curvature_switch_gap_m'],
+                      curvature_cutoff_gap=interaction['curvature_cutoff_gap_m'])
+    else:
+        values.update(local_gap=interaction['local_gap_m'], local_gap_fraction=interaction['local_gap_fraction'],
+                      local_switch_excess_gap=interaction['local_switch_excess_gap_m'],
+                      local_cutoff_excess_gap=interaction['local_cutoff_excess_gap_m'])
+    return values
+
 
 def require_local_adhesion_build(cfg, build_info):
+    if cfg['interaction']['surface_adhesion']:
+        if build_info.get('surface_adhesion_version') != SURFACE_ADHESION_VERSION:
+            raise ValueError('This configuration requires the curvature-corrected surface adhesion law. '
+                             'Rebuild with build_slurry_cpu.sbatch before running.')
+        return
     if cfg['interaction']['local_gap_fraction'] > 0 and build_info.get('local_gap_adhesion') is not True:
         raise ValueError('This configuration requires local-gap adhesion. Rebuild with build_slurry_cpu.sbatch before running.')
 
@@ -295,6 +351,19 @@ def restart_targets(folder):
 def validate_restart(cfg,meta,checkpoint,ranks,max_steps=0,allow_complete=False):
     values=solver_values(cfg,Path('run'),Path('particles.csv'),max_steps)
     values.update(dt_s=meta['dt_s'],particle_count=cfg['particles']['count'],ranks=ranks)
+    immutable = checkpoint['immutable_config']
+    new_model = cfg['interaction']['surface_adhesion']
+    saved_model = immutable.get('surface_adhesion', 0)
+    if saved_model not in (0, 1) or bool(saved_model) != new_model:
+        raise ValueError('Restart interaction law differs: legacy RE2/local-gap and surface adhesion '
+                         'checkpoints cannot be interchanged. Use the saved physical model or start a new run.')
+    if new_model:
+        missing = sorted(set(SURFACE_CHECKPOINT_KEYS) - set(immutable))
+        if missing or immutable.get('interaction_model_version') != SURFACE_ADHESION_VERSION:
+            raise ValueError('Restart surface adhesion version/fingerprint is incomplete or incompatible: '+', '.join(missing))
+        values['interaction_model_version'] = SURFACE_ADHESION_VERSION
+    elif any(key in immutable for key in SURFACE_CHECKPOINT_KEYS[1:]):
+        raise ValueError('Restart contains surface adhesion parameters without its model identifier')
     changed=[]
     for key,saved in checkpoint['immutable_config'].items():
         actual=values.get(key)

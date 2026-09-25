@@ -80,7 +80,7 @@ struct ParticleReplayInput {
   PersistentContactState contacts;
 };
 inline void writeParticleReplay(const ParticleReplayInput& x,const std::string& path) {
-  std::ofstream f(path);if(!f)return;f<<std::setprecision(17)<<"GR_PARTICLE_REPLAY 2\n";
+  std::ofstream f(path);if(!f)return;f<<std::setprecision(17)<<"GR_PARTICLE_REPLAY 3\n";
   const auto& s=x.settings;
   f<<x.dt<<' '<<x.time<<' '<<x.outerTime<<' '<<x.outerDt<<' '<<x.count<<' '<<x.substep<<'\n';
   f<<s.shearRate<<' '<<s.maxSubsteps<<' '<<s.maxNewtonIterations<<' '<<s.maxKrylovIterations<<' '<<s.maxLineSearch<<' '
@@ -89,6 +89,8 @@ inline void writeParticleReplay(const ParticleReplayInput& x,const std::string& 
   f<<s.pair.hamaker<<' '<<s.pair.sigma<<' '<<s.pair.switchGap<<' '<<s.pair.cutoffGap<<'\n';
   f<<s.pair.roughnessGap<<' '<<s.pair.localGap<<' '<<s.pair.localGapFraction<<' '
     <<s.pair.localSwitchExcessGap<<' '<<s.pair.localCutoffExcessGap<<'\n';
+  f<<s.pair.surfaceAdhesion<<' '<<s.pair.adhesionWork<<' '<<s.pair.adhesionRange<<' '
+    <<s.pair.curvatureSwitchGap<<' '<<s.pair.curvatureCutoffGap<<'\n';
   f<<s.nearField.viscosity<<' '<<s.nearField.matchingGap<<' '<<s.nearField.enabled<<' '<<s.nearField.tangential<<'\n';
   f<<s.rough.enabled<<' '<<s.rough.gap<<' '<<s.rough.friction<<' '<<s.rough.tangentialStiffness<<' '<<s.rough.rollingLength<<' '<<s.rough.rollingYieldAngle<<'\n';
   f<<x.bodies.size()<<'\n';
@@ -107,7 +109,7 @@ inline void writeParticleReplay(const ParticleReplayInput& x,const std::string& 
 }
 inline ParticleReplayInput readParticleReplay(const std::string& path) {
   ParticleReplayInput x;std::ifstream f(path);std::string magic;int version=0;f>>magic>>version;
-  if(magic!="GR_PARTICLE_REPLAY"||(version!=1&&version!=2))throw std::runtime_error("Invalid particle replay header");
+  if(magic!="GR_PARTICLE_REPLAY"||(version!=1&&version!=2&&version!=3))throw std::runtime_error("Invalid particle replay header");
   auto& s=x.settings;f>>x.dt>>x.time>>x.outerTime>>x.outerDt>>x.count>>x.substep;
   f>>s.shearRate>>s.maxSubsteps>>s.maxNewtonIterations>>s.maxKrylovIterations>>s.maxLineSearch
     >>s.relativeTolerance>>s.forceAbsoluteTolerance>>s.torqueAbsoluteTolerance>>s.contactGapTolerance>>s.finiteDifferenceStep;
@@ -117,6 +119,10 @@ inline ParticleReplayInput readParticleReplay(const std::string& path) {
     f>>s.pair.roughnessGap>>s.pair.localGap>>s.pair.localGapFraction
       >>s.pair.localSwitchExcessGap>>s.pair.localCutoffExcessGap;
   else s.pair.localGapFraction=0.; // v1 replayed the unmodified smooth RE2 law.
+  if(version>=3)
+    f>>s.pair.surfaceAdhesion>>s.pair.adhesionWork>>s.pair.adhesionRange
+      >>s.pair.curvatureSwitchGap>>s.pair.curvatureCutoffGap;
+  else s.pair.surfaceAdhesion=false; // Old replay files retain their original law.
   f>>s.nearField.viscosity>>s.nearField.matchingGap>>s.nearField.enabled>>s.nearField.tangential;
   f>>s.rough.enabled>>s.rough.gap>>s.rough.friction>>s.rough.tangentialStiffness>>s.rough.rollingLength>>s.rough.rollingYieldAngle;
   std::size_t n=0;f>>n;if(n==0||n>100000)throw std::runtime_error("Unreasonable particle replay count");

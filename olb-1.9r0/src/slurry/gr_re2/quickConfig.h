@@ -21,6 +21,9 @@ struct Config {
   // Old configurations retain the uncorrected RE2 law unless explicitly enabled.
   double local_gap=.3e-9,local_gap_fraction=0.;
   double local_switch_excess_gap=2e-9,local_cutoff_excess_gap=10e-9;
+  bool surface_adhesion=false;
+  double adhesion_work=.0219,adhesion_range=6.7e-10;
+  double curvature_switch_gap=5e-9,curvature_cutoff_gap=2e-8;
   double end_strain=10,particle_tolerance=1e-4,lubrication_cutoff_cells=1.;
   bool rough_contact_enabled=true;
   double roughness_gap=2e-9,sliding_friction=.5,tangential_stiffness=9.;
@@ -49,16 +52,21 @@ inline Config parseConfig(int argc,char**argv) {
   }
   if(file.empty())throw std::runtime_error("--config is required");
   std::ifstream in(file);if(!in)throw std::runtime_error("Cannot read "+file);
-  Config c; std::string line;
+  Config c; std::string line;bool explicitLocal=false,explicitSurface=false;
   while(std::getline(in,line)){
     line=strip(line.substr(0,line.find('#')));if(line.empty())continue;
     const auto eq=line.find('=');if(eq==std::string::npos)throw std::runtime_error("Expected key=value: "+line);
     const auto key=strip(line.substr(0,eq)),v=strip(line.substr(eq+1));
+    if(key=="local_gap"||key=="local_gap_fraction"||key=="local_switch_excess_gap"||key=="local_cutoff_excess_gap")
+      explicitLocal=true;
+    if(key=="adhesion_work"||key=="adhesion_range"||key=="curvature_switch_gap"||key=="curvature_cutoff_gap")
+      explicitSurface=true;
 #define REAL(k) if(key==#k){c.k=std::stod(v);if(!std::isfinite(c.k))throw std::runtime_error("Nonfinite config: " #k);continue;}
     REAL(shear_rate) REAL(box_x) REAL(box_y) REAL(box_z) REAL(dx) REAL(diameter) REAL(thickness)
     REAL(rho_particle) REAL(rho_fluid) REAL(dynamic_viscosity) REAL(nu_lattice) REAL(target_mach)
     REAL(time_step_s) REAL(epsilon_cells) REAL(hamaker) REAL(sigma_lj) REAL(switch_gap) REAL(cutoff_gap)
     REAL(local_gap) REAL(local_gap_fraction) REAL(local_switch_excess_gap) REAL(local_cutoff_excess_gap)
+    REAL(adhesion_work) REAL(adhesion_range) REAL(curvature_switch_gap) REAL(curvature_cutoff_gap)
     REAL(checkpoint_seconds)
     REAL(end_strain) REAL(particle_tolerance) REAL(lubrication_cutoff_cells)
     REAL(roughness_gap) REAL(sliding_friction) REAL(tangential_stiffness)
@@ -72,6 +80,10 @@ inline Config parseConfig(int argc,char**argv) {
     if(key=="solver_diagnostics"){
       if(v!="0"&&v!="1")throw std::runtime_error("solver_diagnostics must be 0 or 1");
       c.solver_diagnostics=v=="1";continue;
+    }
+    if(key=="surface_adhesion"){
+      if(v!="0"&&v!="1")throw std::runtime_error("surface_adhesion must be 0 or 1");
+      c.surface_adhesion=v=="1";continue;
     }
     if(key=="rough_contact_enabled"){
       if(v!="0"&&v!="1")throw std::runtime_error("rough_contact_enabled must be 0 or 1");
@@ -101,6 +113,22 @@ inline Config parseConfig(int argc,char**argv) {
   if(!(c.local_gap>0&&c.local_gap_fraction>=0&&c.local_gap_fraction<=1
        &&c.local_switch_excess_gap>=0&&c.local_cutoff_excess_gap>c.local_switch_excess_gap))
     throw std::runtime_error("Require local_gap > 0, 0 <= local_gap_fraction <= 1, and 0 <= local_switch_excess_gap < local_cutoff_excess_gap");
+  if(c.surface_adhesion){
+    if(explicitLocal)
+      throw std::runtime_error("Surface adhesion replaces local-gap adhesion; remove all local_* inputs");
+    if(!c.rough_contact_enabled)
+      throw std::runtime_error("Surface adhesion requires rough_contact_enabled=1");
+    if(!(c.adhesion_work>0.&&c.adhesion_range>0.
+       &&c.roughness_gap+c.adhesion_range<=c.curvature_switch_gap
+       &&c.curvature_switch_gap<c.curvature_cutoff_gap&&c.curvature_cutoff_gap<=c.switch_gap))
+      throw std::runtime_error("Require positive adhesion_work/adhesion_range and roughness_gap + adhesion_range <= curvature_switch_gap < curvature_cutoff_gap <= switch_gap");
+    const double wbg=c.hamaker/(12.*std::acos(-1.)*c.roughness_gap*c.roughness_gap)
+        *(1.-std::pow(c.sigma_lj/c.roughness_gap,6)/30.);
+    if(!(std::isfinite(wbg)&&wbg>=0.&&c.adhesion_work>=wbg))
+      throw std::runtime_error("Surface adhesion requires nonnegative background work and adhesion_work >= background work at roughness_gap");
+  } else if(explicitSurface) {
+    throw std::runtime_error("Surface adhesion parameters require surface_adhesion=1");
+  }
   if(c.local_gap_fraction>0){
     if(!c.rough_contact_enabled)
       throw std::runtime_error("Local-gap adhesion requires rough_contact_enabled=1");

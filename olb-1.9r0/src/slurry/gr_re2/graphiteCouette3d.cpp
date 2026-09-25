@@ -168,6 +168,11 @@ void simulate(const Config& c){
   solver.pair.localGapFraction=c.local_gap_fraction;
   solver.pair.localSwitchExcessGap=c.local_switch_excess_gap;
   solver.pair.localCutoffExcessGap=c.local_cutoff_excess_gap;
+  solver.pair.surfaceAdhesion=c.surface_adhesion;
+  solver.pair.adhesionWork=c.adhesion_work;
+  solver.pair.adhesionRange=c.adhesion_range;
+  solver.pair.curvatureSwitchGap=c.curvature_switch_gap;
+  solver.pair.curvatureCutoffGap=c.curvature_cutoff_gap;
   solver.nearField.viscosity=c.dynamic_viscosity;solver.nearField.matchingGap=c.lubrication_cutoff_cells*c.dx;
   solver.nearField.enabled=c.lubrication_cutoff_cells>0;
   solver.maxSubsteps=c.particle_max_substeps;solver.maxNewtonIterations=c.particle_max_iterations;solver.relativeTolerance=c.particle_tolerance;
@@ -213,10 +218,16 @@ void simulate(const Config& c){
      <<" rolling_length_nm="<<c.rolling_length*1.e9<<" rolling_yield_angle_rad="<<c.rolling_yield_angle
      <<" end_strain="<<c.end_strain<<std::endl;
   log<<"hamaker_J="<<c.hamaker<<" sigma_lj_nm="<<c.sigma_lj*1.e9
-     <<" local_gap_nm="<<c.local_gap*1.e9<<" local_gap_fraction="<<c.local_gap_fraction
-     <<" local_switch_excess_gap_nm="<<c.local_switch_excess_gap*1.e9
-     <<" local_cutoff_excess_gap_nm="<<c.local_cutoff_excess_gap*1.e9
-     <<" switch_gap_nm="<<c.switch_gap*1.e9<<" cutoff_gap_nm="<<c.cutoff_gap*1.e9<<std::endl;
+     <<" surface_adhesion="<<c.surface_adhesion;
+  if(c.surface_adhesion)
+    log<<" adhesion_work_J_m2="<<c.adhesion_work<<" adhesion_range_nm="<<c.adhesion_range*1.e9
+       <<" curvature_switch_gap_nm="<<c.curvature_switch_gap*1.e9
+       <<" curvature_cutoff_gap_nm="<<c.curvature_cutoff_gap*1.e9;
+  else
+    log<<" local_gap_nm="<<c.local_gap*1.e9<<" local_gap_fraction="<<c.local_gap_fraction
+       <<" local_switch_excess_gap_nm="<<c.local_switch_excess_gap*1.e9
+       <<" local_cutoff_excess_gap_nm="<<c.local_cutoff_excess_gap*1.e9;
+  log<<" switch_gap_nm="<<c.switch_gap*1.e9<<" cutoff_gap_nm="<<c.cutoff_gap*1.e9<<std::endl;
   log<<"particle_solver="<<c.particle_solver<<" particle_tolerance="<<c.particle_tolerance
      <<" force_absolute_tolerance_N="<<c.particle_force_absolute_tolerance
      <<" torque_absolute_tolerance_N_m="<<c.particle_torque_absolute_tolerance
@@ -233,9 +244,17 @@ void simulate(const Config& c){
       <<",\n\"particle_count\":"<<bodies.size()<<",\n\"steps_to_target_strain\":"<<endStep
       <<",\n\"interaction\":{\"hamaker_J\":"<<c.hamaker<<",\"sigma_lj_m\":"<<c.sigma_lj
       <<",\"switch_gap_m\":"<<c.switch_gap<<",\"cutoff_gap_m\":"<<c.cutoff_gap
-      <<",\"local_gap_m\":"<<c.local_gap<<",\"local_gap_fraction\":"<<c.local_gap_fraction
-      <<",\"local_switch_excess_gap_m\":"<<c.local_switch_excess_gap
-      <<",\"local_cutoff_excess_gap_m\":"<<c.local_cutoff_excess_gap<<"}"
+      <<",\"surface_adhesion\":"<<(c.surface_adhesion?"true":"false");
+    if(c.surface_adhesion)
+      meta<<",\"interaction_model_version\":1,\"adhesion_work_J_m2\":"<<c.adhesion_work
+          <<",\"adhesion_range_m\":"<<c.adhesion_range
+          <<",\"curvature_switch_gap_m\":"<<c.curvature_switch_gap
+          <<",\"curvature_cutoff_gap_m\":"<<c.curvature_cutoff_gap;
+    else
+      meta<<",\"local_gap_m\":"<<c.local_gap<<",\"local_gap_fraction\":"<<c.local_gap_fraction
+          <<",\"local_switch_excess_gap_m\":"<<c.local_switch_excess_gap
+          <<",\"local_cutoff_excess_gap_m\":"<<c.local_cutoff_excess_gap;
+    meta<<"}"
       <<",\n\"rough_contact\":{\"enabled\":"<<(c.rough_contact_enabled?"true":"false")
       <<",\"roughness_gap_m\":"<<c.roughness_gap<<",\"sliding_friction\":"<<c.sliding_friction
       <<",\"tangential_stiffness_N_m\":"<<c.tangential_stiffness
@@ -356,9 +375,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"pure_gr_checkpoint_version\":1,\"revision\":\"local-gap-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"pure_gr_checkpoint_version\":1,\"revision\":\"local-gap-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #endif
     return 0;
   }

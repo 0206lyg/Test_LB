@@ -112,6 +112,8 @@ def main():
         executable = work / 'slurry'
         info = json.loads(tool_output([str(executable), '--build-info']))
         if info['mpi_enabled'] != (a.mode == 'mpi'): raise RuntimeError('MPI build-mode verification failed')
+        if info.get('surface_adhesion_version') != 1:
+            raise RuntimeError('Surface adhesion capability verification failed')
         if info.get('particle_solver') != a.particle_solver:
             raise RuntimeError('Particle solver build-mode verification failed')
         release.mkdir(parents=True, exist_ok=True)

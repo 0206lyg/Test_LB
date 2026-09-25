@@ -68,8 +68,16 @@ inline std::map<std::string,double> physics(const Config& c,const Units& u,std::
 #define KEEP(k) out[#k]=c.k
   KEEP(shear_rate);KEEP(box_x);KEEP(box_y);KEEP(box_z);KEEP(dx);KEEP(diameter);KEEP(thickness);
   KEEP(rho_particle);KEEP(rho_fluid);KEEP(dynamic_viscosity);KEEP(nu_lattice);KEEP(epsilon_cells);
-  KEEP(hamaker);KEEP(sigma_lj);KEEP(switch_gap);KEEP(cutoff_gap);KEEP(local_gap);KEEP(local_gap_fraction);
-  KEEP(local_switch_excess_gap);KEEP(local_cutoff_excess_gap);KEEP(lubrication_cutoff_cells);
+  KEEP(hamaker);KEEP(sigma_lj);KEEP(switch_gap);KEEP(cutoff_gap);
+  if(c.surface_adhesion){
+    KEEP(surface_adhesion);KEEP(adhesion_work);KEEP(adhesion_range);
+    KEEP(curvature_switch_gap);KEEP(curvature_cutoff_gap);
+    out["interaction_model_version"]=1.;
+  } else {
+    // Preserve the old signature exactly so explicit legacy restarts stay valid.
+    KEEP(local_gap);KEEP(local_gap_fraction);KEEP(local_switch_excess_gap);KEEP(local_cutoff_excess_gap);
+  }
+  KEEP(lubrication_cutoff_cells);
   KEEP(rough_contact_enabled);KEEP(roughness_gap);KEEP(sliding_friction);KEEP(tangential_stiffness);
   KEEP(rolling_length);KEEP(rolling_yield_angle);
 #undef KEEP

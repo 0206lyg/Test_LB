@@ -18,7 +18,14 @@ SPEC.loader.exec_module(RUNNER)
 
 
 def case():
-    return json.loads((ROOT / 'slurry/cases/pure_gr.json').read_text())
+    config = json.loads((ROOT / 'slurry/cases/pure_gr.json').read_text())
+    # Preserve an explicit legacy fixture after pure_gr adopts surface adhesion.
+    for key in RUNNER.SURFACE_ADHESION_DEFAULTS:
+        config['interaction'].pop(key, None)
+    config['interaction'].pop('surface_adhesion', None)
+    config['interaction'].update(RUNNER.LOCAL_ADHESION_DEFAULTS)
+    config['interaction']['local_gap_fraction'] = 1.0
+    return config
 
 
 def invalid_cases():
