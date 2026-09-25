@@ -57,7 +57,7 @@
   "rough_contact": {
     "enabled": true,
     "roughness_gap_m": 2e-09,
-    "sliding_friction": 1.0,
+    "sliding_friction": 0.1,
     "tangential_stiffness_N_m": 80.0,
     "rolling_length_m": 1e-07,
     "rolling_yield_angle_rad": 0.01
