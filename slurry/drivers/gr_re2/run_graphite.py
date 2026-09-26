@@ -53,6 +53,68 @@ SURFACE_ADHESION_DEFAULTS = {
 SURFACE_CHECKPOINT_KEYS = (
     'surface_adhesion', 'interaction_model_version', 'adhesion_work', 'adhesion_range',
     'curvature_switch_gap', 'curvature_cutoff_gap')
+# Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201, report adsorption
+# saturation of 0.37 +/- 0.09 wt% relative to graphite + carbon-black mass.
+# This default is OUR approximate transfer to a 44 wt% graphite/water
+# benchmark: 0.0037 * 997 g/L * 0.44 / 0.56, neglecting binder mass. It is
+# not a directly measured pure-graphite g/L value, and is deliberately not
+# recomputed from a case's target mass fraction. Override for other materials.
+CMC_DEFAULTS = {
+    'adsorbed_g_L': 0.0, 'free_g_L': 0.0, 'q_sat': 0.33,
+    'adsorbed_saturation_g_L': 2.8984214285714285}
+
+
+def resolve_cmc(cfg):
+    """Return normalized inputs and derived passivation without changing cfg.
+
+    Concentrations are independently specified per litre of liquid. Free CMC
+    is recorded only; adsorption above saturation is clamped, not transferred
+    to free CMC. The configured adhesion work remains the bare reference, so
+    resolving a saved effective_config.json never applies passivation twice.
+    """
+    if 'cmc' not in cfg:
+        return None, None
+    supplied = cfg['cmc']
+    if not isinstance(supplied, dict):
+        raise ValueError('cmc must be a JSON object')
+    unknown = sorted(str(key) for key in supplied if key not in CMC_DEFAULTS
+                     and not (isinstance(key, str) and key.startswith('_')))
+    if unknown:
+        raise ValueError('Unknown cmc fields: '+', '.join(unknown))
+    cmc = dict(CMC_DEFAULTS)
+    cmc.update(supplied)
+    for key in ('adsorbed_g_L', 'free_g_L', 'q_sat'):
+        positive(cmc[key], 'cmc.'+key, zero=True)
+    positive(cmc['adsorbed_saturation_g_L'], 'cmc.adsorbed_saturation_g_L')
+    if cmc['q_sat'] > 1:
+        raise ValueError('cmc.q_sat must be between zero and one')
+    adsorbed = min(cmc['adsorbed_g_L'], cmc['adsorbed_saturation_g_L'])
+    theta = adsorbed / cmc['adsorbed_saturation_g_L']
+    # Preserve the exact endpoint values, including the pure-Gr fingerprint.
+    q = (1.0 if theta == 0 or cmc['q_sat'] == 1 else cmc['q_sat'] if theta == 1
+         else (1-(1-math.sqrt(cmc['q_sat']))*theta)**2)
+    interaction = cfg['interaction']
+    if cmc['adsorbed_g_L'] > 0 and not interaction['surface_adhesion']:
+        raise ValueError('CMC adsorption requires interaction.surface_adhesion=true')
+    bare_work = background_work = effective_work = None
+    if interaction['surface_adhesion']:
+        bare_work = interaction['adhesion_work_J_m2']
+        h0 = cfg['rough_contact']['roughness_gap_m']
+        background_work = interaction['hamaker_J']/(12*math.pi*h0*h0) * (
+            1-(interaction['sigma_lj_m']/h0)**6/30)
+        effective_work = (bare_work if q == 1 else
+                          background_work + q*(bare_work-background_work))
+        positive(effective_work, 'effective CMC adhesion_work_J_m2')
+    metadata = {key: cmc[key] for key in CMC_DEFAULTS}
+    metadata.update(
+        effective_adsorbed_g_L=adsorbed,
+        adsorbed_clamped=cmc['adsorbed_g_L'] > cmc['adsorbed_saturation_g_L'],
+        theta=theta, q=q,
+        bare_adhesion_work_J_m2=bare_work,
+        background_work_J_m2=background_work,
+        effective_adhesion_work_J_m2=effective_work,
+        free_cmc_physics_enabled=False)
+    return cmc, metadata
 
 
 def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=None, end_strain=None):
@@ -173,6 +235,9 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         if not math.isfinite(w_bg) or w_bg < 0 or interaction['adhesion_work_J_m2'] < w_bg:
             raise ValueError('Surface adhesion requires a nonnegative background work and '
                              'adhesion_work_J_m2 >= background work at roughness_gap_m')
+    cmc, cmc_metadata = resolve_cmc(cfg)
+    if cmc is not None:
+        cfg['cmc'] = cmc
     integer(max_steps, 'max_steps')
     integer(out['sample_every_steps'], 'sample_every_steps', 1)
     integer(out['vtk_every_steps'], 'vtk_every_steps')
@@ -240,6 +305,11 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
             'The LB time step stays fixed throughout a run. End strain specifies its length, not rheological convergence.'
         ]
     }
+    if cmc_metadata is not None:
+        metadata['cmc'] = cmc_metadata
+        if interaction['surface_adhesion']:
+            metadata['interaction']['bare_adhesion_work_J_m2'] = interaction['adhesion_work_J_m2']
+            metadata['interaction']['adhesion_work_J_m2'] = cmc_metadata['effective_adhesion_work_J_m2']
     return cfg,metadata
 
 
@@ -280,8 +350,10 @@ def solver_values(cfg, output, particles, max_steps):
     }
 
     if interaction['surface_adhesion']:
+        _, cmc_metadata = resolve_cmc(cfg)
         values.update(surface_adhesion=1,
-                      adhesion_work=interaction['adhesion_work_J_m2'],
+                      adhesion_work=(interaction['adhesion_work_J_m2'] if cmc_metadata is None
+                                     else cmc_metadata['effective_adhesion_work_J_m2']),
                       adhesion_range=interaction['adhesion_range_m'],
                       curvature_switch_gap=interaction['curvature_switch_gap_m'],
                       curvature_cutoff_gap=interaction['curvature_cutoff_gap_m'])
@@ -336,14 +408,21 @@ def latest_checkpoint(run):
     return read_checkpoint(max(candidates)[1])
 
 
-def restart_targets(folder):
+def restart_targets(folder, engine='pure_gr'):
+    if engine not in ('pure_gr', 'gr_cmc'):
+        raise ValueError('Graphite restart engine must be pure_gr or gr_cmc')
     folder=Path(folder).expanduser().resolve()
+    if folder.name in ('pure_gr', 'gr_cmc') and folder.name != engine:
+        raise ValueError('Requested '+engine+' checkpoints, but selected '+str(folder))
     if (folder/'checkpoint.json').is_file() or (folder/'checkpoints').is_dir():
         return [latest_checkpoint(folder)]
-    scope=folder/'pure_gr' if (folder/'pure_gr').is_dir() else folder
+    # A case root can contain both engines. Never fall back to the other
+    # engine's subtree when the requested one has no checkpoints.
+    engine_root = any((folder/name).is_dir() for name in ('pure_gr', 'gr_cmc'))
+    scope=folder/engine if engine_root else folder
     runs=sorted({path.parent for path in scope.rglob('checkpoints') if path.is_dir()})
     if not runs:
-        raise ValueError('No pure_gr checkpoint under '+str(folder)+
+        raise ValueError('No '+engine+' checkpoint under '+str(folder)+
                          '. Checkpoints are available only for runs made with the restart update.')
     return [latest_checkpoint(run) for run in runs]
 

@@ -1,0 +1,76 @@
+{
+  "schema_version": 2,
+  "description": "Graphite with adsorbed 90k CMC: pure_gr physical parameters with coverage-dependent attenuation of excess surface adhesion; free CMC is recorded but has no physical effect in this version.",
+  "fluid": {
+    "density_kg_m3": 997.0,
+    "dynamic_viscosity_Pa_s": 0.00089,
+    "temperature_K": 298.15
+  },
+  "geometry": {
+    "box_length_m": 1e-05,
+    "dx_m": 5e-08
+  },
+  "particles": {
+    "count": 108,
+    "diameter_m": 3.3e-06,
+    "thickness_m": 4e-07,
+    "density_kg_m3": 2400.0,
+    "seed": 1729,
+    "minimum_gap_m": 3e-09,
+    "target_solid_mass_fraction": 0.44,
+    "insertion_attempts_per_batch": 32,
+    "insertion_batches_per_particle": 2048,
+    "initialization_mc_sweeps": 100
+  },
+  "flow": {
+    "shear_rate_s_inv": 100.0,
+    "end_strain": 10.0
+  },
+  "numerics": {
+    "nu_lattice": 0.5,
+    "target_mach": 0.02,
+    "time_step_s": 0.0,
+    "epsilon_cells": 0.5,
+    "particle_max_substeps": 256,
+    "particle_max_iterations": 60,
+    "particle_tolerance": 0.01,
+    "lubrication_cutoff_cells": 1.0,
+    "particle_force_absolute_tolerance_N": 1e-13,
+    "particle_torque_absolute_tolerance_N_m": 1.65e-19,
+    "contact_gap_tolerance_m": 1e-12
+  },
+  "interaction": {
+    "hamaker_J": 9.9e-20,
+    "sigma_lj_m": 4.197e-10,
+    "switch_gap_m": 4e-07,
+    "cutoff_gap_m": 5e-07,
+    "surface_adhesion": true,
+    "adhesion_work_J_m2": 0.0219,
+    "adhesion_range_m": 6.7e-10,
+    "curvature_switch_gap_m": 5e-09,
+    "curvature_cutoff_gap_m": 2e-08
+  },
+  "output": {
+    "sample_every_steps": 20,
+    "vtk_every_steps": 0
+  },
+  "rough_contact": {
+    "enabled": true,
+    "roughness_gap_m": 2e-09,
+    "sliding_friction": 0.1,
+    "tangential_stiffness_N_m": 80.0,
+    "rolling_length_m": 1e-07,
+    "rolling_yield_angle_rad": 0.01
+  },
+  "cmc": {
+    "_concentration_units": "Both concentrations are g CMC per litre of aqueous phase. Adsorbed and free inputs are independent; excess adsorbed input is capped, never transferred to free CMC.",
+    "adsorbed_g_L": 3.8,
+    "free_g_L": 0.0,
+    "adsorbed_saturation_g_L": 2.8984214285714285,
+    "_saturation_reference": "Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201: apparent adsorption 0.37 +/- 0.09 wt% per particle mass (Gr+CB). Approximate reference conversion for this graphite-water model (neglecting the small CMC share of the paper's total solids): 0.0037 * 997 g/L * 0.44 / 0.56 = 2.8984214285714285 g/L aqueous phase. This is a converted model benchmark, not a directly reported 2.9 g/L measurement. Reassess this explicit reference if solids loading or material changes.",
+    "q_sat": 0.33,
+    "_adhesion_model": "theta=min(adsorbed_g_L/adsorbed_saturation_g_L,1); q=(1-(1-sqrt(q_sat))*theta)^2; W_eff=W_bg+q*(W_bare-W_bg). interaction.adhesion_work_J_m2 remains the bare graphite reference.",
+    "_q_sat_reference": "0.33 is the agreed starting benchmark for saturated excess-adhesion retention, not a measured CMC constant.",
+    "_free_cmc_status": "Reserved input only: no change to viscosity, repulsion, depletion, or adhesion from free_g_L in this version."
+  }
+}

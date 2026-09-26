@@ -13,6 +13,8 @@ import subprocess
 import sys
 from common import BASE, build_record, digest, git_state, write_json
 
+RE2_ENGINES = ('pure_gr', 'gr_cmc')
+
 def positives(text):
     values = [float(x.strip()) for x in text.split(',')]
     if not values or any(not math.isfinite(x) or x <= 0 for x in values):
@@ -37,7 +39,7 @@ def graphite_restart_driver():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--settings', type=Path, default=BASE / 'slurry/cases/run.json')
-    p.add_argument('--cases', help='pure_cmc,pure_gr,gr_baseline')
+    p.add_argument('--cases', help='pure_cmc,pure_gr,gr_cmc,gr_baseline')
     p.add_argument('--shear-rates', help='Comma-separated s^-1; omitted means each existing case keeps its defaults')
     p.add_argument('--concentrations')
     p.add_argument('--resolution', type=int)
@@ -50,7 +52,7 @@ def main():
     p.add_argument('--target-mach', type=float, help='Existing RE2 option')
     p.add_argument('--time-step', type=float, help='Existing RE2 option in seconds')
     p.add_argument('--end-strain', type=float, help='Existing RE2 option')
-    p.add_argument('--restart', type=Path, help='Previous pure_gr run folder (name under runs or path); resumes its latest complete checkpoint')
+    p.add_argument('--restart', type=Path, help='Previous graphite run folder (name under runs or path); select --cases gr_cmc for a CMC-coated graphite restart')
     p.add_argument('--output', type=Path)
     p.add_argument('--executable', type=Path, default=BASE / 'build/slurry/current/slurry')
     p.add_argument('--dry-run', action='store_true')
@@ -62,19 +64,19 @@ def main():
     registry = {e['id']: e for e in json.loads((BASE / 'slurry/engines.json').read_text())}
     if not cases or len(cases) != len(set(cases)): p.error('Choose at least one case, without duplicates')
     for engine in cases:
-        if engine not in registry: p.error('Unknown/unimplemented case: ' + engine + ' (Gr+CMC is not implemented)')
+        if engine not in registry: p.error('Unknown case: ' + engine)
     graphites = [e for e in cases if e != 'pure_cmc']
     if a.config and len(graphites) != 1: p.error('--config requires exactly one graphite case')
-    if a.restart and (cases not in (['pure_gr'],['gr_baseline']) or a.shear_rates or a.smoke):
-        p.error('--restart requires only pure_gr (default) or gr_baseline; it retains the saved shear rate and cannot use --smoke')
+    if a.restart and (len(cases) != 1 or cases[0] not in RE2_ENGINES + ('gr_baseline',) or a.shear_rates or a.smoke):
+        p.error('--restart requires only pure_gr (default), gr_cmc, or gr_baseline; it retains the saved shear rate and cannot use --smoke')
     restart_runs=[];restart_skipped=[];restart_driver=None
     if a.restart:
         a.restart=restart_folder(a.restart)
-        if cases==['pure_gr']:
+        if cases[0] in RE2_ENGINES:
             restart_driver=graphite_restart_driver()
-            restart_runs=restart_driver.restart_targets(a.restart)
-    if any(x is not None for x in (a.target_mach, a.time_step, a.end_strain)) and 'pure_gr' not in cases:
-        p.error('--target-mach/--time-step/--end-strain require pure_gr')
+            restart_runs=restart_driver.restart_targets(a.restart, cases[0])
+    if any(x is not None for x in (a.target_mach, a.time_step, a.end_strain)) and not any(e in RE2_ENGINES for e in cases):
+        p.error('--target-mach/--time-step/--end-strain require pure_gr or gr_cmc')
     if a.max_steps is not None and a.max_steps < 0: p.error('--max-steps must be nonnegative')
     rates = positives(a.shear_rates) if a.shear_rates else settings.get('shear_rates_s_inv')
     if rates is not None: rates = positives(','.join(str(x) for x in rates))
@@ -110,12 +112,13 @@ def main():
         json.loads(path.read_text(encoding='utf-8'))
         configs[engine] = path
     if restart_runs:
-        current=json.loads(configs['pure_gr'].read_text(encoding='utf-8'))
+        restart_engine=cases[0]
+        current=json.loads(configs[restart_engine].read_text(encoding='utf-8'))
         pending=[]
         for directory,checkpoint in restart_runs:
             cfg,meta=restart_driver.resolve(current,checkpoint['shear_rate_s_inv'],a.max_steps or 0,
                                            a.target_mach,a.time_step,a.end_strain)
-            if restart_driver.validate_restart(cfg,meta,checkpoint,ranks['pure_gr'],a.max_steps or 0,
+            if restart_driver.validate_restart(cfg,meta,checkpoint,ranks[restart_engine],a.max_steps or 0,
                                                allow_complete=True):
                 pending.append((directory,checkpoint))
             else:
@@ -152,7 +155,7 @@ def main():
             if a.cmc_max_steps: args += ['--max-steps', str(a.cmc_max_steps)]
             jobs.append({'engine': engine, 'argv': args})
         else:
-            selections=[(data['shear_rate_s_inv'],directory) for directory,data in restart_runs] if engine=='pure_gr' and restart_runs else [(rate,None) for rate in (rates or [None])]
+            selections=[(data['shear_rate_s_inv'],directory) for directory,data in restart_runs] if engine in RE2_ENGINES and restart_runs else [(rate,None) for rate in (rates or [None])]
             for index, (rate,restart_case) in enumerate(selections):
                 name = engine + ('/g%03d_%s' % (index, format(rate, '.12g')) if rate is not None else '')
                 result_dir = output / name
@@ -160,14 +163,14 @@ def main():
                     result_dir.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(BASE / 'slurry/tools/particles_to_paraview.py'),
                                  str(result_dir / 'particles_to_paraview.py'))
-                    if engine == 'pure_gr':
+                    if engine in RE2_ENGINES:
                         shutil.copy2(str(BASE / 'slurry/tools/summarize_particle_solver.py'),
                                      str(result_dir / 'summarize_particle_solver.py'))
                 args = prefix + ['--config', str(configs[engine]), '--output', str(result_dir)]
                 if rate is not None: args += ['--shear-rate', str(rate)]
                 limit = a.max_steps if a.max_steps is not None else (20 if a.smoke else None)
-                if limit is not None: args += ['--max-steps' if engine == 'pure_gr' else '--benchmark-steps', str(limit)]
-                if engine == 'pure_gr':
+                if limit is not None: args += ['--max-steps' if engine in RE2_ENGINES else '--benchmark-steps', str(limit)]
+                if engine in RE2_ENGINES:
                     for key in ('target_mach', 'time_step', 'end_strain'):
                         if getattr(a, key) is not None: args += ['--' + key.replace('_', '-'), str(getattr(a, key))]
                 if a.restart: args += ['--restart', str(restart_case or a.restart)]
@@ -185,7 +188,7 @@ def main():
     write_json(output / 'batch_status.json', state)
     child, current, stop = None, None, []
     def forward(number, frame):
-        if number == signal.SIGUSR1 and current not in ('pure_gr','gr_baseline'):
+        if number == signal.SIGUSR1 and current not in RE2_ENGINES + ('gr_baseline',):
             print('Slurm time notice received; selected case retains its original stop behavior.', flush=True)
             return
         stop.append(number)

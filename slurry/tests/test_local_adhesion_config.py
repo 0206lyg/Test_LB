@@ -57,7 +57,7 @@ class LocalAdhesionInputTests(unittest.TestCase):
         self.assertEqual(values['local_cutoff_excess_gap'], 1e-8)
         self.assertEqual(values['roughness_gap'], 2e-9)
         self.assertEqual(values['tangential_stiffness'], 80)
-        self.assertEqual(values['sliding_friction'], 1)
+        self.assertEqual(values['sliding_friction'], case()['rough_contact']['sliding_friction'])
         self.assertEqual(metadata['interaction'], cfg['interaction'])
         self.assertEqual(metadata['rough_contact'], cfg['rough_contact'])
 

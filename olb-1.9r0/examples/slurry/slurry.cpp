@@ -53,6 +53,6 @@ int main(int argc, char** argv) {
     args.push_back(nullptr);
     return e.entry(count, args.data());
   }
-  std::cerr << "Unknown engine: " << selected << ". Gr+CMC is not implemented yet.\n";
+  std::cerr << "Unknown engine: " << selected << ".\n";
   return 2;
 }

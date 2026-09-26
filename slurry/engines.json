@@ -10,6 +10,11 @@
     "driver": "slurry/drivers/gr_re2/run_graphite.py"
   },
   {
+    "id": "gr_cmc",
+    "namespace": "gr_re2",
+    "driver": "slurry/drivers/gr_re2/run_graphite.py"
+  },
+  {
     "id": "gr_baseline",
     "namespace": "gr_baseline",
     "driver": "slurry/drivers/gr_baseline/run_graphite.py"

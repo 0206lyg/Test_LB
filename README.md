@@ -9,6 +9,7 @@ OpenLB 원본과 외부 라이브러리의 문서·LICENSE는 각 소스 트리�
 | --- | --- | --- |
 | `pure_cmc` | CMC Cross 유체 | `slurry/cases/run.json`의 `cmc`, `cmc250k_cross_parameters.csv` |
 | `pure_gr` | RE² graphite, 곡률 기반 근접 인력·표면 응착, lubrication, rough contact, Lees–Edwards, checkpoint/restart | `slurry/cases/pure_gr.json` |
+| `gr_cmc` | 같은 graphite 모델에 흡착 CMC에 따른 추가 접착력 감소 적용; free CMC 입력은 기록만 함 | `slurry/cases/gr_CMC.json` |
 | `gr_baseline` | 기존 graphite Couette 및 기존 checkpoint/restart | `slurry/cases/gr_baseline.json` |
 
 ## 1. 설치, 빌드, 실행
@@ -86,7 +87,7 @@ in-place PETSc 빌드에는 `PETSC_ARCH`도 지정합니다. 저장된 환경은
 | `interaction.switch_gap_m` | `4e-7` m | 기존 원거리 switch 시작 |
 | `interaction.cutoff_gap_m` | `5e-7` m | 기존 pair 상호작용 종료 |
 | `rough_contact.roughness_gap_m` | `2e-9` m | 기하학적 접촉 간격 h₀ |
-| `rough_contact.sliding_friction` | `1.0` | 마찰계수 μ |
+| `rough_contact.sliding_friction` | `0.1` | 마찰계수 μ |
 | `rough_contact.tangential_stiffness_N_m` | `80.0` N/m | 접선 탄성 강성 kₜ |
 | `rough_contact.rolling_length_m` | `1e-7` m | 기존 rolling 길이 |
 | `rough_contact.rolling_yield_angle_rad` | `0.01` rad | 기존 rolling 항복각 |
@@ -111,6 +112,104 @@ W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 �
 혼용하지 않습니다. `surface_adhesion`이 없거나 `false`인 기존 JSON은 이전 힘 법칙을
 사용하며, 이 모드에는 새 부착일·범위·곡률 연결 키를 넣을 수 없습니다.
 이전 결과 재현에는 당시의 JSON을 별도 `--config`로 지정합니다.
+
+### 2.1. 흡착 CMC: `gr_CMC.json`
+
+`slurry/cases/gr_CMC.json`은 현재 `pure_gr.json`의 물성·수치 설정을 복사하고
+아래 `cmc` 객체를 추가한 독립 설정입니다. 실행 모델 이름은 소문자 `gr_cmc`입니다.
+이번 업데이트를 적용한 뒤 공통 실행 파일을 한 번 재빌드합니다.
+
+```bash
+sbatch build_slurry_cpu.sbatch
+# BUILD COMPLETE / BUILD REUSED 확인 후:
+sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 100
+```
+
+이후 CMC 입력값만 바꿀 때에는 재빌드하지 않습니다. 여러 전단율은 기존과 같이
+`--shear-rates 0.01,1,100`으로 지정합니다. 기본 `run.json`의 자동 실행 목록은 유지하며,
+CMC 실행에는 `--cases gr_cmc`를 지정합니다.
+
+```json
+"cmc": {
+  "adsorbed_g_L": 3.8,
+  "free_g_L": 0.0,
+  "adsorbed_saturation_g_L": 2.8984214285714285,
+  "q_sat": 0.33
+}
+```
+
+두 농도의 분모는 **수상 부피 1 L**입니다. `adsorbed_g_L`은 흡착량 입력,
+`free_g_L`은 자유 CMC 입력이며 독립적으로 보존합니다. 계산에는
+`min(adsorbed_g_L, adsorbed_saturation_g_L)`를 사용합니다.
+따라서 기본 입력 3.8 g/L는 약 2.8984 g/L로 제한되지만 free CMC는 여전히 0입니다.
+상한을 넘는 양을 free CMC에 더하지 않습니다. 음수·비유한 값은 입력 오류입니다.
+
+**포화량 근거:** [Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201](https://doi.org/10.1021/acsnano.6c10201)의
+겉보기 흡착량은 입자(Gr+CB) 질량 대비 약 **0.37 ± 0.09 wt%**입니다.
+이를 현재 graphite–water 모델의 기준 고형분 질량분율 0.44와 물 밀도 997 g/L에 적용하여
+`0.0037 × 997 × 0.44 / 0.56 = 2.8984 g/L`로 환산했습니다.
+논문의 총 고형분 중 작은 CMC 질량은 이 환산에서 생략했습니다.
+이는 논문이 직접 보고한 수상 농도가 아니라, 희석 후 측정된 혼합 입자 흡착량을
+이 모델에 옮긴 기준값입니다. JSON의 `_saturation_reference`와 드라이버 주석에도
+원자료와 환산식을 기록했습니다. 고형분·물질을 바꾸면 이 명시적 포화량을 재검토합니다.
+
+흡착률과 추가 접착력의 잔존율은 다음과 같습니다.
+
+\[
+\theta=\min(x_a/x_{a,\mathrm{sat}},1),\qquad
+q(\theta)=\bigl[1-(1-\sqrt{q_{\mathrm{sat}}})\theta\bigr]^2,
+\]
+\[
+W_{\mathrm{bg}}=\frac{A_H}{12\pi h_0^2}
+ \left[1-\frac{(\sigma/h_0)^6}{30}\right],\qquad
+W_{\mathrm{eff}}=W_{\mathrm{bg}}+q(\theta)(W_{\mathrm{bare}}-W_{\mathrm{bg}}).
+\]
+
+`interaction.adhesion_work_J_m2`에는 **bare graphite의 기준값** 0.0219 J/m²를
+계속 입력합니다. 감소한 값을 이 필드에 다시 넣지 않습니다. 드라이버가 위 식을 한 번
+적용한 값을 C++ solver에 전달하므로 저장된 JSON을 다시 읽어도 중복 감소하지 않습니다.
+`q_sat=0.33`은 포화 시 **추가 접착력**의 잔존율이며, 논의에서 선택한 유사 계면 기반
+출발값입니다. CMC에서 직접 측정한 상수나 벌크 응력비를 뜻하지 않습니다.
+
+| 입력 조건 | 계산에 사용한 흡착량 (g/L) | 추가 접착력 잔존율 | solver의 총 부착일 (mJ/m²) |
+| --- | ---: | ---: | ---: |
+| 흡착량 0 | 0 | 1 | 21.9 |
+| 기본 흡착량 3.8 | 2.8984 | 0.33 | 7.6669 |
+| 포화량보다 더 큰 흡착량 | 2.8984 | 0.33 | 7.6669 |
+
+배경 RE² 인력, 접촉 간격, 마찰계수 0.1, 접선 강성, rolling 법칙의 형태는 유지합니다.
+접착력 감소에 따라 접촉을 유지하는 하중과 기존 rolling 기준력이 달라질 수 있으나,
+마찰계수 자체를 변경하지 않습니다. **`free_g_L`은 이번 버전에서 입력·기록만 하며**
+점도·반발·depletion·접착력을 바꾸지 않습니다. 따라서 동일한 포화 흡착량에서
+free CMC만 바꿔 4→16 g/L의 유변 전환을 구현하는 단계는 아직 포함하지 않습니다.
+
+실행 전, solver나 입자 배치를 시작하지 않고 환산값을 확인할 수 있습니다.
+
+```bash
+python3 slurry/drivers/gr_re2/run_graphite.py --config slurry/cases/gr_CMC.json --dry-run
+```
+
+`effective_config.json`에는 입력값과 bare 기준 부착일을,
+`manifest.json`의 `derived.cmc`에는 실제 적용 흡착량·포화 제한 여부·잔존율·환산 부착일을
+남깁니다. `resolved_run.cfg`의 `adhesion_work`가 C++에 전달되는 실제 부착일입니다.
+재시작은 `--cases gr_cmc --restart 폴더명`으로 지정합니다. 접착력이 달라지는 CMC 설정
+변경은 기존 물리값 호환성 검사에서 거부하며 새 계산으로 비교합니다.
+실행 시간·종료 strain·checkpoint 사용법은 `pure_gr`와 같습니다.
+
+### 2.2. 이번 업데이트에서 확인한 legacy 정리 후보
+
+아래 파일은 삭제하지 않았습니다. 현행 build/run/restart/후처리의 추적 파일 참조를 확인한
+결과이며, 과거 배포물과 초기 이관 기록을 검증할 필요가 없다면 별도로 제거할 수 있습니다.
+
+| 경로 | 크기 | 역할과 제거 시 영향 |
+| --- | ---: | --- |
+| `slurry/tools/verify_preservation.py` | 1,561 B | 초기 이관 당시 원본과 비교하는 일회성 검사. 현행 실행 경로에서 호출하지 않으므로 제거해도 시뮬레이션에 영향 없음 |
+| `RESTART_UPDATE_SHA256.json` | 2,810 B | 과거 업데이트 ZIP의 checksum 기록. 스크립트가 아니며 현재 파일들의 무결성 목록도 아님 |
+
+`gr_baseline`은 지금도 등록·컴파일되는 모델이고, 직접 실행하는 후처리 스크립트와
+`slurry/fitting/`은 사용 가능한 연구 도구이므로 미사용 코드로 분류하지 않았습니다.
+위 두 후보를 제거해도 절약되는 크기는 약 4.3 KiB이며 실행 속도나 메모리는 달라지지 않습니다.
+기존 빌드의 이전 문서 백업·정리 동작은 1절과 같습니다.
 
 ## 3. pure_gr 재시작
 
@@ -647,6 +746,16 @@ MPI 바이너리에서는 첫 명령에 `--ranks 2`를 추가합니다. 두 번�
 없는지도 확인합니다. 첫 명령에 `--checkpoint-seconds 0.001`과 별도 `--work` 경로를 주면
 검사용 시간 간격만 줄여 시간 기준 저장 경로를 실행할 수 있습니다.
 두 번째 검사는 주기 저장이 없는 상태에서 실제 종료 신호 후 저장·재시작 및 손상 파일 거부를 확인합니다.
+
+### CMC 흡착 업데이트의 검증
+
+입력·표면/기존 접착력·재시작·CMC controller 관련 Python 검사 **47개**와
+기존 C++ 표면 접착력 검사 **7그룹**을 통과했습니다. 포화 제한, free CMC 독립 보존,
+0 흡착량에서 pure Gr와 동일한 solver 입력, 설정 재읽기의 중복 감소 방지,
+실제 C++ parser로 전달되는 부착일, 변화한 접착력의 재시작 거부를 확인했습니다.
+실제 controller와 복사된 드라이버를 모의 solver로 연결하여 입력 snapshot·manifest·
+실행 모델 전달도 확인했고, C++ dispatcher는 임시 engine stub과 함께 컴파일했습니다.
+전체 OpenLB/PETSc 재빌드, 장시간 유체–입자 시뮬레이션, 유변학 재현은 이 검사에 포함하지 않았습니다.
 
 ### 이번 곡률·표면 응착 업데이트의 검증
 
