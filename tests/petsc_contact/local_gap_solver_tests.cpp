@@ -73,6 +73,14 @@ void trialDomainAndBirth() {
   auto mismatch=s;mismatch.rough.gap=3.e-9;bool rejected=false;
   try {g::validateParticlePairSettings(mismatch);}catch(const std::exception&){rejected=true;}
   require(rejected,"Mismatched contact and local adhesion geometry accepted");
+  auto free=s;free.pair.localGapFraction=0.;free.pair.freeCmcRepulsionPressure=52000.;
+  g::validateParticlePairSettings(free);
+  free.rough.enabled=false;rejected=false;
+  try {g::validateParticlePairSettings(free);}catch(const std::exception&){rejected=true;}
+  require(rejected,"Free-CMC repulsion accepted without rough contact");
+  free.rough.enabled=true;free.rough.gap=3.e-9;rejected=false;
+  try {g::validateParticlePairSettings(free);}catch(const std::exception&){rejected=true;}
+  require(rejected,"Free-CMC repulsion accepted a mismatched roughness gap");
 }
 
 void replayVersions() {
@@ -81,8 +89,8 @@ void replayVersions() {
   input.force.resize(2);input.torque.resize(2);input.contacts.resize(1);input.cache.resize(1);
   input.contacts[0].active=true;input.contacts[0].normalLoad=9.36e-7;
   input.contacts[0].rollingCap=9.36e-14;
-  const auto v3=scratch.path/"v3.dat";d::writeParticleReplay(input,v3.string());
-  const auto read=d::readParticleReplay(v3.string());
+  const auto v4=scratch.path/"v4.dat";d::writeParticleReplay(input,v4.string());
+  const auto read=d::readParticleReplay(v4.string());
   const auto& a=input.settings.pair;const auto& b=read.settings.pair;
   require(a.roughnessGap==b.roughnessGap&&a.localGap==b.localGap
       &&a.localGapFraction==b.localGapFraction&&a.localSwitchExcessGap==b.localSwitchExcessGap
@@ -94,17 +102,19 @@ void replayVersions() {
   require(expected.forceI==actual.forceI&&expected.energy==actual.energy,"Replay changed local pair interaction");
 
   require(!b.surfaceAdhesion,"Legacy replay unexpectedly enabled surface adhesion");
-  // v2 omits surface parameters; v1 additionally omits the legacy local line.
-  for(int version:{1,2}) {
-    std::ifstream source(v3);const auto oldPath=scratch.path/("v"+std::to_string(version)+".dat");
+  // v1-v3 omit the free-CMC line; v1-v2 also omit surface parameters;
+  // v1 additionally omits the legacy local line.
+  for(int version:{1,2,3}) {
+    std::ifstream source(v4);const auto oldPath=scratch.path/("v"+std::to_string(version)+".dat");
     std::ofstream target(oldPath);std::string line;int index=0;
     while(std::getline(source,line)) {
       if(index==0)target<<"GR_PARTICLE_REPLAY "<<version<<'\n';
-      else if(index!=6&&(version!=1||index!=5))target<<line<<'\n';
+      else if(index!=7&&(version>=3||index!=6)&&(version!=1||index!=5))target<<line<<'\n';
       ++index;
     }
     target.close();const auto old=d::readParticleReplay(oldPath.string());
     require(!old.settings.pair.surfaceAdhesion,"Legacy replay unexpectedly enabled surface adhesion");
+    require(old.settings.pair.freeCmcRepulsionPressure==0.,"Legacy replay unexpectedly enabled free-CMC repulsion");
     require(old.settings.pair.localGapFraction==(version==1?0.:a.localGapFraction),
             "Legacy replay changed local adhesion selection");
     require(old.contacts[0].normalLoad==input.contacts[0].normalLoad,"Legacy replay contact data shifted");
@@ -116,11 +126,16 @@ void replayVersions() {
   input.settings.pair.adhesionRange=5.e-10;
   input.settings.pair.curvatureSwitchGap=4.e-9;
   input.settings.pair.curvatureCutoffGap=18.e-9;
+  input.settings.pair.freeCmcRepulsionPressure=52535.69484753685;
+  input.settings.pair.freeCmcRepulsionLength=5.e-9;
   const auto surface=scratch.path/"surface.dat";d::writeParticleReplay(input,surface.string());
   const auto restored=d::readParticleReplay(surface.string());const auto& p=restored.settings.pair;
   require(p.surfaceAdhesion&&p.adhesionWork==.018&&p.adhesionRange==5.e-10
       &&p.curvatureSwitchGap==4.e-9&&p.curvatureCutoffGap==18.e-9,
       "Replay lost surface adhesion parameters");
+  require(p.freeCmcRepulsionPressure==input.settings.pair.freeCmcRepulsionPressure
+      &&p.freeCmcRepulsionLength==input.settings.pair.freeCmcRepulsionLength,
+      "Replay lost free-CMC repulsion parameters");
   const auto before=g::evaluatePair(input.bodies[0],input.bodies[1],input.settings.pair);
   const auto after=g::evaluatePair(restored.bodies[0],restored.bodies[1],p);
   require(before.forceI==after.forceI&&before.energy==after.energy,

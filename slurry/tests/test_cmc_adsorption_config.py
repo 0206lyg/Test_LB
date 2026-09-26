@@ -82,14 +82,16 @@ class CmcInputTests(unittest.TestCase):
         self.assertEqual(state['q'], .33)
         self.assertEqual(values['adhesion_work'], state['effective_adhesion_work_J_m2'])
 
-    def test_free_cmc_is_recorded_but_has_no_physical_effect(self):
+    def test_disabled_free_repulsion_records_cmc_without_physical_effect(self):
         cfg0, _, values0 = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 0})
-        cfg1, meta1, values1 = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 123.0})
+        cfg1, meta1, values1 = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 123.0,
+                                      'free_repulsion': {'enabled': False}})
         self.assertEqual(values0, values1)
         self.assertEqual(cfg0['fluid'], cfg1['fluid'])
         self.assertEqual(meta1['cmc']['free_g_L'], 123.0)
         self.assertFalse(meta1['cmc']['free_cmc_physics_enabled'])
-        self.assertEqual(resolved({'free_g_L': 123.0})[2], resolved()[2])
+        self.assertEqual(resolved({'free_g_L': 123.0,
+                                  'free_repulsion': {'enabled': False}})[2], resolved()[2])
 
     def test_resolve_roundtrip_is_idempotent_and_does_not_mutate_input(self):
         original = case()
@@ -129,7 +131,7 @@ class CmcInputTests(unittest.TestCase):
             original['cmc'] = value
             with self.subTest(section=value), self.assertRaises(ValueError):
                 RUNNER.resolve(original)
-        for key in RUNNER.CMC_DEFAULTS:
+        for key in ('adsorbed_g_L', 'free_g_L', 'q_sat', 'adsorbed_saturation_g_L'):
             bad_values = [-1, math.nan, math.inf, -math.inf, True, '0.33', None, []]
             if key == 'q_sat':
                 bad_values.append(1.01)
@@ -147,7 +149,8 @@ class CmcInputTests(unittest.TestCase):
         for key in RUNNER.SURFACE_ADHESION_DEFAULTS:
             legacy['interaction'].pop(key)
         baseline, _ = RUNNER.resolve(legacy)
-        legacy['cmc'] = {'adsorbed_g_L': 0, 'free_g_L': 2.0}
+        legacy['cmc'] = {'adsorbed_g_L': 0, 'free_g_L': 2.0,
+                         'free_repulsion': {'enabled': False}}
         cfg, meta = RUNNER.resolve(legacy)
         self.assertEqual(RUNNER.solver_values(cfg, Path('r'), Path('p'), 0),
                          RUNNER.solver_values(baseline, Path('r'), Path('p'), 0))
@@ -163,7 +166,8 @@ class CmcInputTests(unittest.TestCase):
             new_cfg, new_meta, _ = resolved(inputs)
             with self.subTest(inputs=inputs), self.assertRaisesRegex(ValueError, 'adhesion_work'):
                 RUNNER.validate_restart(new_cfg, new_meta, checkpoint, 1)
-        new_cfg, new_meta, _ = resolved({'adsorbed_g_L': 1.0, 'free_g_L': 16})
+        new_cfg, new_meta, _ = resolved({'adsorbed_g_L': 1.0, 'free_g_L': 16,
+                                       'free_repulsion': {'enabled': False}})
         self.assertTrue(RUNNER.validate_restart(new_cfg, new_meta, checkpoint, 1))
         saturated, sat_meta, _ = resolved({'adsorbed_g_L': 3.8})
         new_cfg, new_meta, _ = resolved({'adsorbed_g_L': 9.0})

@@ -9,7 +9,7 @@ OpenLB 원본과 외부 라이브러리의 문서·LICENSE는 각 소스 트리�
 | --- | --- | --- |
 | `pure_cmc` | CMC Cross 유체 | `slurry/cases/run.json`의 `cmc`, `cmc250k_cross_parameters.csv` |
 | `pure_gr` | RE² graphite, 곡률 기반 근접 인력·표면 응착, lubrication, rough contact, Lees–Edwards, checkpoint/restart | `slurry/cases/pure_gr.json` |
-| `gr_cmc` | 같은 graphite 모델에 흡착 CMC에 따른 추가 접착력 감소 적용; free CMC 입력은 기록만 함 | `slurry/cases/gr_CMC.json` |
+| `gr_cmc` | 같은 graphite 모델에 흡착 CMC에 따른 추가 접착력 감소와 free CMC 농도에 따른 보존 반발 포텐셜 적용 | `slurry/cases/gr_CMC.json` |
 | `gr_baseline` | 기존 graphite Couette 및 기존 checkpoint/restart | `slurry/cases/gr_baseline.json` |
 
 ## 1. 설치, 빌드, 실행
@@ -113,7 +113,7 @@ W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 �
 사용하며, 이 모드에는 새 부착일·범위·곡률 연결 키를 넣을 수 없습니다.
 이전 결과 재현에는 당시의 JSON을 별도 `--config`로 지정합니다.
 
-### 2.1. 흡착 CMC: `gr_CMC.json`
+### 2.1. 흡착 CMC와 free CMC 반발: `gr_CMC.json`
 
 `slurry/cases/gr_CMC.json`은 현재 `pure_gr.json`의 물성·수치 설정을 복사하고
 아래 `cmc` 객체를 추가한 독립 설정입니다. 실행 모델 이름은 소문자 `gr_cmc`입니다.
@@ -134,7 +134,15 @@ CMC 실행에는 `--cases gr_cmc`를 지정합니다.
   "adsorbed_g_L": 3.8,
   "free_g_L": 0.0,
   "adsorbed_saturation_g_L": 2.8984214285714285,
-  "q_sat": 0.33
+  "q_sat": 0.33,
+  "free_repulsion": {
+    "enabled": true,
+    "strength": 1.0,
+    "decay_length_m": 5e-9,
+    "degree_of_substitution": 0.7,
+    "repeat_unit_molar_mass_kg_mol": 0.218,
+    "osmotic_coefficient": 0.5
+  }
 }
 ```
 
@@ -179,9 +187,39 @@ W_{\mathrm{eff}}=W_{\mathrm{bg}}+q(\theta)(W_{\mathrm{bare}}-W_{\mathrm{bg}}).
 
 배경 RE² 인력, 접촉 간격, 마찰계수 0.1, 접선 강성, rolling 법칙의 형태는 유지합니다.
 접착력 감소에 따라 접촉을 유지하는 하중과 기존 rolling 기준력이 달라질 수 있으나,
-마찰계수 자체를 변경하지 않습니다. **`free_g_L`은 이번 버전에서 입력·기록만 하며**
-점도·반발·depletion·접착력을 바꾸지 않습니다. 따라서 동일한 포화 흡착량에서
-free CMC만 바꿔 4→16 g/L의 유변 전환을 구현하는 단계는 아직 포함하지 않습니다.
+마찰계수 자체를 변경하지 않습니다. **`free_g_L`은 이제 입자쌍의 보존 반발 포텐셜에
+사용합니다.** 연속상 점도, lubrication 점도, 추가 접착력의 입력값은 이 항으로
+변경하지 않습니다. 접촉 생성·재형성의 억제를 통해 마찰 접촉망이 달라지는 모델이며,
+이미 형성된 강한 접착 접촉을 모두 분리시키는 모델은 아닙니다.
+
+`free_g_L`은 이미 **농도**입니다. SI 질량농도 환산은
+`1 g/L = 1 kg/m³`이므로 수치가 그대로입니다. 여기서 흡착량을 다시 빼거나 고형분·
+수상 부피분율을 곱하지 않습니다. 예를 들어 포화량을 반올림하여 2.8 g/L로 가정한
+총농도 4/16 g/L 비교라면 `free_g_L`에 1.2/13.2를 직접 입력합니다. 현재 JSON의
+포화량 2.8984214 g/L를 엄밀히 사용할 경우 대응 입력은 1.1015786/13.1015786입니다.
+총농도에서 free 농도를 계산하는 작업은 사용자의 실험 조건 해석이며 드라이버가
+두 독립 입력을 자동 재분배하지 않습니다.
+
+반발항은 \(s=H-h_0\ge0\)에서 다음과 같습니다.
+
+\[
+\Pi_b=\phi_{\rm osm}\frac{DS}{M_0}RTc_f,\qquad
+P_R=\alpha_R\Pi_b,\qquad
+\Phi_f=\pi\lambda_{ij}^{D}P_R\ell^2e^{-s/\ell}.
+\]
+
+여기서 `strength`가 \(\alpha_R\), `decay_length_m`가 \(\ell\)입니다.
+온도는 기존 `fluid.temperature_K`를 사용합니다. 298.15 K에서 기준 압력은 약
+**3.98 kPa × free_g_L**이며 `strength`를 곱한 압력을 사용합니다.
+기존 원거리 switch를 포함한 **전체 포텐셜을 미분**하여 곡률·배향 변화에 따른
+힘과 토크까지 계산합니다. 기존 배경 RE²·흡착 접착력·접촉 마찰 법칙을 유지합니다.
+`free_g_L=0`, `strength=0` 또는 `enabled=false`이면 새 반발항은 0입니다.
+
+기본 free 농도는 이전 흡착-only 시험을 유지하도록 **0**으로 두었습니다.
+5 nm와 `strength=1`은 **시험 출발값**이며 90k CMC–graphite에서 측정된 상수나
+4→16 g/L 유변 전이의 검증 결과가 아닙니다. Free 농도에 흡착 포화량 같은 상한이나
+overlap 농도에서의 스위치를 두지 않습니다. \(G'\), \(G''\)는 보정 대상으로
+사용하지 않습니다. 식·단위·물리적 해석은 [free CMC 반발 설명](docs/free-cmc-repulsion.md)에 있습니다.
 
 실행 전, solver나 입자 배치를 시작하지 않고 환산값을 확인할 수 있습니다.
 
@@ -191,9 +229,14 @@ python3 slurry/drivers/gr_re2/run_graphite.py --config slurry/cases/gr_CMC.json 
 
 `effective_config.json`에는 입력값과 bare 기준 부착일을,
 `manifest.json`의 `derived.cmc`에는 실제 적용 흡착량·포화 제한 여부·잔존율·환산 부착일을
-남깁니다. `resolved_run.cfg`의 `adhesion_work`가 C++에 전달되는 실제 부착일입니다.
-재시작은 `--cases gr_cmc --restart 폴더명`으로 지정합니다. 접착력이 달라지는 CMC 설정
-변경은 기존 물리값 호환성 검사에서 거부하며 새 계산으로 비교합니다.
+남깁니다. `derived.cmc.free_repulsion`에는 SI free 질량농도, 명목 전하 농도, 기준
+삼투압 및 실제 적용 반발압도 기록합니다. `resolved_run.cfg`의 `adhesion_work`가
+C++에 전달되는 실제 부착일입니다. 활성 반발은 `free_cmc_repulsion_pressure`와
+`free_cmc_repulsion_length`로 전달합니다. 재시작은
+`--cases gr_cmc --restart 폴더명`으로 지정합니다.
+접착력이나 활성 반발 법칙이 달라지는 설정 변경은 재시작 호환성 검사에서 거부하며
+새 계산으로 비교합니다. 기존의 free 반발 0인 checkpoint는 새 항도 0인 설정으로
+계속 사용할 수 있습니다. 종료 시각 등 실행 제어 설정은 기존 규칙을 따릅니다.
 실행 시간·종료 strain·checkpoint 사용법은 `pure_gr`와 같습니다.
 
 ### 2.2. 이번 업데이트에서 확인한 legacy 정리 후보

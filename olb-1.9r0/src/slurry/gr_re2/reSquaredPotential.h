@@ -22,6 +22,9 @@ struct PairParameters {
   bool surfaceAdhesion=false;
   double adhesionWork=.0219,adhesionRange=.67e-9;
   double curvatureSwitchGap=5e-9,curvatureCutoffGap=20e-9;
+  // Effective free-CMC excess pressure (Pa) and decay length (m). Zero pressure
+  // preserves the existing potential exactly. Adsorbed-CMC adhesion is separate.
+  double freeCmcRepulsionPressure=0.,freeCmcRepulsionLength=5e-9;
 };
 // Planar work already present in the geometric-gap LJ background. This is a
 // surface energy (J/m^2), not the complete curved-pair separation work (J).
@@ -36,6 +39,19 @@ inline void validatePairParameters(const PairParameters&p){
     throw std::domain_error("Invalid RE2 parameters");
   if(!std::isfinite(p.localGapFraction)||p.localGapFraction<0.||p.localGapFraction>1.)
     throw std::domain_error("RE2 local gap fraction must be finite and between zero and one");
+  if(!std::isfinite(p.freeCmcRepulsionPressure)||p.freeCmcRepulsionPressure<0.
+     ||!std::isfinite(p.freeCmcRepulsionLength)||!(p.freeCmcRepulsionLength>0.))
+    throw std::domain_error("Free-CMC repulsion requires finite pressure>=0 and finite length>0");
+  if(p.freeCmcRepulsionPressure>0.){
+    const double work=p.freeCmcRepulsionPressure*p.freeCmcRepulsionLength;
+    const double energyPerLength=work*p.freeCmcRepulsionLength;
+    if(!std::isfinite(p.roughnessGap)||!(p.roughnessGap>0.)
+       ||!std::isfinite(1./p.freeCmcRepulsionLength)
+       ||!std::isfinite(p.roughnessGap/p.freeCmcRepulsionLength)
+       ||!std::isfinite(work)||!(work>0.)
+       ||!std::isfinite(energyPerLength)||!(energyPerLength>0.))
+      throw std::domain_error("Active free-CMC repulsion requires h0>0 and representable pressure-length scales");
+  }
   if(p.localGapFraction>0.
      &&(!std::isfinite(p.roughnessGap)||!std::isfinite(p.localGap)||!(p.localGap>0.)||!(p.localGap<=p.roughnessGap)
         ||!std::isfinite(p.localSwitchExcessGap)||!(p.localSwitchExcessGap>=0.)
@@ -86,6 +102,7 @@ inline AD operator-(const AD& a){AD c(-a.v);for(int k=0;k<9;++k)c.d[k]=-a.d[k];r
 inline AD operator*(const AD& a,const AD& b){AD c(a.v*b.v);for(int k=0;k<9;++k)c.d[k]=a.d[k]*b.v+a.v*b.d[k];return c;}
 inline AD operator/(const AD& a,const AD& b){AD c(a.v/b.v);for(int k=0;k<9;++k)c.d[k]=(a.d[k]-c.v*b.d[k])/b.v;return c;}
 inline AD sqrt(const AD& a){AD c(std::sqrt(a.v));for(int k=0;k<9;++k)c.d[k]=a.d[k]/(2.*c.v);return c;}
+inline AD exp(const AD& a){AD c(std::exp(a.v));for(int k=0;k<9;++k)c.d[k]=c.v*a.d[k];return c;}
 inline AD power(AD a,int n){AD b(1.);for(;n;n>>=1,a=a*a)if(n&1)b=b*a;return b;}
 using AVec=std::array<AD,3>;using AMat=std::array<AD,9>;
 inline AD dot(const AVec&a,const AVec&b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
@@ -149,9 +166,13 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
   const AD length=sqrt(re2_detail::dot(r,r));AVec rh{};for(int k=0;k<3;++k)rh[k]=r[k]/length;
   const AD ell=orientationLength(bi,bj,rh,p.sigma);
   AD ua=branch(h,ell,bi,bj,p,false),ur=branch(h,ell,bi,bj,p,true);
-  if(p.surfaceAdhesion&&gap.gap<p.curvatureCutoffGap){
+  const bool localBackground=p.surfaceAdhesion&&gap.gap<p.curvatureCutoffGap;
+  AD localLength;
+  if(localBackground||p.freeCmcRepulsionPressure>0.){
     const auto curvature=contactCurvature(bi,bj,gap);
-    AD localLength(curvature.length);localLength.d=curvature.lengthDerivative;
+    localLength=AD(curvature.length);localLength.d=curvature.lengthDerivative;
+  }
+  if(localBackground){
     const AD nearA=derjaguinBranch(h,localLength,p,false);
     const AD nearR=derjaguinBranch(h,localLength,p,true);
     if(gap.gap<=p.curvatureSwitchGap){ua=nearA;ur=nearR;}
@@ -182,6 +203,15 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
       weight=weight*smoothSwitch((s-p.localSwitchExcessGap)/(p.localCutoffExcessGap-p.localSwitchExcessGap));
     ua=ua+weight*(branch(d,ell,bi,bj,p,false)-ua);
     ur=ur+weight*(branch(d,ell,bi,bj,p,true)-ur);
+  }
+  if(p.freeCmcRepulsionPressure>0.){
+    constexpr double pi=3.1415926535897932384626433832795;
+    const double decay=p.freeCmcRepulsionLength;
+    const double energyPerLength=(p.freeCmcRepulsionPressure*decay)*decay;
+    // U=pi*lambda_D*P*ell^2*exp[-(H-h0)/ell]. Differentiate both the gap
+    // and actual contact curvature; this term extends beyond the background's
+    // curvature cutoff. Keep the same analytic continuation for H<h0 trials.
+    ur=ur+localLength*(pi*energyPerLength)*exp(-(h-p.roughnessGap)/decay);
   }
   if(gap.gap>p.switchGap){const AD t=(h-p.switchGap)/(p.cutoffGap-p.switchGap);const AD sw=smoothSwitch(t);ua=ua*sw;ur=ur*sw;}
   unpack(ua,result.forceAttractiveI,result.torqueAttractiveI,result.torqueAttractiveJ);

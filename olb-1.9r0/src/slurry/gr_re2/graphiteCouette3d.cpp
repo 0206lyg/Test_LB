@@ -173,6 +173,8 @@ void simulate(const Config& c){
   solver.pair.adhesionRange=c.adhesion_range;
   solver.pair.curvatureSwitchGap=c.curvature_switch_gap;
   solver.pair.curvatureCutoffGap=c.curvature_cutoff_gap;
+  solver.pair.freeCmcRepulsionPressure=c.free_cmc_repulsion_pressure;
+  solver.pair.freeCmcRepulsionLength=c.free_cmc_repulsion_length;
   solver.nearField.viscosity=c.dynamic_viscosity;solver.nearField.matchingGap=c.lubrication_cutoff_cells*c.dx;
   solver.nearField.enabled=c.lubrication_cutoff_cells>0;
   solver.maxSubsteps=c.particle_max_substeps;solver.maxNewtonIterations=c.particle_max_iterations;solver.relativeTolerance=c.particle_tolerance;
@@ -227,7 +229,9 @@ void simulate(const Config& c){
     log<<" local_gap_nm="<<c.local_gap*1.e9<<" local_gap_fraction="<<c.local_gap_fraction
        <<" local_switch_excess_gap_nm="<<c.local_switch_excess_gap*1.e9
        <<" local_cutoff_excess_gap_nm="<<c.local_cutoff_excess_gap*1.e9;
-  log<<" switch_gap_nm="<<c.switch_gap*1.e9<<" cutoff_gap_nm="<<c.cutoff_gap*1.e9<<std::endl;
+  log<<" switch_gap_nm="<<c.switch_gap*1.e9<<" cutoff_gap_nm="<<c.cutoff_gap*1.e9
+     <<" free_cmc_repulsion_pressure_Pa="<<c.free_cmc_repulsion_pressure
+     <<" free_cmc_repulsion_length_nm="<<c.free_cmc_repulsion_length*1.e9<<std::endl;
   log<<"particle_solver="<<c.particle_solver<<" particle_tolerance="<<c.particle_tolerance
      <<" force_absolute_tolerance_N="<<c.particle_force_absolute_tolerance
      <<" torque_absolute_tolerance_N_m="<<c.particle_torque_absolute_tolerance
@@ -254,7 +258,9 @@ void simulate(const Config& c){
       meta<<",\"local_gap_m\":"<<c.local_gap<<",\"local_gap_fraction\":"<<c.local_gap_fraction
           <<",\"local_switch_excess_gap_m\":"<<c.local_switch_excess_gap
           <<",\"local_cutoff_excess_gap_m\":"<<c.local_cutoff_excess_gap;
-    meta<<"}"
+    meta<<",\"free_cmc_repulsion_version\":1"
+        <<",\"free_cmc_repulsion_pressure_Pa\":"<<c.free_cmc_repulsion_pressure
+        <<",\"free_cmc_repulsion_length_m\":"<<c.free_cmc_repulsion_length<<"}"
       <<",\n\"rough_contact\":{\"enabled\":"<<(c.rough_contact_enabled?"true":"false")
       <<",\"roughness_gap_m\":"<<c.roughness_gap<<",\"sliding_friction\":"<<c.sliding_friction
       <<",\"tangential_stiffness_N_m\":"<<c.tangential_stiffness
@@ -375,9 +381,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #endif
     return 0;
   }

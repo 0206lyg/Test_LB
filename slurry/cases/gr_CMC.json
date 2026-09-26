@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "description": "Graphite with adsorbed 90k CMC: pure_gr physical parameters with coverage-dependent attenuation of excess surface adhesion; free CMC is recorded but has no physical effect in this version.",
+  "description": "Graphite with 90k CMC: coverage-dependent attenuation of excess surface adhesion plus conservative free-CMC repulsion. The shipped free_g_L=0 keeps the adsorption-only benchmark; set free_g_L independently to activate repulsion.",
   "fluid": {
     "density_kg_m3": 997.0,
     "dynamic_viscosity_Pa_s": 0.00089,
@@ -71,6 +71,16 @@
     "q_sat": 0.33,
     "_adhesion_model": "theta=min(adsorbed_g_L/adsorbed_saturation_g_L,1); q=(1-(1-sqrt(q_sat))*theta)^2; W_eff=W_bg+q*(W_bare-W_bg). interaction.adhesion_work_J_m2 remains the bare graphite reference.",
     "_q_sat_reference": "0.33 is the agreed starting benchmark for saturated excess-adhesion retention, not a measured CMC constant.",
-    "_free_cmc_status": "Reserved input only: no change to viscosity, repulsion, depletion, or adhesion from free_g_L in this version."
+    "free_repulsion": {
+      "enabled": true,
+      "strength": 1.0,
+      "decay_length_m": 5e-09,
+      "degree_of_substitution": 0.7,
+      "repeat_unit_molar_mass_kg_mol": 0.218,
+      "osmotic_coefficient": 0.5
+    },
+    "_free_cmc_units": "free_g_L is already g CMC per litre of aqueous phase: 1 g/L = 1 kg/m3. It is not total CMC; do not subtract adsorbed CMC again or apply a solids-volume factor. Free CMC is never capped or increased by the adsorbed-input clamp.",
+    "_free_repulsion_model": "P=strength*osmotic_coefficient*DS/M0*R*fluid.temperature_K*free_g_L; Phi_free=pi*lambda_D*P*decay_length_m^2*exp(-(H-h0)/decay_length_m), with the existing outer cutoff. Force and torque differentiate the full potential including local curvature.",
+    "_free_repulsion_reference": "5 nm and strength=1 are the agreed first-test effective parameters, not measured graphite-CMC force constants. The osmotic coefficient 0.5 is a reference approximation; no overlap-concentration threshold is imposed. Free CMC currently changes only conservative repulsion, not fluid viscosity or the adhesion/friction parameters."
   }
 }

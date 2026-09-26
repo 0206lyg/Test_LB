@@ -77,6 +77,11 @@ inline std::map<std::string,double> physics(const Config& c,const Units& u,std::
     // Preserve the old signature exactly so explicit legacy restarts stay valid.
     KEEP(local_gap);KEEP(local_gap_fraction);KEEP(local_switch_excess_gap);KEEP(local_cutoff_excess_gap);
   }
+  if(c.free_cmc_repulsion_pressure>0.){
+    // Inactive fields must not change signatures of pre-repulsion checkpoints.
+    KEEP(free_cmc_repulsion_pressure);KEEP(free_cmc_repulsion_length);
+    out["free_cmc_repulsion_version"]=1.;
+  }
   KEEP(lubrication_cutoff_cells);
   KEEP(rough_contact_enabled);KEEP(roughness_gap);KEEP(sliding_friction);KEEP(tangential_stiffness);
   KEEP(rolling_length);KEEP(rolling_yield_angle);

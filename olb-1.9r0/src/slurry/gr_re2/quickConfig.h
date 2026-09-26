@@ -24,6 +24,9 @@ struct Config {
   bool surface_adhesion=false;
   double adhesion_work=.0219,adhesion_range=6.7e-10;
   double curvature_switch_gap=5e-9,curvature_cutoff_gap=2e-8;
+  // Free-CMC osmotic repulsion: pressure in Pa and decay length in m.
+  // Zero pressure retains the previous pair potential exactly.
+  double free_cmc_repulsion_pressure=0.,free_cmc_repulsion_length=5e-9;
   double end_strain=10,particle_tolerance=1e-4,lubrication_cutoff_cells=1.;
   bool rough_contact_enabled=true;
   double roughness_gap=2e-9,sliding_friction=.5,tangential_stiffness=9.;
@@ -67,6 +70,7 @@ inline Config parseConfig(int argc,char**argv) {
     REAL(time_step_s) REAL(epsilon_cells) REAL(hamaker) REAL(sigma_lj) REAL(switch_gap) REAL(cutoff_gap)
     REAL(local_gap) REAL(local_gap_fraction) REAL(local_switch_excess_gap) REAL(local_cutoff_excess_gap)
     REAL(adhesion_work) REAL(adhesion_range) REAL(curvature_switch_gap) REAL(curvature_cutoff_gap)
+    REAL(free_cmc_repulsion_pressure) REAL(free_cmc_repulsion_length)
     REAL(checkpoint_seconds)
     REAL(end_strain) REAL(particle_tolerance) REAL(lubrication_cutoff_cells)
     REAL(roughness_gap) REAL(sliding_friction) REAL(tangential_stiffness)
@@ -113,6 +117,18 @@ inline Config parseConfig(int argc,char**argv) {
   if(!(c.local_gap>0&&c.local_gap_fraction>=0&&c.local_gap_fraction<=1
        &&c.local_switch_excess_gap>=0&&c.local_cutoff_excess_gap>c.local_switch_excess_gap))
     throw std::runtime_error("Require local_gap > 0, 0 <= local_gap_fraction <= 1, and 0 <= local_switch_excess_gap < local_cutoff_excess_gap");
+  if(!(c.free_cmc_repulsion_pressure>=0.&&c.free_cmc_repulsion_length>0.))
+    throw std::runtime_error("Require free_cmc_repulsion_pressure >= 0 Pa and free_cmc_repulsion_length > 0 m");
+  if(c.free_cmc_repulsion_pressure>0.){
+    if(!c.rough_contact_enabled)
+      throw std::runtime_error("Free-CMC repulsion requires rough_contact_enabled=1");
+    const double work=c.free_cmc_repulsion_pressure*c.free_cmc_repulsion_length;
+    const double energyScale=work*c.free_cmc_repulsion_length;
+    if(!(work>0.&&std::isfinite(work)&&energyScale>0.&&std::isfinite(energyScale)
+         &&std::isfinite(1./c.free_cmc_repulsion_length)
+         &&std::isfinite(c.roughness_gap/c.free_cmc_repulsion_length)))
+      throw std::runtime_error("Free-CMC repulsion pressure-length scales must be representable");
+  }
   if(c.surface_adhesion){
     if(explicitLocal)
       throw std::runtime_error("Surface adhesion replaces local-gap adhesion; remove all local_* inputs");
