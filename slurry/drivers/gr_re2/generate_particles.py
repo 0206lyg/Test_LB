@@ -2,9 +2,11 @@
 """Generate random nonoverlapping oblate spheroids in a fully periodic box.
 
 Python standard library only. Positions and orientations are proposed randomly.
-A single progressive insertion algorithm interleaves candidate batches with
-geometric Monte Carlo moves of already inserted particles. These are overlap-
-rejecting coordinate proposals, with no physical time, dynamics or aging.
+Periodic cell lists limit collision queries to nearby particles. Successful
+insertion never moves existing particles; consecutive failures trigger bounded
+geometric Monte Carlo moves of the blockers and their nearest neighbours only.
+These are overlap-rejecting coordinate proposals, with no physical time,
+dynamics or aging. Optional final MC sweeps retain their existing meaning.
 The CSV uses OpenLB's body-to-world Rz(angle_z) Ry(angle_y) Rx(angle_x), degrees.
 Contact/clearance uses Perram--Wertheim plus a conservative separating plane:
 J. Comput. Phys. 58, 409--416 (1985), doi:10.1016/0021-9991(85)90171-8.
@@ -148,21 +150,95 @@ def separated(r, n1, n2, a, c, gap):
 def image_displacements(p, q, length, cutoff):
     """Relevant periodic images in all three axes, at initial shear phase zero."""
     dr = tuple(q[i]-p[i] for i in range(3))
+    if length > 2*cutoff:
+        # At most one image per pair can fall within the bounding-sphere range.
+        dr = tuple(d-length*math.floor(d/length+0.5) for d in dr)
+        if all(abs(d) <= cutoff for d in dr):
+            yield dr
+        return
     ranges = [range(math.ceil((-cutoff-d)/length),
                     math.floor((cutoff-d)/length)+1) for d in dr]
     for image in itertools.product(*ranges):
         yield tuple(dr[i]+image[i]*length for i in range(3))
 
 
-def fits(candidate, bodies, length, a, c, gap, skip=-1):
+class PeriodicCellList:
+    """Mutable centre index; each cell is at least one collision cutoff wide.
+
+    All 27 neighbouring cells are sufficient, including wrapped boundary
+    cells. Deduplication matters when there are only one or two cells per axis.
+    The index is only a broad phase: the existing spheroid predicate and every
+    relevant periodic image still decide overlap/clearance.
+    """
+
+    def __init__(self, length, cutoff, bodies=()):
+        if not (math.isfinite(length) and math.isfinite(cutoff)
+                and length > 0 and cutoff > 0):
+            raise ValueError('Cell-list length and cutoff must be positive and finite')
+        self.length = length
+        self.count = max(1, int(length/cutoff))
+        self.width = length/self.count
+        self.bins = {}
+        self.locations = {}
+        self.neighbour_keys = {}
+        for index, body in enumerate(bodies):
+            self.add(index, body[0])
+
+    def key(self, position):
+        return tuple(min(self.count-1, int((x % self.length)/self.width))
+                     for x in position)
+
+    def add(self, index, position):
+        if index in self.locations:
+            raise ValueError('Particle already in cell list: %d' % index)
+        key = self.key(position)
+        self.locations[index] = key
+        self.bins.setdefault(key, set()).add(index)
+
+    def remove(self, index):
+        key = self.locations.pop(index)
+        self.bins[key].remove(index)
+        if not self.bins[key]:
+            del self.bins[key]
+
+    def move(self, index, position):
+        if self.key(position) != self.locations[index]:
+            self.remove(index)
+            self.add(index, position)
+
+    def neighbors(self, position):
+        key = self.key(position)
+        if key not in self.neighbour_keys:
+            self.neighbour_keys[key] = sorted(set(
+                tuple((key[d]+offset[d]) % self.count for d in range(3))
+                for offset in itertools.product((-1, 0, 1), repeat=3)))
+        # Stable ordering keeps seeded runs independent of set iteration order.
+        return sorted(index for cell in self.neighbour_keys[key]
+                      for index in self.bins.get(cell, ()))
+
+
+def collision_blockers(candidate, bodies, length, a, c, gap, skip=-1,
+                       spatial=None, limit=None):
+    """Return blocking IDs, optionally stopping once a shortlist cannot improve."""
     position, _, normal = candidate
-    for j, other in enumerate(bodies):
+    indices = spatial.neighbors(position) if spatial is not None else range(len(bodies))
+    blockers = []
+    for j in indices:
         if j == skip:
             continue
+        other = bodies[j]
         for dr in image_displacements(position, other[0], length, 2*a+gap):
             if not separated(dr, normal, other[2], a, c, gap):
-                return False
-    return True
+                blockers.append(j)
+                if limit is not None and len(blockers) >= limit:
+                    return blockers
+                break
+    return blockers
+
+
+def fits(candidate, bodies, length, a, c, gap, skip=-1, spatial=None):
+    return not collision_blockers(candidate, bodies, length, a, c, gap,
+                                  skip, spatial, limit=1)
 
 
 def random_candidate(rng, length, a, c, gap):
@@ -170,47 +246,131 @@ def random_candidate(rng, length, a, c, gap):
                     unit_quaternion(rng))
 
 
-def random_insertion(rng, count, length, a, c, gap, attempts, batches):
-    """One progressive random protocol; never substitute a crystalline seed."""
+def periodic_distance2(p, q, length):
+    return sum((d-length*math.floor(d/length+0.5))**2
+               for d in (q[i]-p[i] for i in range(3)))
+
+
+def local_relax(rng, bodies, spatial, trigger, blockers, length, a, c, gap,
+                max_particles, sweeps):
+    """Bounded local moves of blockers and their nearest periodic neighbours.
+
+    Every accepted pose is valid against ALL nearby particles, including fixed
+    particles outside the movable set. Accepted moves persist even if the
+    trigger still cannot be inserted; there is no deletion or overlap repair.
+    """
+    if len(blockers) > max_particles:
+        return 0, 0
+    selected = set(blockers)
+    nearest = sorted(range(len(bodies)),
+                     key=lambda i: (periodic_distance2(trigger[0], bodies[i][0], length), i))
+    for index in nearest:
+        if len(selected) >= min(max_particles, len(bodies)):
+            break
+        selected.add(index)
+    accepted = attempted = 0
+    for _ in range(sweeps):
+        acc, att = randomize(rng, bodies, length, a, c, gap, 1,
+                             spatial=spatial, indices=sorted(selected), local_only=True)
+        accepted += acc
+        attempted += att
+        if fits(trigger, bodies, length, a, c, gap, spatial=spatial):
+            break
+    return accepted, attempted
+
+
+def random_insertion(rng, count, length, a, c, gap, attempts, batches,
+                     stagnation_attempts=128, local_particles=16, local_sweeps=8,
+                     stats=None):
+    """Continuous random insertion, with local moves only after stagnation."""
     bodies = []
+    spatial = PeriodicCellList(length, 2*a+gap)
     accepted = attempted = proposals = 0
+    if stats is None:
+        stats = {}
+    stats.update(local_relaxations=0, local_mc_accepted=0, local_mc_attempted=0,
+                 max_local_particles=0)
+    growth_steps = max(0, (local_particles-1).bit_length()-2)
+    start = last_report = time.monotonic()
     for index in range(count):
         inserted = False
-        for _ in range(batches):
-            for __ in range(attempts):
-                proposals += 1
-                candidate = random_candidate(rng, length, a, c, gap)
-                if fits(candidate, bodies, length, a, c, gap):
-                    bodies.append(candidate)
-                    inserted = True
-                    break
-            # Geometric moves are part of every insertion batch, even successful
-            # ones. No simulation time or forces are advanced here.
-            acc, att = randomize(rng, bodies, length, a, c, gap, 1)
-            accepted += acc
-            attempted += att
-            if inserted:
+        consecutive = rescues = 0
+        best = None
+        for trial in range(attempts*batches):
+            proposals += 1
+            candidate = random_candidate(rng, length, a, c, gap)
+            # Only a strictly better shortlist can replace the stored trigger.
+            # Truncated blocker lists are never used to choose a movable set.
+            limit = len(best[1]) if best is not None else local_particles+1
+            blocked = collision_blockers(candidate, bodies, length, a, c, gap,
+                                         spatial=spatial, limit=limit)
+            if not blocked:
+                bodies.append(candidate)
+                spatial.add(index, candidate[0])
+                inserted = True
                 break
+            consecutive += 1
+            if len(blocked) < limit:
+                best = (candidate, blocked)
+            if consecutive >= stagnation_attempts:
+                if best is not None:
+                    trigger, blockers = best
+                    size = min(local_particles,
+                               max(len(blockers), 4*(2**min(rescues, growth_steps))))
+                    acc, att = local_relax(rng, bodies, spatial, trigger, blockers,
+                                         length, a, c, gap, size, local_sweeps)
+                    accepted += acc
+                    attempted += att
+                    stats['local_relaxations'] += 1
+                    stats['max_local_particles'] = max(stats['max_local_particles'],
+                                                       min(size, len(bodies)))
+                    rescues += 1
+                    if fits(trigger, bodies, length, a, c, gap, spatial=spatial):
+                        bodies.append(trigger)
+                        spatial.add(index, trigger[0])
+                        inserted = True
+                        break
+                best = None
+                consecutive = 0
+            now = time.monotonic()
+            if now-last_report >= 10:
+                print('Random placement: %d/%d particles; candidate %d/%d; '
+                      'local relaxations %d; elapsed %.1f s'
+                      % (index, count, trial+1, attempts*batches,
+                         stats['local_relaxations'], now-start), file=sys.stderr, flush=True)
+                last_report = now
         if not inserted:
-            raise RuntimeError('Random preparation placed %d/%d particles; increase '
-                               'particles.insertion_batches_per_particle explicitly.'
-                               % (index, count))
+            raise RuntimeError('Random preparation placed %d/%d particles after %d '
+                               'candidates and %d local relaxations for this particle; '
+                               'no overlapping or underfilled state was written. '
+                               'Increase particles.insertion_batches_per_particle or '
+                               'particles.insertion_local_sweeps explicitly.'
+                               % (index, count, attempts*batches, rescues))
         if (index + 1) % 12 == 0 or index + 1 >= count-12:
-            print('Random placement: %d/%d particles' % (index+1, count),
+            print('Random placement: %d/%d particles; candidates %d; '
+                  'local relaxations %d; elapsed %.1f s'
+                  % (index+1, count, proposals, stats['local_relaxations'],
+                     time.monotonic()-start),
                   file=sys.stderr, flush=True)
+            last_report = time.monotonic()
+    stats.update(local_mc_accepted=accepted, local_mc_attempted=attempted)
     return bodies, accepted, attempted, proposals
 
 
-def randomize(rng, bodies, length, a, c, gap, sweeps):
+def randomize(rng, bodies, length, a, c, gap, sweeps, spatial=None,
+              indices=None, local_only=False, progress=False):
+    if spatial is None:
+        spatial = PeriodicCellList(length, 2*a+gap, bodies)
     accepted, attempted = 0, 0
-    for _ in range(sweeps):
-        order = list(range(len(bodies)))
+    start = last_report = time.monotonic()
+    for sweep in range(sweeps):
+        order = list(range(len(bodies))) if indices is None else list(indices)
         rng.shuffle(order)
         for index in order:
             attempted += 1
             old = bodies[index]
             # Occasional whole-box relocations use independent uniform SO(3).
-            if rng.random() < .1:
+            if not local_only and rng.random() < .1:
                 candidate = random_candidate(rng, length, a, c, gap)
             else:
                 displacement = .12*a
@@ -222,9 +382,16 @@ def randomize(rng, bodies, length, a, c, gap, sweeps):
                 angle = rng.uniform(-.30, .30)
                 dq = (math.cos(angle/2),) + tuple(math.sin(angle/2)*x/norm for x in axis)
                 candidate = particle(position, quat_product(dq, old[1]))
-            if fits(candidate, bodies, length, a, c, gap, index):
+            if fits(candidate, bodies, length, a, c, gap, index, spatial):
                 bodies[index] = candidate
+                spatial.move(index, candidate[0])
                 accepted += 1
+        now = time.monotonic()
+        if progress and (now-last_report >= 10 or sweep+1 == sweeps):
+            print('Final geometric MC: %d/%d sweeps; accepted %d/%d; elapsed %.1f s'
+                  % (sweep+1, sweeps, accepted, attempted, now-start),
+                  file=sys.stderr, flush=True)
+            last_report = now
     return accepted, attempted
 
 
@@ -244,7 +411,8 @@ def generate(config, output_path):
     physical_a, physical_c = float(values["diameter_m"])/2, float(values["thickness_m"])/2
     count, seed = int(values["count"]), int(values.get("seed", 1729))
     physical_gap = float(values.get("minimum_gap_m", 0.0))
-    if not (physical_length > 0 and physical_a >= physical_c > 0 and physical_gap >= 0):
+    if not (all(math.isfinite(v) for v in (physical_length, physical_a, physical_c, physical_gap))
+            and physical_length > 0 and physical_a >= physical_c > 0 and physical_gap >= 0):
         raise ValueError("Require positive box/oblate semiaxes and nonnegative clearance.")
     if count < 0 or count != values["count"]:
         raise ValueError("particles.count must be a nonnegative integer.")
@@ -257,14 +425,31 @@ def generate(config, output_path):
     attempts = int(values.get("insertion_attempts_per_batch", 32))
     batches = int(values.get("insertion_batches_per_particle", 2048))
     sweeps = int(values.get("initialization_mc_sweeps", 100))
+    stagnation = int(values.get("insertion_stagnation_attempts", 128))
+    local_particles = int(values.get("insertion_local_particles", 16))
+    local_sweeps = int(values.get("insertion_local_sweeps", 8))
     if attempts <= 0 or batches <= 0 or sweeps < 0:
         raise ValueError("Insertion counts must be positive; MC sweeps nonnegative.")
+    if stagnation <= 0 or local_particles <= 0 or local_sweeps <= 0:
+        raise ValueError('Stagnation attempts, local particles and local sweeps must be positive.')
+    insertion_stats = {}
     bodies, accepted, attempted, proposals = random_insertion(
-        rng, count, length, a, c, gap, attempts, batches)
-    acc, att = randomize(rng, bodies, length, a, c, gap, sweeps)
+        rng, count, length, a, c, gap, attempts, batches,
+        stagnation, local_particles, local_sweeps, insertion_stats)
+    insertion_seconds = time.monotonic()-start
+    if sweeps:
+        print('Placement complete; starting %d final geometric MC sweeps.' % sweeps,
+              file=sys.stderr, flush=True)
+    final_start = time.monotonic()
+    acc, att = randomize(rng, bodies, length, a, c, gap, sweeps, progress=True)
+    final_seconds = time.monotonic()-final_start
     accepted += acc
     attempted += att
+    print('Validating all particle pairs and periodic images independently of the cell list.',
+          file=sys.stderr, flush=True)
+    validation_start = time.monotonic()
     validate(bodies, length, a, c, gap)
+    validation_seconds = time.monotonic()-validation_start
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as stream:
@@ -276,7 +461,9 @@ def generate(config, output_path):
     orientation = [[sum(body[2][i]*body[2][j] for body in bodies)/count if count else 0.0
                     for j in range(3)] for i in range(3)]
     metadata = {
-        "particle_count": count, "seed": seed, "initialization_method": "progressive_random_insertion_with_geometric_MC",
+        "particle_count": count, "seed": seed,
+        "initialization_method": "cell_list_random_insertion_with_stagnation_local_MC",
+        "initialization_algorithm_version": 2,
         "equilibrated": False, "isotropy_guaranteed": False,
         "rotation_convention": "body-to-world Rz(angle_z) Ry(angle_y) Rx(angle_x); degrees; body thin axis z",
         "periodic_axes": ["x", "y", "z"], "initial_shear_phase": 0.0,
@@ -285,6 +472,14 @@ def generate(config, output_path):
         "orientation_second_moment": orientation,
         "random_insertion_particles": count, "random_proposals": proposals,
         "geometric_mc_accepted": accepted, "geometric_mc_attempted": attempted,
+        "insertion_stagnation_attempts": stagnation,
+        "insertion_local_particles": local_particles,
+        "insertion_local_sweeps": local_sweeps,
+        "local_relaxation": insertion_stats,
+        "final_mc_sweeps": sweeps, "final_mc_accepted": acc, "final_mc_attempted": att,
+        "insertion_seconds": insertion_seconds,
+        "final_mc_seconds": final_seconds,
+        "validation_seconds": validation_seconds,
         "elapsed_seconds": time.monotonic()-start,
         "validation": "all particle pairs and relevant xyz periodic images; PW contact and separating-plane clearance",
     }
