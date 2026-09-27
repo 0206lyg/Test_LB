@@ -350,10 +350,6 @@ void simulate(const Config& c){
     auto begin=Clock::now();pair=graphite::advanceParticles(bodies,force,torque,u.dt,step*u.dt,solver,&pairCache,&contacts,&particleController);
     for(std::size_t i=0;i<bodies.size();++i)angularAcceleration[i]=graphite::scale(graphite::sub(bodies[i].omega,oldOmega[i]),1/u.dt);
     syncParticles(ps,bodies);const double particleStepSeconds=seconds(begin);particleSeconds+=particleStepSeconds;
-    if(c.solver_diagnostics)log<<"particle_step="<<step<<" seconds="<<particleStepSeconds
-      <<" accepted_substeps="<<particleController.acceptedSubsteps<<" rejected_substeps="<<particleController.rejectedSubsteps
-      <<" newton_total="<<pair.newtonIterations<<" krylov_total="<<pair.krylovIterations
-      <<" full_residuals_total="<<pair.residualEvaluations<<" next_particle_dt_s="<<particleController.nextSubstepDt<<std::endl;
     // Explicit resolved coupling uses the beginning-of-step particle mask.
     // Pair/lubrication integration is implicit within the unchanged LB step.
     begin=Clock::now();l.setProcessingContext(ProcessingContext::Simulation);
