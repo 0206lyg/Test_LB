@@ -70,6 +70,18 @@ struct ParticleStepDiagnostics {
   std::size_t activePairs=0;
 };
 
+// Runtime-only timestep controller. Keep this separate from the checkpointed
+// ParticleStepDiagnostics layout. A caller may retain it between LB intervals;
+// omitting it still gives transactional, accepted-state retaining retries.
+struct ParticleSubstepController {
+  double nextSubstepDt=0.,maxSubstepDt=0.;
+  double minAcceptedDt=0.,maxAcceptedDt=0.;
+  int easyAcceptedSteps=0,growthCooldown=0;
+  std::size_t attemptedSubsteps=0,rejectedSubsteps=0;
+  int acceptedSubsteps=0;
+  int rejectedNewtonIterations=0,rejectedKrylovIterations=0,rejectedResidualEvaluations=0;
+};
+
 using PersistentContactState=std::vector<RoughContactState>;
 
 namespace particle_detail {
@@ -713,6 +725,153 @@ inline ParticleStepDiagnostics evaluateParticleState(
   return diagnostic;
 }
 
+namespace particle_detail {
+
+// The callback is the implicit solver, with the same transactional contract as
+// dispatchImplicitStep. Keeping interval management separate lets tests inject
+// a late failure and verify that committed contact history is not replayed.
+template<class SolveInterval>
+inline ParticleStepDiagnostics integrateParticleIntervals(
+    std::vector<Body>& bodies,double dt,double time,const ParticleStepSettings& settings,
+    std::vector<GapCache>* persistentCache,PersistentContactState* persistentContacts,
+    ParticleSubstepController* controller,SolveInterval&& solve) {
+  const std::size_t pairs=bodies.size()*(bodies.size()-1)/2;
+  auto working=bodies;
+  PersistentContactState contacts=(persistentContacts && persistentContacts->size()==pairs)
+      ?*persistentContacts:PersistentContactState(pairs);
+  std::vector<GapCache> cache=(persistentCache && persistentCache->size()==pairs)
+      ?*persistentCache:std::vector<GapCache>(pairs);
+  ParticleStepDiagnostics total;
+  ParticleSubstepController progress;
+  progress.easyAcceptedSteps=controller?std::clamp(controller->easyAcceptedSteps,0,4):0;
+  progress.growthCooldown=controller?std::clamp(controller->growthCooldown,0,8):0;
+  progress.maxSubstepDt=controller?controller->maxSubstepDt:0.;
+  // Use integer ticks on the finest previously permitted dyadic grid. No
+  // floating-point remainder can create an arbitrarily short final interval.
+  int ticks=1,levels=0;
+  while(ticks<=settings.maxSubsteps/2){ticks*=2;++levels;}
+  int intervalTicks=ticks,completedTicks=0;
+  const double finestDt=dt/ticks;
+  if(!(finestDt>0.))throw std::invalid_argument("Particle subdivision interval underflows");
+  // Explicit accuracy cap, separate from the learned nonlinear-work hint.
+  // The cap persists across calls and growth is never allowed to exceed it.
+  int maximumIntervalTicks=ticks;
+  const double cap=progress.maxSubstepDt;
+  if(cap!=0.) {
+    if(!(cap>0.) || !std::isfinite(cap))
+      throw std::invalid_argument("Maximum particle timestep must be finite and positive");
+    const double allowance=cap*(1.+16.*std::numeric_limits<double>::epsilon());
+    if(finestDt>allowance)
+      throw std::invalid_argument("Particle timestep cap is below the permitted minimum subdivision interval");
+    while(maximumIntervalTicks>1 && dt*(double(maximumIntervalTicks)/ticks)>allowance)
+      maximumIntervalTicks/=2;
+  }
+  intervalTicks=maximumIntervalTicks;
+  const double hint=controller?controller->nextSubstepDt:0.;
+  if(std::isfinite(hint) && hint>0.) {
+    while(intervalTicks>1 && dt*(double(intervalTicks)/ticks)>hint*(1.+16.*std::numeric_limits<double>::epsilon()))
+      intervalTicks/=2;
+  }
+  // One initial descent plus at most one failed enlargement per accepted
+  // interval. The explicit bound also protects against future policy changes.
+  const std::size_t attemptLimit=2*static_cast<std::size_t>(ticks)+levels+1;
+  const int easyNewton=std::max(1,std::min(4,settings.maxNewtonIterations/4));
+  // A dozen Newton linearizations for one accepted interval already costs more
+  // than two typical 3--4 iteration solves. Reduce the NEXT interval before
+  // reaching another expensive failure. A floor of six prevents small user
+  // iteration limits from classifying every successful solve as expensive.
+  const int costlyNewton=std::max(6,std::min(12,settings.maxNewtonIterations/5));
+  std::string failure;
+  ParticleDiagnosticScope diagnosticScope(settings);
+  while(completedTicks<ticks && progress.attemptedSubsteps<attemptLimit) {
+    const int attemptedTicks=std::min(intervalTicks,ticks-completedTicks);
+    const int count=ticks/attemptedTicks,substep=completedTicks/attemptedTicks;
+    const double weight=double(attemptedTicks)/ticks,subdt=dt*weight;
+    const double subtime=time+dt*(double(completedTicks)/ticks);
+    // Bodies, geometry caches and friction/rolling histories all advance
+    // together. A rejected interval cannot change the accepted starting state.
+    auto trialCache=cache;auto trialContacts=contacts;
+    std::vector<Body> next;ParticleStepDiagnostics d;
+    ++progress.attemptedSubsteps;
+    const bool okay=solve(working,subdt,subtime,trialCache,trialContacts,next,d,failure,count,substep);
+    // Work counters include rejected nonlinear attempts; physical diagnostics
+    // below include only intervals whose momentum/contact residuals converged.
+    total.newtonIterations+=d.newtonIterations;total.krylovIterations+=d.krylovIterations;
+    total.residualEvaluations+=d.residualEvaluations;
+    total.frictionBranchAttempts+=d.frictionBranchAttempts;
+    total.frictionBranchCorrections+=d.frictionBranchCorrections;
+    total.contactStateUpdates+=d.contactStateUpdates;
+    total.contactActivations+=d.contactActivations;total.contactReleases+=d.contactReleases;
+    if(!okay) {
+      ++progress.rejectedSubsteps;
+      progress.rejectedNewtonIterations+=d.newtonIterations;
+      progress.rejectedKrylovIterations+=d.krylovIterations;
+      progress.rejectedResidualEvaluations+=d.residualEvaluations;
+      progress.easyAcceptedSteps=0;progress.growthCooldown=8;
+      if(attemptedTicks==1)break;
+      intervalTicks=attemptedTicks/2;
+      continue;
+    }
+    working=std::move(next);cache=std::move(trialCache);contacts=std::move(trialContacts);
+    completedTicks+=attemptedTicks;++total.substeps;++progress.acceptedSubsteps;
+    if(progress.minAcceptedDt==0.)progress.minAcceptedDt=subdt;
+    progress.minAcceptedDt=std::min(progress.minAcceptedDt,subdt);
+    progress.maxAcceptedDt=std::max(progress.maxAcceptedDt,subdt);
+    total.minGap=std::min(total.minGap,d.minGap);total.maxForce=std::max(total.maxForce,d.maxForce);
+    total.energyAtEnd=d.energyAtEnd;total.activePairs=d.activePairs;
+    total.elasticContactEnergy=d.elasticContactEnergy;total.contacts=d.contacts;
+    total.slidingContacts=d.slidingContacts;total.rollingContacts=d.rollingContacts;
+    total.maxForceResidualRatio=std::max(total.maxForceResidualRatio,d.maxForceResidualRatio);
+    total.maxTorqueResidualRatio=std::max(total.maxTorqueResidualRatio,d.maxTorqueResidualRatio);
+    total.contactGapViolation=std::max(total.contactGapViolation,d.contactGapViolation);
+    total.lubricationDissipation+=weight*d.lubricationDissipation;
+    total.contactDissipation+=weight*d.contactDissipation;
+    addMatrix(total.pairMoment,d.pairMoment,weight);
+    addMatrix(total.attractiveMoment,d.attractiveMoment,weight);
+    addMatrix(total.repulsiveMoment,d.repulsiveMoment,weight);
+    addMatrix(total.lubricationMoment,d.lubricationMoment,weight);
+    addMatrix(total.contactNormalMoment,d.contactNormalMoment,weight);
+    addMatrix(total.contactTangentialMoment,d.contactTangentialMoment,weight);
+    // This is nonlinear-work adaptation, not a claim of local truncation-error
+    // control. Acceptance is unchanged: an expensive converged interval is
+    // retained, while the next solve is shortened. A rejection starts an eight
+    // accepted-interval cooldown so four easy steps cannot immediately return
+    // to the timestep that just failed. Carry that cooldown across LB calls.
+    intervalTicks=attemptedTicks;
+    if(d.newtonIterations>=costlyNewton && intervalTicks>1) {
+      intervalTicks/=2;progress.easyAcceptedSteps=0;
+      progress.growthCooldown=std::max(progress.growthCooldown,4);
+    }else {
+      if(progress.growthCooldown>0)--progress.growthCooldown;
+      progress.easyAcceptedSteps=d.newtonIterations<=easyNewton?std::min(4,progress.easyAcceptedSteps+1):0;
+      if(progress.growthCooldown==0 && progress.easyAcceptedSteps>=4 && intervalTicks<=maximumIntervalTicks/2
+          && completedTicks%(2*intervalTicks)==0) {
+        intervalTicks*=2;progress.easyAcceptedSteps=0;
+      }
+    }
+    progress.nextSubstepDt=dt*(double(intervalTicks)/ticks);
+  }
+  if(completedTicks==ticks) {
+    bodies=std::move(working);if(persistentCache)*persistentCache=std::move(cache);
+    if(persistentContacts)*persistentContacts=std::move(contacts);
+    if(controller)*controller=progress;
+    return total;
+  }
+  // A failed outer interval is still atomic to the LB caller. Earlier accepted
+  // substeps are retained during recovery, but cannot commit half an LB step.
+  diagnosticScope.flushFailure();
+  writeOuterOutcome(settings,time,dt,ticks,false);
+  std::ostringstream message;message<<"Particle solve failed at t="
+      <<time+dt*(double(completedTicks)/ticks)<<" s after "<<total.substeps
+      <<" accepted particle intervals and "<<progress.rejectedSubsteps
+      <<" rejected attempts; minimum dt_particle="<<finestDt
+      <<" s and fixed dt_LB="<<dt<<" s: "<<failure
+      <<". The outer LB state was not committed.";
+  throw std::runtime_error(message.str());
+}
+
+} // namespace particle_detail
+
 // Advance one fixed outer LB interval.  Resolved hydrodynamic loads are frozen
 // over this interval; only particle work is subdivided.  There is no global LB
 // timestep alteration, checkpoint, restart, force clipping, or attraction ramp.
@@ -720,7 +879,8 @@ inline ParticleStepDiagnostics advanceParticles(
     std::vector<Body>& bodies,const std::vector<Vec3>& hydroForce,
     const std::vector<Vec3>& hydroTorque,double dt,double time,
     const ParticleStepSettings& settings,std::vector<GapCache>* persistentCache=nullptr,
-    PersistentContactState* persistentContacts=nullptr) {
+    PersistentContactState* persistentContacts=nullptr,
+    ParticleSubstepController* controller=nullptr) {
   validateParticlePairSettings(settings);
   if(bodies.empty())return {};
   if(hydroForce.size()!=bodies.size() || hydroTorque.size()!=bodies.size())
@@ -741,59 +901,15 @@ inline ParticleStepDiagnostics advanceParticles(
   const std::size_t pairs=bodies.size()*(bodies.size()-1)/2;
   if(persistentContacts && !persistentContacts->empty() && persistentContacts->size()!=pairs)
     throw std::invalid_argument("Contact history size does not match ordered particle pairs");
-  PersistentContactState originalContacts=(persistentContacts && persistentContacts->size()==pairs)
-      ?*persistentContacts:PersistentContactState(pairs);
-  std::vector<GapCache> originalCache=(persistentCache && persistentCache->size()==pairs)
-      ?*persistentCache:std::vector<GapCache>(pairs);
-  std::string failure;
-  particle_detail::ParticleDiagnosticScope diagnosticScope(settings);
-  for(int count=1;count<=settings.maxSubsteps;count*=2) {
-    auto working=bodies;auto cache=originalCache;auto contacts=originalContacts;ParticleStepDiagnostics total;
-    total.substeps=count;const double subdt=dt/count;bool okay=true;
-    for(int substep=0;substep<count;++substep) {
-      std::vector<Body> next;ParticleStepDiagnostics d;
-      if(!particle_detail::dispatchImplicitStep(working,hydroForce,hydroTorque,subdt,time+substep*subdt,
-                                       settings,cache,contacts,next,d,failure,time,dt,count,substep)) {okay=false;break;}
-      working=std::move(next);
-      total.minGap=std::min(total.minGap,d.minGap);total.maxForce=std::max(total.maxForce,d.maxForce);
-      total.energyAtEnd=d.energyAtEnd;total.activePairs=d.activePairs;
-      total.elasticContactEnergy=d.elasticContactEnergy;total.contacts=d.contacts;
-      total.slidingContacts=d.slidingContacts;total.rollingContacts=d.rollingContacts;
-      total.maxForceResidualRatio=std::max(total.maxForceResidualRatio,d.maxForceResidualRatio);
-      total.maxTorqueResidualRatio=std::max(total.maxTorqueResidualRatio,d.maxTorqueResidualRatio);
-      total.contactGapViolation=std::max(total.contactGapViolation,d.contactGapViolation);
-      total.newtonIterations+=d.newtonIterations;total.krylovIterations+=d.krylovIterations;
-      total.frictionBranchAttempts+=d.frictionBranchAttempts;
-      total.frictionBranchCorrections+=d.frictionBranchCorrections;
-      total.contactStateUpdates+=d.contactStateUpdates;
-      total.contactActivations+=d.contactActivations;
-      total.contactReleases+=d.contactReleases;
-      total.residualEvaluations+=d.residualEvaluations;
-      const double weight=1./count;
-      total.lubricationDissipation+=weight*d.lubricationDissipation;
-      total.contactDissipation+=weight*d.contactDissipation;
-      particle_detail::addMatrix(total.pairMoment,d.pairMoment,weight);
-      particle_detail::addMatrix(total.attractiveMoment,d.attractiveMoment,weight);
-      particle_detail::addMatrix(total.repulsiveMoment,d.repulsiveMoment,weight);
-      particle_detail::addMatrix(total.lubricationMoment,d.lubricationMoment,weight);
-      particle_detail::addMatrix(total.contactNormalMoment,d.contactNormalMoment,weight);
-      particle_detail::addMatrix(total.contactTangentialMoment,d.contactTangentialMoment,weight);
-    }
-    if(okay) {
-      // Recoverable retries are discarded with the bounded in-memory trace.
-      // Routine successful timesteps produce no diagnostic filesystem traffic.
-      bodies=std::move(working);if(persistentCache)*persistentCache=std::move(cache);
-      if(persistentContacts)*persistentContacts=std::move(contacts);
-      return total;
-    }
-    if(count>settings.maxSubsteps/2)break;
-  }
-  diagnosticScope.flushFailure();
-  particle_detail::writeOuterOutcome(settings,time,dt,settings.maxSubsteps,false);
-  std::ostringstream message;message<<"Particle solve failed within the configured "<<settings.maxSubsteps
-      <<" particle-only subdivisions at t="<<time<<" s and fixed dt_LB="<<dt<<" s: "<<failure
-      <<". The global LB timestep was not changed.";
-  throw std::runtime_error(message.str());
+  return particle_detail::integrateParticleIntervals(bodies,dt,time,settings,
+      persistentCache,persistentContacts,controller,
+      [&](const std::vector<Body>& old,double subdt,double subtime,
+          std::vector<GapCache>& cache,PersistentContactState& contacts,
+          std::vector<Body>& next,ParticleStepDiagnostics& d,std::string& failure,
+          int count,int substep) {
+        return particle_detail::dispatchImplicitStep(old,hydroForce,hydroTorque,subdt,subtime,
+            settings,cache,contacts,next,d,failure,time,dt,count,substep);
+      });
 }
 
 } // namespace graphite

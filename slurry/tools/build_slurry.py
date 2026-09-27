@@ -16,15 +16,17 @@ from consolidate_docs import archive_obsolete_docs
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--mode', choices=['mpi', 'serial'], default='mpi')
+    p.add_argument('--mode', choices=['mpi', 'hybrid', 'serial'], default='mpi',
+                   help='MPI ranks (default), MPI ranks with OpenMP threads, or serial')
     p.add_argument('--particle-solver', choices=['petsc', 'legacy'], default='petsc',
                    help='PETSc backend (default), or old backend for controlled comparison')
     p.add_argument('--jobs', type=int, default=int(os.environ.get('SLURRY_BUILD_JOBS', os.environ.get('SLURM_CPUS_PER_TASK', '4'))))
     a = p.parse_args()
+    uses_mpi = a.mode in ('mpi', 'hybrid')
     if a.jobs < 1: p.error('--jobs must be positive')
     if any(c.isspace() for c in str(BASE)):
         p.error('OpenLB Makefiles require an installation path without whitespace')
-    compiler = os.environ.get('SLURRY_CXX', 'mpicxx' if a.mode == 'mpi' or a.particle_solver == 'petsc' else 'g++')
+    compiler = os.environ.get('SLURRY_CXX', 'mpicxx' if uses_mpi or a.particle_solver == 'petsc' else 'g++')
     compiler_path = shutil.which(compiler)
     if not compiler_path: p.error('Compiler not found: ' + compiler)
     if not (OLB / 'src/case/case.h').is_file(): p.error('OpenLB 1.9r0 source not found at ' + str(OLB))
@@ -34,17 +36,17 @@ def main():
     toolchain['particle_solver'] = a.particle_solver
     petsc = None
     if a.particle_solver == 'petsc':
-        if a.mode == 'mpi':
+        if uses_mpi:
             # Dependency setup is part of the one common build. It reuses a
             # matching installation, or installs PETSc with this MPI toolchain.
             # Calling in-process retains PETSC_DIR/PETSC_ARCH for the build.
             from setup_petsc import main as prepare_petsc
             prepare_petsc(['--jobs', str(a.jobs)])
         print('Checking PETSc compiler, link libraries, scalar type, and MPI runtime...', flush=True)
-        petsc = petsc_preflight(discover_petsc(), compiler_path, a.mode == 'mpi')
+        petsc = petsc_preflight(discover_petsc(), compiler_path, uses_mpi)
         toolchain['petsc'] = petsc
         print('PETSc ' + petsc['version'] + ' preflight passed', flush=True)
-    if a.mode == 'mpi':
+    if uses_mpi:
         toolchain['mpi'] = wrapper_command(compiler_path)
     build_root = BASE / 'build/slurry'
     build_root.mkdir(parents=True, exist_ok=True)
@@ -94,7 +96,7 @@ def main():
         # older mtime. Exact-content cache hits above need no recompilation.
         command = ['make', '--always-make', '-f', str(BASE / 'slurry/Makefile'), '-j' + str(a.jobs),
                    'OLB_ROOT=' + str(OLB), 'BUILD_DIR=' + str(work), 'CXX=' + compiler_path,
-                   'CC=gcc', 'PARALLEL_MODE=' + ('MPI' if a.mode == 'mpi' else 'OFF'),
+                   'CC=gcc', 'PARALLEL_MODE=' + {'mpi': 'MPI', 'hybrid': 'HYBRID', 'serial': 'OFF'}[a.mode],
                    'PLATFORMS=CPU_SISD', 'CUDA_CXX=', 'FEATURES=', 'FLOATING_POINT_TYPE=double']
         command += ['PARTICLE_SOLVER=' + a.particle_solver]
         if petsc:
@@ -111,7 +113,7 @@ def main():
                                '. Retry after edits finish; details in ' + str(work / 'build_changed_inputs.json'))
         executable = work / 'slurry'
         info = json.loads(tool_output([str(executable), '--build-info']))
-        if info['mpi_enabled'] != (a.mode == 'mpi'): raise RuntimeError('MPI build-mode verification failed')
+        if info['mpi_enabled'] != uses_mpi: raise RuntimeError('MPI build-mode verification failed')
         if info.get('surface_adhesion_version') != 1:
             raise RuntimeError('Surface adhesion capability verification failed')
         if info.get('particle_solver') != a.particle_solver:

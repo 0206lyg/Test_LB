@@ -35,7 +35,7 @@ struct Config {
   double contact_gap_tolerance=1e-12;
   std::uint64_t max_steps=0,sample_every=20,vtk_every=0,checkpoint_every=0,checkpoint_keep=2;
   double checkpoint_seconds=21000.; // 350 minutes of wall time; step-based saves disabled.
-  unsigned particle_max_substeps=32,particle_max_iterations=20,particle_max_krylov_iterations=120;
+  unsigned particle_min_substeps=1,particle_max_substeps=32,particle_max_iterations=20,particle_max_krylov_iterations=120;
   std::string particle_solver="petsc";
   bool solver_diagnostics=true;
   std::string output_dir="run",particles_csv,restart_dir;
@@ -94,7 +94,7 @@ inline Config parseConfig(int argc,char**argv) {
       c.rough_contact_enabled=v=="1";continue;
     }
 #define INTEGER(k) if(key==#k){if(v.empty()||v[0]=='-')throw std::runtime_error("Negative config: " #k);c.k=std::stoull(v);continue;}
-    INTEGER(max_steps) INTEGER(sample_every) INTEGER(vtk_every) INTEGER(checkpoint_every) INTEGER(checkpoint_keep) INTEGER(particle_max_substeps) INTEGER(particle_max_iterations) INTEGER(particle_max_krylov_iterations)
+    INTEGER(max_steps) INTEGER(sample_every) INTEGER(vtk_every) INTEGER(checkpoint_every) INTEGER(checkpoint_keep) INTEGER(particle_min_substeps) INTEGER(particle_max_substeps) INTEGER(particle_max_iterations) INTEGER(particle_max_krylov_iterations)
 #undef INTEGER
     if(key=="output_dir"){c.output_dir=v;continue;}
     if(key=="particles_csv"){c.particles_csv=v;continue;}
@@ -108,12 +108,22 @@ inline Config parseConfig(int argc,char**argv) {
     &&c.thickness<=c.diameter&&c.rho_particle>0&&c.rho_fluid>0&&c.dynamic_viscosity>0&&c.nu_lattice>0
     &&c.target_mach>0&&c.time_step_s>=0&&c.epsilon_cells>0&&c.hamaker>=0&&c.sigma_lj>0
     &&c.switch_gap>c.sigma_lj&&c.cutoff_gap>c.switch_gap&&c.end_strain>0&&c.sample_every>0
-    &&c.particle_max_substeps>0&&c.particle_max_iterations>0&&c.particle_max_krylov_iterations>0&&c.particle_tolerance>0&&c.particle_tolerance<1
+    &&c.particle_min_substeps>0&&c.particle_max_substeps>0&&c.particle_max_iterations>0&&c.particle_max_krylov_iterations>0&&c.particle_tolerance>0&&c.particle_tolerance<1
     &&c.lubrication_cutoff_cells>=0&&c.roughness_gap>0&&c.roughness_gap<c.cutoff_gap
     &&c.sliding_friction>=0&&c.tangential_stiffness>0&&c.rolling_length>=0&&c.rolling_yield_angle>0
     &&c.particle_force_absolute_tolerance>0&&c.particle_torque_absolute_tolerance>0
     &&c.contact_gap_tolerance>0&&c.contact_gap_tolerance<c.roughness_gap))
     throw std::runtime_error("Invalid geometric/material/solver configuration");
+  // Particle intervals lie on a dyadic grid: round the requested minimum
+  // count upward, but never demand a finer grid than max_substeps permits.
+  unsigned minimumDyadic=1;
+  while(minimumDyadic<c.particle_min_substeps) {
+    if(minimumDyadic>c.particle_max_substeps/2)
+      throw std::runtime_error("particle_min_substeps rounded up to a power of two exceeds particle_max_substeps");
+    minimumDyadic*=2;
+  }
+  if(minimumDyadic>c.particle_max_substeps)
+    throw std::runtime_error("particle_min_substeps must not exceed particle_max_substeps");
   if(!(c.local_gap>0&&c.local_gap_fraction>=0&&c.local_gap_fraction<=1
        &&c.local_switch_excess_gap>=0&&c.local_cutoff_excess_gap>c.local_switch_excess_gap))
     throw std::runtime_error("Require local_gap > 0, 0 <= local_gap_fraction <= 1, and 0 <= local_switch_excess_gap < local_cutoff_excess_gap");

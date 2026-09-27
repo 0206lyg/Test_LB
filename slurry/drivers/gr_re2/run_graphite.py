@@ -195,6 +195,7 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
                 'contact_gap_tolerance_m':1e-12}
     for key,value in defaults.items():
         cfg['numerics'].setdefault(key,value)
+    cfg['numerics'].setdefault('particle_min_substeps', 1)
     cfg['numerics'].setdefault('particle_solver', 'petsc')
     cfg['numerics'].setdefault('particle_max_krylov_iterations', 120)
     cfg['numerics'].setdefault('solver_diagnostics', True)
@@ -258,6 +259,10 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
     integer(p['count'], 'particles.count', 1)
     integer(p['seed'], 'particles.seed')
     integer(n['particle_max_substeps'], 'particle_max_substeps', 1)
+    integer(n['particle_min_substeps'], 'particle_min_substeps', 1)
+    minimum_dyadic = 1 << (n['particle_min_substeps'] - 1).bit_length()
+    if minimum_dyadic > n['particle_max_substeps']:
+        raise ValueError('particle_min_substeps rounded up to a power of two must not exceed particle_max_substeps')
     integer(n['particle_max_iterations'], 'particle_max_iterations', 1)
     integer(n['particle_max_krylov_iterations'], 'particle_max_krylov_iterations', 1)
     if n['particle_solver'] not in ('petsc', 'legacy'):
@@ -345,6 +350,7 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         'particle_force_absolute_tolerance_N':n['particle_force_absolute_tolerance_N'],
         'particle_torque_absolute_tolerance_N_m':n['particle_torque_absolute_tolerance_N_m'],
         'contact_gap_tolerance_m':n['contact_gap_tolerance_m'],
+        'particle_min_substeps':n['particle_min_substeps'],
         'particle_max_substeps':n['particle_max_substeps'],
         'particle_max_iterations':n['particle_max_iterations'],
         'particle_max_krylov_iterations':n['particle_max_krylov_iterations'],
@@ -391,6 +397,7 @@ def solver_values(cfg, output, particles, max_steps):
         'dynamic_viscosity':f['dynamic_viscosity_Pa_s'],
         'nu_lattice':n['nu_lattice'], 'target_mach':n['target_mach'], 'time_step_s':n['time_step_s'],
         'epsilon_cells':n['epsilon_cells'],
+        'particle_min_substeps':n['particle_min_substeps'],
         'particle_max_substeps':n['particle_max_substeps'],
         'particle_max_iterations':n['particle_max_iterations'],
         'particle_max_krylov_iterations':n['particle_max_krylov_iterations'],

@@ -192,6 +192,8 @@ void simulate(const Config& c){
   solver.rough.rollingLength=c.rolling_length;
   solver.rough.rollingYieldAngle=c.rolling_yield_angle;
   std::vector<graphite::GapCache> pairCache;
+  graphite::ParticleSubstepController particleController;
+  particleController.maxSubstepDt=u.dt/c.particle_min_substeps;
   graphite::PersistentContactState contacts(bodies.size()*(bodies.size()-1)/2);
   auto pair=graphite::evaluateParticleState(bodies,0.,solver,&pairCache,&contacts);
   std::vector<graphite::Vec3> angularAcceleration(bodies.size()),force(bodies.size()),torque(bodies.size());
@@ -236,7 +238,7 @@ void simulate(const Config& c){
      <<" force_absolute_tolerance_N="<<c.particle_force_absolute_tolerance
      <<" torque_absolute_tolerance_N_m="<<c.particle_torque_absolute_tolerance
      <<" contact_gap_tolerance_m="<<c.contact_gap_tolerance
-     <<" max_substeps="<<c.particle_max_substeps<<" max_newton_iterations="<<c.particle_max_iterations
+     <<" min_substeps="<<c.particle_min_substeps<<" max_substeps="<<c.particle_max_substeps<<" max_newton_iterations="<<c.particle_max_iterations
      <<" max_krylov_iterations="<<c.particle_max_krylov_iterations
      <<" solver_diagnostics="<<c.solver_diagnostics<<std::endl;
   std::ofstream history,poses;bool appendHistory=false,appendPoses=false;
@@ -345,9 +347,13 @@ void simulate(const Config& c){
     const auto& hydro=coupling.particleHydrodynamics();
     for(std::size_t i=0;i<bodies.size();++i){force[i]=hydro[i].force;torque[i]=hydro[i].torque;}
     std::vector<graphite::Vec3> oldOmega;oldOmega.reserve(bodies.size());for(const auto& b:bodies)oldOmega.push_back(b.omega);
-    auto begin=Clock::now();pair=graphite::advanceParticles(bodies,force,torque,u.dt,step*u.dt,solver,&pairCache,&contacts);
+    auto begin=Clock::now();pair=graphite::advanceParticles(bodies,force,torque,u.dt,step*u.dt,solver,&pairCache,&contacts,&particleController);
     for(std::size_t i=0;i<bodies.size();++i)angularAcceleration[i]=graphite::scale(graphite::sub(bodies[i].omega,oldOmega[i]),1/u.dt);
-    syncParticles(ps,bodies);particleSeconds+=seconds(begin);
+    syncParticles(ps,bodies);const double particleStepSeconds=seconds(begin);particleSeconds+=particleStepSeconds;
+    if(c.solver_diagnostics)log<<"particle_step="<<step<<" seconds="<<particleStepSeconds
+      <<" accepted_substeps="<<particleController.acceptedSubsteps<<" rejected_substeps="<<particleController.rejectedSubsteps
+      <<" newton_total="<<pair.newtonIterations<<" krylov_total="<<pair.krylovIterations
+      <<" full_residuals_total="<<pair.residualEvaluations<<" next_particle_dt_s="<<particleController.nextSubstepDt<<std::endl;
     // Explicit resolved coupling uses the beginning-of-step particle mask.
     // Pair/lubrication integration is implicit within the unchanged LB step.
     begin=Clock::now();l.setProcessingContext(ProcessingContext::Simulation);
