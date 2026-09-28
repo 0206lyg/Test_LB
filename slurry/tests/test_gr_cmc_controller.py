@@ -27,6 +27,7 @@ def checkpoint(directory, config, step, rate):
     values = DRIVER.solver_values(cfg, directory, directory / 'particles.csv', 0)
     values['interaction_model_version'] = DRIVER.SURFACE_ADHESION_VERSION
     immutable = {key: values[key] for key in DRIVER.SURFACE_CHECKPOINT_KEYS}
+    immutable.update({key: values[key] for key in DRIVER.CMC_CHECKPOINT_KEYS if key in values})
     immutable.update(shear_rate=rate, dt_s=derived['dt_s'],
                      particle_count=cfg['particles']['count'], ranks=1)
     saved = directory / 'checkpoints' / ('checkpoint_%020d' % step)
@@ -141,6 +142,7 @@ class GrCmcControllerTests(unittest.TestCase):
         executable = self.root / 'fake_slurry'
         build_info = {'mpi_enabled': False, 'rough_contact': True,
                       'local_gap_adhesion': True, 'surface_adhesion_version': 1,
+                      'pass_max_version': 1, 'cmc_contact_version': 1,
                       'pure_gr_checkpoint_version': 1, 'particle_solver': 'petsc',
                       'engines': ['pure_gr', 'gr_cmc']}
         executable.write_text(

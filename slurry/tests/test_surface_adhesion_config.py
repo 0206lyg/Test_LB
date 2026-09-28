@@ -84,7 +84,7 @@ class SurfaceAdhesionInputTests(unittest.TestCase):
         for info in ({}, {'local_gap_adhesion': True}, {'surface_adhesion_version': 2}):
             with self.subTest(info=info), self.assertRaisesRegex(ValueError, 'Rebuild'):
                 RUNNER.require_local_adhesion_build(cfg, info)
-        RUNNER.require_local_adhesion_build(cfg, {'surface_adhesion_version': 1})
+        RUNNER.require_local_adhesion_build(cfg, {'surface_adhesion_version': 1, 'pass_max_version': 1})
 
 
 @unittest.skipUnless(shutil.which('g++'), 'C++ integration requires g++')

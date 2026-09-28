@@ -387,6 +387,114 @@ void limitsAndDomains() {
             "incompatible or invalid new-mode parameters must be rejected");
   }
 }
+
+void coatedContactWorkAndEndpoints() {
+  auto bare = parameters();
+  auto coated = bare;
+  coated.contactGap = 4.e-9;
+  const double deltaWork = bare.adhesionWork - planarWork(bare, bare.roughnessGap);
+  const auto b = atGap(coated.contactGap);
+  const double geometricFactor = pi * b.first.axes[0] * b.first.axes[0] / b.first.axes[2];
+  near(g::surfaceBackgroundWork(coated), g::surfaceBackgroundWork(bare), 0., 0.,
+       "moving the mechanical contact does not change the bare work benchmark");
+  for (double fraction : {-.2, 0., .25, .8, 1., 1.1}) {
+    const double h = coated.contactGap + fraction * coated.adhesionRange;
+    near(evaluate(atGap(h), coated).forceI[2],
+         geometricFactor * (planarWork(coated, h) + deltaWork * std::max(0., 1. - fraction)),
+         2.e-18, 2.e-10, "coated opening preserves DeltaW and uses actual H for background");
+  }
+  for (bool generic : {false, true}) {
+    for (double gap : {4.e-9, 4.3e-9, 4.77e-9, 9.e-9, 25.e-9, 450.e-9}) {
+      const auto bodies = atGap(gap, generic);
+      const auto reference = evaluate(bodies, coated);
+      for (double q : {0., .33, 1.}) {
+        auto screened = coated;
+        screened.cohesionRetention = q;
+        const auto result = evaluate(bodies, screened);
+        near(result.ua, q * reference.ua, 1.e-29, 1.e-14, "complete attraction is screened");
+        nearVector(result.forceAttractiveI, g::scale(reference.forceAttractiveI, q),
+                   1.e-21, 1.e-14, "screened attractive force");
+        nearVector(result.torqueAttractiveI, g::scale(reference.torqueAttractiveI, q),
+                   1.e-27, 1.e-14, "screened attractive first torque");
+        nearVector(result.torqueAttractiveJ, g::scale(reference.torqueAttractiveJ, q),
+                   1.e-27, 1.e-14, "screened attractive second torque");
+        require(result.ur == reference.ur && result.forceRepulsiveI == reference.forceRepulsiveI &&
+                result.torqueRepulsiveI == reference.torqueRepulsiveI &&
+                result.torqueRepulsiveJ == reference.torqueRepulsiveJ,
+                "cohesion screening leaves repulsion bitwise unchanged");
+        if (q == 0.) {
+          require(result.ua == 0. && g::norm(result.forceAttractiveI) == 0. &&
+                  g::norm(result.torqueAttractiveI) == 0. && g::norm(result.torqueAttractiveJ) == 0.,
+                  "screened endpoint has no adhesion or RE2 attraction preload");
+        }
+      }
+      auto explicitBare = bare;
+      explicitBare.contactGap = bare.roughnessGap;
+      const auto old = evaluate(bodies, bare), explicitResult = evaluate(bodies, explicitBare);
+      require(old.energy == explicitResult.energy && old.forceI == explicitResult.forceI &&
+              old.torqueI == explicitResult.torqueI && old.torqueJ == explicitResult.torqueJ,
+              "zero-offset explicit contact is bitwise equal to pure-Gr default");
+    }
+  }
+}
+
+void coatedContactConservativeDerivatives() {
+  auto p = parameters();
+  p.contactGap = 4.e-9;
+  for (double q : {0., .37, 1.}) {
+    p.cohesionRetention = q;
+    for (double h : {3.9e-9, 4.3e-9, 4.9e-9, 9.e-9, 25.e-9, 450.e-9}) {
+      std::vector<Bodies> pairs{atGap(h), atGap(h, true), offsetPair(.5 * 1.65e-6, h)};
+      auto ee = atGap(h);
+      ee.first.rotation = ee.second.rotation = g::rotationIncrement({0., .5 * pi, 0.});
+      const g::Vec3 n{0., 0., 1.};
+      ee.second.position = g::add(ee.first.position,
+          g::add(g::add(support(ee.first, n), support(ee.second, n)), g::scale(n, h)));
+      pairs.push_back(ee);
+      for (const auto& b : pairs) {
+        const auto result = evaluate(b, p);
+        for (int coordinate = 0; coordinate < 9; ++coordinate) {
+          const double epsilon = coordinate < 3 ? 2.e-14 : 2.e-8;
+          const double derivative =
+              (evaluate(perturb(b, coordinate, epsilon), p).energy -
+               evaluate(perturb(b, coordinate, -epsilon), p).energy) / (2. * epsilon);
+          // Repulsion-only energies are much smaller than adhesive energies;
+          // use a separate absolute floor so q=0 derivatives are still tested.
+          const double floor = q == 0. ? (coordinate < 3 ? 2.e-24 : 2.e-30)
+                                      : (coordinate < 3 ? 2.e-16 : 2.e-22);
+          near(gradient(result, coordinate), derivative, floor, 2.e-4,
+               "coated FF/EE/offset conservative derivative " + std::to_string(coordinate));
+        }
+        const auto moment = g::sub(g::add(result.torqueI, result.torqueJ),
+            g::cross(g::sub(b.second.position, b.first.position), result.forceI));
+        nearVector(moment, {}, (q == 0. ? 1.e-32 : 2.e-25) + 2.e-11 * g::norm(result.torqueI),
+                   0., "coated contact angular momentum conservation");
+      }
+    }
+  }
+}
+
+void coatedContactDomains() {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  const auto inf = std::numeric_limits<double>::infinity();
+  const std::vector<std::function<void(g::PairParameters&)>> corruptions{
+      [](auto& p) { p.contactGap = -1.e-9; },
+      [](auto& p) { p.contactGap = 1.e-9; },
+      [](auto& p) { p.contactGap = 4.9e-9; },
+      [=](auto& p) { p.contactGap = nan; },
+      [=](auto& p) { p.contactGap = inf; },
+      [](auto& p) { p.cohesionRetention = -.1; },
+      [](auto& p) { p.cohesionRetention = 1.1; },
+      [=](auto& p) { p.cohesionRetention = nan; },
+      [=](auto& p) { p.cohesionRetention = inf; },
+      [](auto& p) { p.contactGap = 4.e-9; p.freeCmcRepulsionPressure = 100.; },
+      [](auto& p) { p.cohesionRetention = .5; p.freeCmcRepulsionPressure = 100.; }};
+  for (const auto& corrupt : corruptions) {
+    auto p = parameters();
+    corrupt(p);
+    rejects([&] { g::validatePairParameters(p); }, "invalid coated contact or mixed free-CMC models rejected");
+  }
+}
 } // namespace
 
 int main() {
@@ -397,7 +505,10 @@ int main() {
       {"rigid-motion covariance and particle exchange", covarianceAndSwap},
       {"junction continuity and unchanged far field", switchesAndFarField},
       {"analytic offset-flake attraction correction", offsetGeometry},
-      {"zero-excess limits and invalid parameter rejection", limitsAndDomains}};
+      {"zero-excess limits and invalid parameter rejection", limitsAndDomains},
+      {"coated contact work and screened endpoints", coatedContactWorkAndEndpoints},
+      {"coated FF/EE/offset force and torque derivatives", coatedContactConservativeDerivatives},
+      {"coated contact parameter and model compatibility", coatedContactDomains}};
   int failures = 0;
   for (const auto& check : checks) {
     try { check.second(); std::cout << "PASS " << check.first << '\n'; }

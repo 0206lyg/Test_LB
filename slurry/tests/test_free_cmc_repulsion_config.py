@@ -1,4 +1,4 @@
-"""Free-CMC SI conversion, solver wiring, and restart compatibility."""
+"""Coated-contact cohesion screening, migration, and solver-policy wiring."""
 import copy
 import importlib.util
 import json
@@ -14,10 +14,9 @@ SPEC = importlib.util.spec_from_file_location(
     'free_cmc_runner', ROOT/'slurry/drivers/gr_re2/run_graphite.py')
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
-PRESSURE = 'free_cmc_repulsion_pressure'
-LENGTH = 'free_cmc_repulsion_length'
-VERSION = 'free_cmc_repulsion_version'
-R = 8.31446261815324
+GAP = 'cmc_contact_gap'
+RETENTION = 'cmc_cohesion_retention'
+VERSION = 'cmc_contact_version'
 
 
 def case(cmc=None):
@@ -35,175 +34,142 @@ def resolved(cmc=None, source=None):
 
 def checkpoint(cfg, meta, values):
     immutable = {key: values[key] for key in RUNNER.SURFACE_CHECKPOINT_KEYS
-                 if key in values}
+                 + RUNNER.CMC_CHECKPOINT_KEYS if key in values}
     immutable['interaction_model_version'] = RUNNER.SURFACE_ADHESION_VERSION
     immutable.update(dt_s=meta['dt_s'], particle_count=cfg['particles']['count'], ranks=1)
-    if PRESSURE in values:
-        immutable.update({PRESSURE: values[PRESSURE], LENGTH: values[LENGTH], VERSION: 1})
     return {'step': 1, 'immutable_config': immutable}
 
 
 class FreeCmcConcentrationTests(unittest.TestCase):
-    def test_g_per_litre_is_kg_per_cubic_metre_without_extra_thousand(self):
-        cfg, meta, values = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 13.2})
-        state = meta['cmc']['free_repulsion']
-        expected = .5*.7/.218*R*298.15*13.2
-        self.assertEqual(state['free_concentration_kg_m3'], 13.2)
-        self.assertAlmostEqual(state['repeat_unit_concentration_mol_m3'], 13.2/.218)
-        self.assertAlmostEqual(state['nominal_charge_concentration_mol_m3'], .7*13.2/.218)
-        self.assertAlmostEqual(state['bulk_osmotic_pressure_Pa'], expected)
-        self.assertAlmostEqual(state['effective_repulsion_pressure_Pa'], expected)
-        self.assertAlmostEqual(values[PRESSURE], expected)
-        self.assertEqual(values[LENGTH], 5e-9)
-        self.assertAlmostEqual(state['surface_energy_at_contact_J_m2']/(expected*5e-9), 1)
-        self.assertAlmostEqual(state['pair_energy_per_derjaguin_length_J_m'] /
-                               (math.pi*expected*(5e-9)**2), 1)
-        self.assertEqual(state['model_version'], 1)
-        self.assertEqual(state['temperature_K'], cfg['fluid']['temperature_K'])
-        self.assertTrue(state['active'])
-        self.assertTrue(meta['cmc']['free_cmc_physics_enabled'])
+    def test_independent_uncapped_concentration_and_exact_endpoints(self):
+        for free, expected in ((0, 1), (6.6, .5), (13.2, 0), (123, 0), (1e308, 0)):
+            cfg, meta, values = resolved({'adsorbed_g_L': 3.8, 'free_g_L': free})
+            state = meta['cmc']['free_cohesion']
+            self.assertEqual(state['free_concentration_kg_m3'], free)
+            self.assertEqual(cfg['cmc']['free_g_L'], free)
+            self.assertEqual(values[RETENTION], expected)
+            self.assertEqual(state['cohesion_retention'], expected)
+            self.assertEqual(values[GAP], 4e-9)
+            self.assertFalse(any(key.startswith('free_cmc_repulsion') for key in values))
 
-    def test_free_concentration_is_independent_and_not_capped_by_adsorption(self):
-        original = case({'adsorbed_g_L': 0, 'free_g_L': 123.0})
-        _, baseline, _ = resolved(source=original)
-        original['cmc'].update(adsorbed_g_L=99, adsorbed_saturation_g_L=2)
-        original['particles']['target_solid_mass_fraction'] = .2
-        original['fluid']['density_kg_m3'] = 1100
-        _, changed, _ = resolved(source=original)
-        self.assertEqual(changed['cmc']['free_g_L'], 123)
-        self.assertEqual(changed['cmc']['free_repulsion'], baseline['cmc']['free_repulsion'])
-
-    def test_pressure_scales_with_concentration_strength_and_temperature(self):
-        _, _, reference = resolved({'free_g_L': 1.2})
-        source = case({'free_g_L': 2.4, 'free_repulsion': {'strength': 3}})
-        source['fluid']['temperature_K'] *= 1.5
-        _, _, values = resolved(source=source)
-        self.assertAlmostEqual(values[PRESSURE]/reference[PRESSURE], 9)
-
-    def test_length_changes_energy_without_changing_osmotic_pressure(self):
-        _, m1, v1 = resolved({'free_g_L': 2})
-        _, m2, v2 = resolved({'free_g_L': 2, 'free_repulsion': {'decay_length_m': 1e-8}})
-        self.assertEqual(v1[PRESSURE], v2[PRESSURE])
-        a, b = m1['cmc']['free_repulsion'], m2['cmc']['free_repulsion']
-        self.assertAlmostEqual(b['surface_energy_at_contact_J_m2']/a['surface_energy_at_contact_J_m2'], 2)
-        self.assertAlmostEqual(b['pair_energy_per_derjaguin_length_J_m']/a['pair_energy_per_derjaguin_length_J_m'], 4)
-
-    def test_zero_disabled_and_zero_strength_preserve_solver_dictionary(self):
-        _, _, baseline = resolved({'adsorbed_g_L': 1.2})
-        for cmc in ({'free_g_L': 0},
-                    {'free_g_L': 10, 'free_repulsion': {'enabled': False}},
-                    {'free_g_L': 10, 'free_repulsion': {'strength': 0}}):
-            with self.subTest(cmc=cmc):
-                _, meta, values = resolved(dict(cmc, adsorbed_g_L=1.2))
-                self.assertEqual(values, baseline)
-                self.assertFalse(meta['cmc']['free_cmc_physics_enabled'])
-                self.assertFalse(meta['cmc']['free_repulsion']['active'])
-
-    def test_active_repulsion_does_not_change_adhesion_or_contact_parameters(self):
+    def test_only_screening_changes_with_free_concentration(self):
         _, _, baseline = resolved({'adsorbed_g_L': 1.2})
         _, _, values = resolved({'adsorbed_g_L': 1.2, 'free_g_L': 10})
-        self.assertEqual({key: value for key, value in values.items()
-                          if key not in (PRESSURE, LENGTH)}, baseline)
+        self.assertEqual({key for key in values if values[key] != baseline[key]}, {RETENTION})
 
-    def test_roundtrip_and_comment_fields_preserve_user_input(self):
-        source = case({'free_g_L': 2, 'free_repulsion': {'_note': 'trial barrier', 'strength': .7}})
+    def test_disabled_screening_preserves_adsorbed_contact_model(self):
+        _, _, baseline = resolved({'adsorbed_g_L': 1.2})
+        _, meta, values = resolved({'adsorbed_g_L': 1.2, 'free_g_L': 123,
+                                    'free_cohesion': {'enabled': False}})
+        self.assertEqual(values, baseline)
+        self.assertFalse(meta['cmc']['free_cmc_physics_enabled'])
+        self.assertEqual(meta['cmc']['free_g_L'], 123)
+
+    def test_smooth_fraction_and_endpoint_scale(self):
+        source = case({'free_g_L': 3, 'free_cohesion': {'nonadhesive_concentration_g_L': 12}})
+        _, _, values = resolved(source=source)
+        u = .25
+        self.assertAlmostEqual(values[RETENTION], 1-10*u**3+15*u**4-6*u**5)
+        source['fluid']['temperature_K'] *= 1.5
+        source['fluid']['density_kg_m3'] *= 1.2
+        self.assertEqual(resolved(source=source)[2][RETENTION], values[RETENTION])
+
+    def test_roundtrip_comments_and_requested_minimum_gap(self):
+        source = case({'adsorbed_g_L': 3.8, 'free_g_L': 2,
+                       'free_cohesion': {'_note': 'effective closure'}})
         before = copy.deepcopy(source)
         cfg, meta, _ = resolved(source=source)
         cfg2, meta2, _ = resolved(source=json.loads(json.dumps(cfg)))
         self.assertEqual(source, before)
         self.assertEqual(cfg, cfg2)
         self.assertEqual(meta, meta2)
-        self.assertEqual(cfg['cmc']['free_repulsion']['_note'], 'trial barrier')
-        self.assertNotIn('_note', meta['cmc']['free_repulsion'])
+        self.assertEqual(meta2['requested_minimum_gap_m'], 3e-9)
+        self.assertEqual(meta2['effective_minimum_gap_m'], 4e-9)
+        self.assertEqual(cfg['cmc']['free_cohesion']['_note'], 'effective closure')
+        self.assertNotIn('_note', meta['cmc']['free_cohesion'])
+        cfg['particles']['minimum_gap_m'] = 5e-9
+        cfg3, meta3, _ = resolved(source=cfg)
+        self.assertEqual(meta3['requested_minimum_gap_m'], 5e-9)
+        self.assertEqual(cfg3['particles']['minimum_gap_m'], 5e-9)
 
-    def test_invalid_nested_inputs_are_rejected(self):
+    def test_invalid_nested_inputs_and_legacy_law_are_rejected(self):
         for value in (None, [], True, 1, 'yes'):
             with self.subTest(section=value), self.assertRaises(ValueError):
-                resolved({'free_g_L': 1, 'free_repulsion': value})
+                resolved({'free_cohesion': value})
         for value in (0, 1, 'true', None):
             with self.subTest(enabled=value), self.assertRaises(ValueError):
-                resolved({'free_repulsion': {'enabled': value}})
-        for key in ('strength', 'decay_length_m', 'degree_of_substitution',
-                    'repeat_unit_molar_mass_kg_mol', 'osmotic_coefficient'):
-            for value in (-1, math.nan, math.inf, -math.inf, True, '0.5', None, []):
-                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
-                    resolved({'free_g_L': 1, 'free_repulsion': {key: value}})
-        for key in ('decay_length_m', 'repeat_unit_molar_mass_kg_mol'):
-            with self.subTest(zero=key), self.assertRaises(ValueError):
-                resolved({'free_g_L': 1, 'free_repulsion': {key: 0}})
-        with self.assertRaisesRegex(ValueError, 'Unknown cmc.free_repulsion'):
-            resolved({'free_repulsion': {'strenght': 1}})
-
-    def test_nonfinite_derived_pressure_is_rejected(self):
-        for cmc in ({'free_g_L': 1e308},
-                    {'free_g_L': 1, 'free_repulsion': {'strength': 1e308}},
-                    {'free_g_L': 1, 'free_repulsion': {'repeat_unit_molar_mass_kg_mol': 1e-320}}):
-            with self.subTest(cmc=cmc), self.assertRaises(ValueError):
-                resolved(cmc)
-
-    def test_active_energy_underflow_is_rejected_instead_of_silently_disabling(self):
-        with self.assertRaises(ValueError):
-            resolved({'free_g_L': 1e-320})
-
-    def test_repulsion_requires_the_contact_gap_reference(self):
-        source = case({'free_g_L': 2})
-        source['rough_contact']['enabled'] = False
-        source['interaction'].pop('surface_adhesion')
-        for key in RUNNER.SURFACE_ADHESION_DEFAULTS:
-            source['interaction'].pop(key)
-        with self.assertRaises(ValueError):
-            resolved(source=source)
+                resolved({'free_cohesion': {'enabled': value}})
+        for value in (0, -1, math.nan, math.inf, True, '13.2', None, []):
+            with self.subTest(endpoint=value), self.assertRaises(ValueError):
+                resolved({'free_cohesion': {'nonadhesive_concentration_g_L': value}})
+        with self.assertRaisesRegex(ValueError, 'Unknown cmc.free_cohesion'):
+            resolved({'free_cohesion': {'strength': 1}})
+        for old in ({}, {'enabled': False}, {'strength': 1}):
+            with self.subTest(old=old), self.assertRaisesRegex(ValueError, 'obsolete exponential'):
+                resolved({'free_repulsion': old})
 
 
 class FreeCmcCompatibilityTests(unittest.TestCase):
-    def test_active_case_requires_new_executable_capability(self):
-        cfg, _, _ = resolved({'free_g_L': 1})
-        for version in (None, 0, 2):
-            info = {'surface_adhesion_version': 1}
-            if version is not None:
-                info[VERSION] = version
-            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'Rebuild'):
+    def test_build_capabilities(self):
+        cfg, _, _ = resolved({'adsorbed_g_L': 1})
+        for info in ({}, {'surface_adhesion_version': 1, 'pass_max_version': 1},
+                     {'surface_adhesion_version': 1, 'pass_max_version': 1, VERSION: 2}):
+            with self.subTest(info=info), self.assertRaisesRegex(ValueError, 'Rebuild'):
                 RUNNER.require_local_adhesion_build(cfg, info)
-        RUNNER.require_local_adhesion_build(cfg, {'surface_adhesion_version': 1, VERSION: 1})
+        RUNNER.require_local_adhesion_build(cfg, {
+            'surface_adhesion_version': 1, 'pass_max_version': 1, VERSION: 1})
         zero, _, _ = resolved({'free_g_L': 0})
-        RUNNER.require_local_adhesion_build(zero, {'surface_adhesion_version': 1})
+        RUNNER.require_local_adhesion_build(zero, {'surface_adhesion_version': 1, 'pass_max_version': 1})
 
-    def test_unchanged_active_and_old_zero_checkpoints_can_restart(self):
+    def test_same_physics_and_old_pure_checkpoints_restart(self):
         for cmc in (None, {'free_g_L': 0}, {'adsorbed_g_L': 3.8, 'free_g_L': 13.2}):
             with self.subTest(cmc=cmc):
                 cfg, meta, values = resolved(cmc)
-                self.assertTrue(RUNNER.validate_restart(cfg, meta, checkpoint(cfg, meta, values), 1))
+                saved = checkpoint(cfg, meta, values)
+                self.assertTrue(RUNNER.validate_restart(cfg, meta, saved, 1))
+                cfg['numerics']['pass_max'] = 0
+                self.assertTrue(RUNNER.validate_restart(cfg, meta, saved, 1))
 
-    def test_changed_repulsion_is_rejected_including_enable_and_disable(self):
-        cfg, meta, values = resolved({'free_g_L': 2})
+    def test_changed_cohesion_contact_or_old_exponential_cannot_restart(self):
+        cfg, meta, values = resolved({'adsorbed_g_L': 1, 'free_g_L': 2})
         saved = checkpoint(cfg, meta, values)
-        for cmc in ({'free_g_L': 0}, {'free_g_L': 3},
-                    {'free_g_L': 2, 'free_repulsion': {'enabled': False}},
-                    {'free_g_L': 2, 'free_repulsion': {'strength': .5}},
-                    {'free_g_L': 2, 'free_repulsion': {'decay_length_m': 1e-8}}):
+        for cmc in ({'adsorbed_g_L': 1, 'free_g_L': 0},
+                    {'adsorbed_g_L': 1, 'free_g_L': 3},
+                    {'adsorbed_g_L': 1, 'free_g_L': 2, 'contact_offset_at_saturation_m': 1e-9},
+                    {'adsorbed_g_L': 1, 'free_g_L': 2, 'free_cohesion': {'enabled': False}}):
             new_cfg, new_meta, _ = resolved(cmc)
             with self.subTest(cmc=cmc), self.assertRaises(ValueError):
                 RUNNER.validate_restart(new_cfg, new_meta, saved, 1)
-        zero, zero_meta, zero_values = resolved({'free_g_L': 0})
-        with self.assertRaises(ValueError):
-            RUNNER.validate_restart(cfg, meta, checkpoint(zero, zero_meta, zero_values), 1)
+        saved['immutable_config']['free_cmc_repulsion_pressure'] = 0
+        with self.assertRaisesRegex(ValueError, 'obsolete'):
+            RUNNER.validate_restart(cfg, meta, saved, 1)
 
-    def test_incomplete_or_wrong_version_active_checkpoint_is_rejected(self):
-        cfg, meta, values = resolved({'free_g_L': 2})
+    def test_incomplete_contact_checkpoint_rejected(self):
+        cfg, meta, values = resolved({'adsorbed_g_L': 1, 'free_g_L': 2})
         saved = checkpoint(cfg, meta, values)
-        for key in (PRESSURE, LENGTH, VERSION):
+        for key in RUNNER.CMC_CHECKPOINT_KEYS:
             incomplete = copy.deepcopy(saved)
             del incomplete['immutable_config'][key]
-            with self.subTest(missing=key), self.assertRaises(ValueError):
+            with self.subTest(key=key), self.assertRaises(ValueError):
                 RUNNER.validate_restart(cfg, meta, incomplete, 1)
-        saved['immutable_config'][VERSION] = 2
-        with self.assertRaises(ValueError):
-            RUNNER.validate_restart(cfg, meta, saved, 1)
+
+    def test_pass_max_defaults_and_rejects_nonbinary_values(self):
+        cfg, meta, values = resolved()
+        self.assertEqual(cfg['numerics']['pass_max'], 1)
+        self.assertEqual(meta['pass_max'], 1)
+        self.assertEqual(values['pass_max'], 1)
+        source = case()
+        source['numerics']['pass_max'] = 0
+        self.assertEqual(resolved(source=source)[2]['pass_max'], 0)
+        for value in (-1, 2, True, 1.0, '1', None):
+            source['numerics']['pass_max'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'pass_max'):
+                resolved(source=source)
 
 
 @unittest.skipUnless(shutil.which('g++'), 'C++ parser integration requires g++')
 class FreeCmcCppWiringTests(unittest.TestCase):
-    def test_generated_pressure_and_length_reach_cpp_parser(self):
+    def test_generated_contact_cohesion_and_pass_max_reach_cpp(self):
         with tempfile.TemporaryDirectory(prefix='free-cmc-config-') as temporary:
             directory = Path(temporary)
             source = directory/'parse.cpp'
@@ -212,25 +178,26 @@ class FreeCmcCppWiringTests(unittest.TestCase):
 #include <iostream>
 int main(int argc,char** argv) {
   const auto c=slurry::gr_re2::parseConfig(argc,argv);
-  std::cout<<std::setprecision(17)<<c.free_cmc_repulsion_pressure<<" "
-    <<c.free_cmc_repulsion_length<<" "<<c.adhesion_work;
+  std::cout<<std::setprecision(17)<<c.cmc_contact_gap<<" "
+    <<c.cmc_cohesion_retention<<" "<<c.cmc_contact_version<<" "
+    <<c.pass_max<<" "<<c.adhesion_work;
 }
 ''')
             executable = directory/'parse'
             subprocess.run(['g++', '-std=c++17', '-I'+str(ROOT/'olb-1.9r0/src/slurry/gr_re2'),
                             str(source), '-o', str(executable)], check=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            _, meta, values = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 13.2,
-                                       'free_repulsion': {'strength': .8, 'decay_length_m': 6e-9}})
-            path = directory/'run.cfg'
-            path.write_text(''.join('{}={}\n'.format(key, value) for key, value in values.items()))
-            result = subprocess.run([str(executable), '--config', str(path)], check=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    universal_newlines=True)
-            pressure, length, work = map(float, result.stdout.split())
-            self.assertEqual(pressure, values[PRESSURE])
-            self.assertEqual(length, values[LENGTH])
-            self.assertEqual(work, meta['cmc']['effective_adhesion_work_J_m2'])
+            for free in (0, 13.2):
+                cfg, meta, values = resolved({'adsorbed_g_L': 3.8, 'free_g_L': free})
+                path = directory/'run.cfg'
+                path.write_text(''.join('{}={}\n'.format(key, value) for key, value in values.items()))
+                result = subprocess.run([str(executable), '--config', str(path)], check=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        universal_newlines=True)
+                gap, retention, version, pass_max, work = map(float, result.stdout.split())
+                self.assertEqual((gap, retention, version, pass_max),
+                                 (values[GAP], values[RETENTION], 1, 1))
+                self.assertEqual(work, meta['cmc']['effective_adhesion_work_J_m2'])
 
 
 if __name__ == '__main__':

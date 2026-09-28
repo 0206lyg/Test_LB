@@ -10,6 +10,7 @@
 #include "particleSubsteps.h"
 #include "bulkStress.h"
 #include "coupledCheckpoint.h"
+#include "historyCsv.h"
 #include <chrono>
 #include <csignal>
 #include <filesystem>
@@ -175,10 +176,13 @@ void simulate(const Config& c){
   solver.pair.curvatureCutoffGap=c.curvature_cutoff_gap;
   solver.pair.freeCmcRepulsionPressure=c.free_cmc_repulsion_pressure;
   solver.pair.freeCmcRepulsionLength=c.free_cmc_repulsion_length;
+  solver.pair.contactGap=c.cmc_contact_gap;
+  solver.pair.cohesionRetention=c.cmc_cohesion_retention;
   solver.nearField.viscosity=c.dynamic_viscosity;solver.nearField.matchingGap=c.lubrication_cutoff_cells*c.dx;
   solver.nearField.enabled=c.lubrication_cutoff_cells>0;
   solver.maxSubsteps=c.particle_max_substeps;solver.maxNewtonIterations=c.particle_max_iterations;solver.relativeTolerance=c.particle_tolerance;
   solver.maxKrylovIterations=c.particle_max_krylov_iterations;
+  solver.passMax=c.pass_max;
   solver.solverBackend=c.particle_solver;
   if(c.solver_diagnostics)solver.solverDiagnosticsPrefix=(fs::path(c.output_dir)/
       ("particle_solver_rank"+std::to_string(singleton::mpi().getRank()))).string();
@@ -186,21 +190,19 @@ void simulate(const Config& c){
   solver.torqueAbsoluteTolerance=c.particle_torque_absolute_tolerance;
   solver.contactGapTolerance=c.contact_gap_tolerance;
   solver.rough.enabled=c.rough_contact_enabled;
-  solver.rough.gap=c.roughness_gap;
+  solver.rough.gap=graphite::effectiveContactGap(solver.pair);
   solver.rough.friction=c.sliding_friction;
   solver.rough.tangentialStiffness=c.tangential_stiffness;
   solver.rough.rollingLength=c.rolling_length;
   solver.rough.rollingYieldAngle=c.rolling_yield_angle;
   std::vector<graphite::GapCache> pairCache;
-  graphite::ParticleSubstepController particleController;
-  particleController.maxSubstepDt=u.dt/c.particle_min_substeps;
   graphite::PersistentContactState contacts(bodies.size()*(bodies.size()-1)/2);
   auto pair=graphite::evaluateParticleState(bodies,0.,solver,&pairCache,&contacts);
   std::vector<graphite::Vec3> angularAcceleration(bodies.size()),force(bodies.size()),torque(bodies.size());
   const long double desired=std::ceil(static_cast<long double>(c.end_strain)/(c.shear_rate*u.dt));
   if(desired>std::numeric_limits<U64>::max())throw std::runtime_error("Requested strain exceeds step counter capacity");
   const U64 endStep=static_cast<U64>(desired),stopStep=c.max_steps?std::min(endStep,c.max_steps):endStep;
-  U64 step=0;std::array<double,6> previousTiming{};
+  U64 step=0,maxIterationPassesTotal=0;std::array<double,6> previousTiming{};
   if(!c.restart_dir.empty()){
     if(!fs::is_regular_file(fs::path(c.restart_dir)/"checkpoint.json"))
       throw std::runtime_error("Restart requires a completed pure_gr checkpoint");
@@ -210,6 +212,7 @@ void simulate(const Config& c){
     checkpoint_detail::loadLattice(l,fs::path(c.restart_dir)/checkpoint_detail::rankFile(singleton::mpi().getRank()));
     step=saved.step;bodies=std::move(saved.bodies);pairCache=std::move(saved.cache);contacts=std::move(saved.contacts);
     angularAcceleration=std::move(saved.angularAcceleration);pair=saved.diagnostic;previousTiming=saved.timing;
+    maxIterationPassesTotal=saved.maxIterationPassesTotal;
     syncParticles(ps,bodies);coupling.resetAfterRestart();
     log<<"Restart restored step="<<step<<" time_s="<<step*u.dt<<" strain="<<step*u.dt*c.shear_rate<<std::endl;
   }
@@ -218,6 +221,7 @@ void simulate(const Config& c){
       <<" numerical_Re="<<u.reNumeric<<" numerical_St="<<u.stNumeric<<" inertia_scale="<<u.alpha
       <<" particles="<<bodies.size()<<" steps_to_target_strain="<<endStep<<std::endl;
   log<<"rough_contact="<<c.rough_contact_enabled<<" roughness_gap_nm="<<c.roughness_gap*1.e9
+     <<" contact_gap_nm="<<solver.rough.gap*1.e9<<" cmc_cohesion_retention="<<c.cmc_cohesion_retention
      <<" sliding_friction="<<c.sliding_friction<<" tangential_stiffness_N_m="<<c.tangential_stiffness
      <<" rolling_length_nm="<<c.rolling_length*1.e9<<" rolling_yield_angle_rad="<<c.rolling_yield_angle
      <<" end_strain="<<c.end_strain<<std::endl;
@@ -238,8 +242,9 @@ void simulate(const Config& c){
      <<" force_absolute_tolerance_N="<<c.particle_force_absolute_tolerance
      <<" torque_absolute_tolerance_N_m="<<c.particle_torque_absolute_tolerance
      <<" contact_gap_tolerance_m="<<c.contact_gap_tolerance
-     <<" min_substeps="<<c.particle_min_substeps<<" max_substeps="<<c.particle_max_substeps<<" max_newton_iterations="<<c.particle_max_iterations
+     <<" max_substeps="<<c.particle_max_substeps<<" max_newton_iterations="<<c.particle_max_iterations
      <<" max_krylov_iterations="<<c.particle_max_krylov_iterations
+     <<" pass_max="<<c.pass_max
      <<" solver_diagnostics="<<c.solver_diagnostics<<std::endl;
   std::ofstream history,poses;bool appendHistory=false,appendPoses=false;
   if(singleton::mpi().isMainProcessor()){
@@ -263,6 +268,9 @@ void simulate(const Config& c){
     meta<<",\"free_cmc_repulsion_version\":1"
         <<",\"free_cmc_repulsion_pressure_Pa\":"<<c.free_cmc_repulsion_pressure
         <<",\"free_cmc_repulsion_length_m\":"<<c.free_cmc_repulsion_length<<"}"
+      <<",\n\"cmc_contact\":{\"model_version\":"<<c.cmc_contact_version
+      <<",\"contact_gap_m\":"<<solver.rough.gap<<",\"cohesion_retention\":"<<c.cmc_cohesion_retention<<"}"
+      <<",\n\"pass_max\":"<<c.pass_max
       <<",\n\"rough_contact\":{\"enabled\":"<<(c.rough_contact_enabled?"true":"false")
       <<",\"roughness_gap_m\":"<<c.roughness_gap<<",\"sliding_friction\":"<<c.sliding_friction
       <<",\"tangential_stiffness_N_m\":"<<c.tangential_stiffness
@@ -272,10 +280,11 @@ void simulate(const Config& c){
     appendPoses=!c.restart_dir.empty()&&fs::exists(fs::path(c.output_dir)/"particles.csv")
         &&fs::file_size(fs::path(c.output_dir)/"particles.csv")>0;
     if(appendHistory!=appendPoses)throw std::runtime_error("Restart output CSV pair is incomplete");
+    if(appendHistory)upgradePassMaxHistory(fs::path(c.output_dir)/"history.csv");
     history.open(fs::path(c.output_dir)/"history.csv",appendHistory?std::ios::app:std::ios::out);
     poses.open(fs::path(c.output_dir)/"particles.csv",appendPoses?std::ios::app:std::ios::out);
     if(!history||!poses)throw std::runtime_error("Cannot create output CSV");
-    if(!appendHistory)history<<"step,time_s,strain,eta_bulk_Pa_s,eta_relative,stress_total_Pa,stress_fluid_Pa,stress_surface_Pa,stress_pair_attractive_Pa,stress_pair_repulsive_Pa,stress_lubrication_Pa,stress_acceleration_Pa,stress_fluid_reynolds_Pa,stress_particle_reynolds_Pa,stress_noninertial_Pa,stress_inertial_Pa,max_mach,particle_mach_bound,density_drift,porosity_volume_fraction,analytic_volume_fraction,min_gap_m,max_pair_force_N,potential_energy_J,active_pairs,particle_substeps,newton_iterations,krylov_iterations,residual_evaluations,wall_seconds,steps_per_second,fluid_seconds,map_seconds,coupling_seconds,particle_seconds,output_seconds,stress_contact_normal_Pa,stress_contact_tangential_Pa,contact_count,sliding_contact_count,rolling_contact_count,contact_dissipation_W,contact_elastic_energy_J,force_residual_ratio,torque_residual_ratio,contact_gap_violation_m,max_fluid_mach,fluid_density_drift\n";
+    if(!appendHistory)history<<"step,time_s,strain,eta_bulk_Pa_s,eta_relative,stress_total_Pa,stress_fluid_Pa,stress_surface_Pa,stress_pair_attractive_Pa,stress_pair_repulsive_Pa,stress_lubrication_Pa,stress_acceleration_Pa,stress_fluid_reynolds_Pa,stress_particle_reynolds_Pa,stress_noninertial_Pa,stress_inertial_Pa,max_mach,particle_mach_bound,density_drift,porosity_volume_fraction,analytic_volume_fraction,min_gap_m,max_pair_force_N,potential_energy_J,active_pairs,particle_substeps,newton_iterations,krylov_iterations,residual_evaluations,wall_seconds,steps_per_second,fluid_seconds,map_seconds,coupling_seconds,particle_seconds,output_seconds,stress_contact_normal_Pa,stress_contact_tangential_Pa,contact_count,sliding_contact_count,rolling_contact_count,contact_dissipation_W,contact_elastic_energy_J,force_residual_ratio,torque_residual_ratio,contact_gap_violation_m,max_fluid_mach,fluid_density_drift,max_iteration_passes,max_iteration_passes_total\n";
     if(!appendPoses)poses<<"step,time_s,id,x_m,y_m,z_m,angle_x_rad,angle_y_rad,angle_z_rad,vx_m_s,vy_m_s,vz_m_s,omega_x_s_inv,omega_y_s_inv,omega_z_s_inv\n";
     history<<std::setprecision(17);poses<<std::setprecision(17);
   }
@@ -314,7 +323,8 @@ void simulate(const Config& c){
         <<','<<instantaneous.contacts<<','<<instantaneous.slidingContacts<<','<<instantaneous.rollingContacts
         <<','<<pair.contactDissipation<<','<<instantaneous.elasticContactEnergy
         <<','<<pair.maxForceResidualRatio<<','<<pair.maxTorqueResidualRatio<<','<<pair.contactGapViolation
-        <<','<<m.fluidMach<<','<<m.fluidDensityDrift<<'\n';history.flush();
+        <<','<<m.fluidMach<<','<<m.fluidDensityDrift
+        <<','<<pair.maxIterationPasses<<','<<maxIterationPassesTotal<<'\n';history.flush();
     }
     writePoses(poses,bodies,step,step*u.dt);
     log<<"step="<<step<<" strain="<<step*u.dt*c.shear_rate<<" stress_bulk_Pa="<<m.stressTotal
@@ -330,6 +340,7 @@ void simulate(const Config& c){
     history.flush();poses.flush();l.setProcessingContext(ProcessingContext::Evaluation);
     checkpoint_detail::State state;state.step=step;state.bodies=bodies;state.cache=pairCache;
     state.contacts=contacts;state.angularAcceleration=angularAcceleration;state.diagnostic=pair;
+    state.maxIterationPassesTotal=maxIterationPassesTotal;
     state.timing={previousTiming[0]+seconds(start),fluidSeconds,mapSeconds,couplingSeconds,particleSeconds,outputSeconds};
     latest=checkpoint_detail::save(l,c,u,state);savedStep=step;lastCheckpoint=Clock::now();
     log<<"Checkpoint saved: "<<latest.string()<<std::endl;
@@ -347,9 +358,10 @@ void simulate(const Config& c){
     const auto& hydro=coupling.particleHydrodynamics();
     for(std::size_t i=0;i<bodies.size();++i){force[i]=hydro[i].force;torque[i]=hydro[i].torque;}
     std::vector<graphite::Vec3> oldOmega;oldOmega.reserve(bodies.size());for(const auto& b:bodies)oldOmega.push_back(b.omega);
-    auto begin=Clock::now();pair=graphite::advanceParticles(bodies,force,torque,u.dt,step*u.dt,solver,&pairCache,&contacts,&particleController);
+    auto begin=Clock::now();pair=graphite::advanceParticles(bodies,force,torque,u.dt,step*u.dt,solver,&pairCache,&contacts);
+    maxIterationPassesTotal+=static_cast<U64>(pair.maxIterationPasses);
     for(std::size_t i=0;i<bodies.size();++i)angularAcceleration[i]=graphite::scale(graphite::sub(bodies[i].omega,oldOmega[i]),1/u.dt);
-    syncParticles(ps,bodies);const double particleStepSeconds=seconds(begin);particleSeconds+=particleStepSeconds;
+    syncParticles(ps,bodies);particleSeconds+=seconds(begin);
     // Explicit resolved coupling uses the beginning-of-step particle mask.
     // Pair/lubrication integration is implicit within the unchanged LB step.
     begin=Clock::now();l.setProcessingContext(ProcessingContext::Simulation);
@@ -383,9 +395,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #endif
     return 0;
   }

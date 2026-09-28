@@ -27,6 +27,10 @@ struct Config {
   // Free-CMC osmotic repulsion: pressure in Pa and decay length in m.
   // Zero pressure retains the previous pair potential exactly.
   double free_cmc_repulsion_pressure=0.,free_cmc_repulsion_length=5e-9;
+  // Coated contact: zero gap uses the bare roughness plane. Retention scales
+  // total attractive pair energy, not the Coulomb friction coefficient.
+  double cmc_contact_gap=0.,cmc_cohesion_retention=1.;
+  int cmc_contact_version=0;
   double end_strain=10,particle_tolerance=1e-4,lubrication_cutoff_cells=1.;
   bool rough_contact_enabled=true;
   double roughness_gap=2e-9,sliding_friction=.5,tangential_stiffness=9.;
@@ -35,8 +39,9 @@ struct Config {
   double contact_gap_tolerance=1e-12;
   std::uint64_t max_steps=0,sample_every=20,vtk_every=0,checkpoint_every=0,checkpoint_keep=2;
   double checkpoint_seconds=21000.; // 350 minutes of wall time; step-based saves disabled.
-  unsigned particle_min_substeps=1,particle_max_substeps=32,particle_max_iterations=20,particle_max_krylov_iterations=120;
+  unsigned particle_max_substeps=32,particle_max_iterations=20,particle_max_krylov_iterations=120;
   std::string particle_solver="petsc";
+  int pass_max=1; // Accept finite maximum-iteration iterates and count them.
   bool solver_diagnostics=true;
   std::string output_dir="run",particles_csv,restart_dir;
 };
@@ -71,6 +76,7 @@ inline Config parseConfig(int argc,char**argv) {
     REAL(local_gap) REAL(local_gap_fraction) REAL(local_switch_excess_gap) REAL(local_cutoff_excess_gap)
     REAL(adhesion_work) REAL(adhesion_range) REAL(curvature_switch_gap) REAL(curvature_cutoff_gap)
     REAL(free_cmc_repulsion_pressure) REAL(free_cmc_repulsion_length)
+    REAL(cmc_contact_gap) REAL(cmc_cohesion_retention)
     REAL(checkpoint_seconds)
     REAL(end_strain) REAL(particle_tolerance) REAL(lubrication_cutoff_cells)
     REAL(roughness_gap) REAL(sliding_friction) REAL(tangential_stiffness)
@@ -85,6 +91,11 @@ inline Config parseConfig(int argc,char**argv) {
       if(v!="0"&&v!="1")throw std::runtime_error("solver_diagnostics must be 0 or 1");
       c.solver_diagnostics=v=="1";continue;
     }
+    if(key=="pass_max"||key=="cmc_contact_version"){
+      if(v!="0"&&v!="1")throw std::runtime_error(key+" must be 0 or 1");
+      if(key=="pass_max")c.pass_max=v=="1";else c.cmc_contact_version=v=="1";
+      continue;
+    }
     if(key=="surface_adhesion"){
       if(v!="0"&&v!="1")throw std::runtime_error("surface_adhesion must be 0 or 1");
       c.surface_adhesion=v=="1";continue;
@@ -94,7 +105,7 @@ inline Config parseConfig(int argc,char**argv) {
       c.rough_contact_enabled=v=="1";continue;
     }
 #define INTEGER(k) if(key==#k){if(v.empty()||v[0]=='-')throw std::runtime_error("Negative config: " #k);c.k=std::stoull(v);continue;}
-    INTEGER(max_steps) INTEGER(sample_every) INTEGER(vtk_every) INTEGER(checkpoint_every) INTEGER(checkpoint_keep) INTEGER(particle_min_substeps) INTEGER(particle_max_substeps) INTEGER(particle_max_iterations) INTEGER(particle_max_krylov_iterations)
+    INTEGER(max_steps) INTEGER(sample_every) INTEGER(vtk_every) INTEGER(checkpoint_every) INTEGER(checkpoint_keep) INTEGER(particle_max_substeps) INTEGER(particle_max_iterations) INTEGER(particle_max_krylov_iterations)
 #undef INTEGER
     if(key=="output_dir"){c.output_dir=v;continue;}
     if(key=="particles_csv"){c.particles_csv=v;continue;}
@@ -108,27 +119,25 @@ inline Config parseConfig(int argc,char**argv) {
     &&c.thickness<=c.diameter&&c.rho_particle>0&&c.rho_fluid>0&&c.dynamic_viscosity>0&&c.nu_lattice>0
     &&c.target_mach>0&&c.time_step_s>=0&&c.epsilon_cells>0&&c.hamaker>=0&&c.sigma_lj>0
     &&c.switch_gap>c.sigma_lj&&c.cutoff_gap>c.switch_gap&&c.end_strain>0&&c.sample_every>0
-    &&c.particle_min_substeps>0&&c.particle_max_substeps>0&&c.particle_max_iterations>0&&c.particle_max_krylov_iterations>0&&c.particle_tolerance>0&&c.particle_tolerance<1
+    &&c.particle_max_substeps>0&&c.particle_max_iterations>0&&c.particle_max_krylov_iterations>0&&c.particle_tolerance>0&&c.particle_tolerance<1
     &&c.lubrication_cutoff_cells>=0&&c.roughness_gap>0&&c.roughness_gap<c.cutoff_gap
     &&c.sliding_friction>=0&&c.tangential_stiffness>0&&c.rolling_length>=0&&c.rolling_yield_angle>0
     &&c.particle_force_absolute_tolerance>0&&c.particle_torque_absolute_tolerance>0
     &&c.contact_gap_tolerance>0&&c.contact_gap_tolerance<c.roughness_gap))
     throw std::runtime_error("Invalid geometric/material/solver configuration");
-  // Particle intervals lie on a dyadic grid: round the requested minimum
-  // count upward, but never demand a finer grid than max_substeps permits.
-  unsigned minimumDyadic=1;
-  while(minimumDyadic<c.particle_min_substeps) {
-    if(minimumDyadic>c.particle_max_substeps/2)
-      throw std::runtime_error("particle_min_substeps rounded up to a power of two exceeds particle_max_substeps");
-    minimumDyadic*=2;
-  }
-  if(minimumDyadic>c.particle_max_substeps)
-    throw std::runtime_error("particle_min_substeps must not exceed particle_max_substeps");
   if(!(c.local_gap>0&&c.local_gap_fraction>=0&&c.local_gap_fraction<=1
        &&c.local_switch_excess_gap>=0&&c.local_cutoff_excess_gap>c.local_switch_excess_gap))
     throw std::runtime_error("Require local_gap > 0, 0 <= local_gap_fraction <= 1, and 0 <= local_switch_excess_gap < local_cutoff_excess_gap");
   if(!(c.free_cmc_repulsion_pressure>=0.&&c.free_cmc_repulsion_length>0.))
     throw std::runtime_error("Require free_cmc_repulsion_pressure >= 0 Pa and free_cmc_repulsion_length > 0 m");
+  const double contactGap=c.cmc_contact_gap>0.?c.cmc_contact_gap:c.roughness_gap;
+  if(!(c.cmc_contact_gap>=0.&&contactGap>=c.roughness_gap
+       &&c.cmc_cohesion_retention>=0.&&c.cmc_cohesion_retention<=1.))
+    throw std::runtime_error("Require CMC contact gap >= bare roughness gap and cohesion retention in [0,1]");
+  if(c.cmc_contact_version==0&&(contactGap!=c.roughness_gap||c.cmc_cohesion_retention!=1.))
+    throw std::runtime_error("Active coated contact requires cmc_contact_version=1");
+  if(c.cmc_contact_version>0&&(!c.surface_adhesion||!c.rough_contact_enabled||c.free_cmc_repulsion_pressure>0.))
+    throw std::runtime_error("Coated contact requires surface adhesion and rough contact, without legacy exponential repulsion");
   if(c.free_cmc_repulsion_pressure>0.){
     if(!c.rough_contact_enabled)
       throw std::runtime_error("Free-CMC repulsion requires rough_contact_enabled=1");
@@ -145,9 +154,9 @@ inline Config parseConfig(int argc,char**argv) {
     if(!c.rough_contact_enabled)
       throw std::runtime_error("Surface adhesion requires rough_contact_enabled=1");
     if(!(c.adhesion_work>0.&&c.adhesion_range>0.
-       &&c.roughness_gap+c.adhesion_range<=c.curvature_switch_gap
+       &&contactGap+c.adhesion_range<=c.curvature_switch_gap
        &&c.curvature_switch_gap<c.curvature_cutoff_gap&&c.curvature_cutoff_gap<=c.switch_gap))
-      throw std::runtime_error("Require positive adhesion_work/adhesion_range and roughness_gap + adhesion_range <= curvature_switch_gap < curvature_cutoff_gap <= switch_gap");
+      throw std::runtime_error("Require positive adhesion_work/adhesion_range and contact gap + adhesion_range <= curvature_switch_gap < curvature_cutoff_gap <= switch_gap");
     const double wbg=c.hamaker/(12.*std::acos(-1.)*c.roughness_gap*c.roughness_gap)
         *(1.-std::pow(c.sigma_lj/c.roughness_gap,6)/30.);
     if(!(std::isfinite(wbg)&&wbg>=0.&&c.adhesion_work>=wbg))

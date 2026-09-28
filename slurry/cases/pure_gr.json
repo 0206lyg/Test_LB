@@ -7,11 +7,11 @@
     "temperature_K": 298.15
   },
   "geometry": {
-    "box_length_m": 1.5e-05,
+    "box_length_m": 1e-05,
     "dx_m": 5e-08
   },
   "particles": {
-    "count": 365,
+    "count": 108,
     "diameter_m": 3.3e-06,
     "thickness_m": 4e-07,
     "density_kg_m3": 2400.0,
@@ -28,12 +28,12 @@
   },
   "numerics": {
     "nu_lattice": 0.5,
-    "target_mach": 0.03,
+    "target_mach": 0.02,
     "time_step_s": 0.0,
     "epsilon_cells": 0.5,
     "particle_max_substeps": 256,
-    "particle_min_substeps": 128,
     "particle_max_iterations": 60,
+    "pass_max": 1,
     "particle_tolerance": 0.01,
     "lubrication_cutoff_cells": 1.0,
     "particle_force_absolute_tolerance_N": 1e-13,

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "description": "Graphite with 90k CMC: coverage-dependent attenuation of excess surface adhesion plus conservative free-CMC repulsion. The shipped free_g_L=0 keeps the adsorption-only benchmark; set free_g_L independently to activate repulsion.",
+  "description": "Graphite with 90k CMC: adsorbed CMC sets excess adhesion and the coated mechanical contact plane; free CMC smoothly suppresses both RE2 attraction and short-range adhesion. The shipped free_g_L=0 is the adsorbed-only first test.",
   "fluid": {
     "density_kg_m3": 997.0,
     "dynamic_viscosity_Pa_s": 0.00089,
@@ -37,7 +37,8 @@
     "lubrication_cutoff_cells": 1.0,
     "particle_force_absolute_tolerance_N": 1e-13,
     "particle_torque_absolute_tolerance_N_m": 1.65e-19,
-    "contact_gap_tolerance_m": 1e-12
+    "contact_gap_tolerance_m": 1e-12,
+    "pass_max": 1
   },
   "interaction": {
     "hamaker_J": 9.9e-20,
@@ -71,16 +72,14 @@
     "q_sat": 0.33,
     "_adhesion_model": "theta=min(adsorbed_g_L/adsorbed_saturation_g_L,1); q=(1-(1-sqrt(q_sat))*theta)^2; W_eff=W_bg+q*(W_bare-W_bg). interaction.adhesion_work_J_m2 remains the bare graphite reference.",
     "_q_sat_reference": "0.33 is the agreed starting benchmark for saturated excess-adhesion retention, not a measured CMC constant.",
-    "free_repulsion": {
-      "enabled": true,
-      "strength": 1.0,
-      "decay_length_m": 5e-09,
-      "degree_of_substitution": 0.7,
-      "repeat_unit_molar_mass_kg_mol": 0.218,
-      "osmotic_coefficient": 0.5
-    },
     "_free_cmc_units": "free_g_L is already g CMC per litre of aqueous phase: 1 g/L = 1 kg/m3. It is not total CMC; do not subtract adsorbed CMC again or apply a solids-volume factor. Free CMC is never capped or increased by the adsorbed-input clamp.",
-    "_free_repulsion_model": "P=strength*osmotic_coefficient*DS/M0*R*fluid.temperature_K*free_g_L; Phi_free=pi*lambda_D*P*decay_length_m^2*exp(-(H-h0)/decay_length_m), with the existing outer cutoff. Force and torque differentiate the full potential including local curvature.",
-    "_free_repulsion_reference": "5 nm and strength=1 are the agreed first-test effective parameters, not measured graphite-CMC force constants. The osmotic coefficient 0.5 is a reference approximation; no overlap-concentration threshold is imposed. Free CMC currently changes only conservative repulsion, not fluid viscosity or the adhesion/friction parameters."
+    "contact_offset_at_saturation_m": 2e-09,
+    "_contact_model": "Hc=h0+contact_offset_at_saturation_m*theta. The offset is the effective combined distance of both coatings. 2 nm is a starting modeling assumption, not a measured saturated CMC-layer thickness. RE2 uses the actual carbon gap H; adhesion opening and mechanical contact use H-Hc. Sliding friction coefficient and stiffness remain unchanged.",
+    "free_cohesion": {
+      "enabled": true,
+      "nonadhesive_concentration_g_L": 13.2
+    },
+    "_free_cohesion_model": "u=min(free_g_L/nonadhesive_concentration_g_L,1); qf=1-10*u^3+15*u^4-6*u^5. Phi=qf*(Phi_RE2_attractive+Phi_adhesion)+Phi_RE2_repulsive, with existing geometry and outer cutoff. Free input is uncapped; only screening saturates. This replaces the exponential free_repulsion law.",
+    "_free_cohesion_reference": "Effective cohesion-suppression closure, not a measured electrostatic force law. 13.2 g/L is the initial 16 g/L endpoint hypothesis. Validate high-free nonadhesive viscosity before fitting intermediate concentrations; it is not a universal polymer constant."
   }
 }

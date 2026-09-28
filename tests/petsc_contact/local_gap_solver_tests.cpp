@@ -89,14 +89,15 @@ void replayVersions() {
   input.force.resize(2);input.torque.resize(2);input.contacts.resize(1);input.cache.resize(1);
   input.contacts[0].active=true;input.contacts[0].normalLoad=9.36e-7;
   input.contacts[0].rollingCap=9.36e-14;
-  const auto v4=scratch.path/"v4.dat";d::writeParticleReplay(input,v4.string());
-  const auto read=d::readParticleReplay(v4.string());
+  const auto v5=scratch.path/"v5.dat";d::writeParticleReplay(input,v5.string());
+  const auto read=d::readParticleReplay(v5.string());
   const auto& a=input.settings.pair;const auto& b=read.settings.pair;
   require(a.roughnessGap==b.roughnessGap&&a.localGap==b.localGap
       &&a.localGapFraction==b.localGapFraction&&a.localSwitchExcessGap==b.localSwitchExcessGap
       &&a.localCutoffExcessGap==b.localCutoffExcessGap,"Replay lost local adhesion parameters");
   require(read.settings.rough.tangentialStiffness==80.,"Replay lost configured tangential stiffness");
   require(read.contacts[0].rollingCap==input.contacts[0].rollingCap,"Replay lost frozen rolling cap");
+  require(read.settings.passMax==input.settings.passMax,"Replay lost maximum-iteration acceptance policy");
   const auto expected=g::evaluatePair(input.bodies[0],input.bodies[1],a);
   const auto actual=g::evaluatePair(read.bodies[0],read.bodies[1],b);
   require(expected.forceI==actual.forceI&&expected.energy==actual.energy,"Replay changed local pair interaction");
@@ -104,17 +105,18 @@ void replayVersions() {
   require(!b.surfaceAdhesion,"Legacy replay unexpectedly enabled surface adhesion");
   // v1-v3 omit the free-CMC line; v1-v2 also omit surface parameters;
   // v1 additionally omits the legacy local line.
-  for(int version:{1,2,3}) {
-    std::ifstream source(v4);const auto oldPath=scratch.path/("v"+std::to_string(version)+".dat");
+  for(int version:{1,2,3,4}) {
+    std::ifstream source(v5);const auto oldPath=scratch.path/("v"+std::to_string(version)+".dat");
     std::ofstream target(oldPath);std::string line;int index=0;
     while(std::getline(source,line)) {
       if(index==0)target<<"GR_PARTICLE_REPLAY "<<version<<'\n';
-      else if(index!=7&&(version>=3||index!=6)&&(version!=1||index!=5))target<<line<<'\n';
+      else if(index!=8&&(version>=4||index!=7)&&(version>=3||index!=6)&&(version!=1||index!=5))target<<line<<'\n';
       ++index;
     }
     target.close();const auto old=d::readParticleReplay(oldPath.string());
     require(!old.settings.pair.surfaceAdhesion,"Legacy replay unexpectedly enabled surface adhesion");
     require(old.settings.pair.freeCmcRepulsionPressure==0.,"Legacy replay unexpectedly enabled free-CMC repulsion");
+    require(old.settings.passMax==0,"Legacy failure replay must retain strict maximum-iteration policy");
     require(old.settings.pair.localGapFraction==(version==1?0.:a.localGapFraction),
             "Legacy replay changed local adhesion selection");
     require(old.contacts[0].normalLoad==input.contacts[0].normalLoad,"Legacy replay contact data shifted");
@@ -140,7 +142,14 @@ void replayVersions() {
   const auto after=g::evaluatePair(restored.bodies[0],restored.bodies[1],p);
   require(before.forceI==after.forceI&&before.energy==after.energy,
           "Replay changed surface adhesion interaction");
-
+  input.settings.pair.freeCmcRepulsionPressure=0.;
+  input.settings.pair.contactGap=input.settings.rough.gap=3.e-9;
+  input.settings.pair.cohesionRetention=.2;input.settings.passMax=1;
+  const auto coated=scratch.path/"coated.dat";d::writeParticleReplay(input,coated.string());
+  const auto coatedRead=d::readParticleReplay(coated.string());
+  require(coatedRead.settings.pair.contactGap==3.e-9
+      &&coatedRead.settings.pair.cohesionRetention==.2&&coatedRead.settings.passMax==1,
+      "Replay lost coated-contact law or maximum-iteration policy");
 }
 }
 

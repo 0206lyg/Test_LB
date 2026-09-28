@@ -114,6 +114,8 @@ g::ParticleStepSettings settings() {
   s.solverBackend = "petsc";
   if (const char* prefix = std::getenv("CONTACT_TEST_DIAGNOSTICS"))
     s.solverDiagnosticsPrefix = prefix;
+#else
+  s.solverBackend = "legacy";
 #endif
   s.box = {20.e-6, 20.e-6, 20.e-6};
   s.shearRate = 0.;
@@ -124,6 +126,7 @@ g::ParticleStepSettings settings() {
   s.rough.friction = 1.;
   s.maxSubsteps = 1;
   s.maxNewtonIterations = 80;
+  s.passMax = 0; // Physical regression fixtures must actually converge.
   s.maxKrylovIterations = 200;
   s.maxLineSearch = 24;
   s.relativeTolerance = 1.e-7;
@@ -178,6 +181,7 @@ void accepted(const g::ParticleStepDiagnostics& d) {
 
 void freeFlight() {
   auto s = settings();
+  s.passMax=1;
   s.rough.enabled = false;
   std::vector<g::Body> bodies{sphere({5.e-6, 6.e-6, 7.e-6})};
   bodies[0].velocity = {2.e-4, -3.e-4, 4.e-4};
@@ -186,6 +190,8 @@ void freeFlight() {
   const std::vector<g::Vec3> zero(1);
   const auto d = g::advanceParticles(bodies, zero, zero, step, 0., s);
   accepted(d);
+  require(d.newtonIterations==0&&d.maxIterationPasses==0,
+          "an already converged predictor must not execute extra Newton iterations");
   nearVector(bodies[0].position,
              g::add(initial.position, g::scale(initial.velocity, step)),
              1.e-17, 1.e-12, "free flight displacement");
@@ -874,6 +880,47 @@ void failedStepDoesNotCommit() {
 #endif
 }
 
+void maximumIterationPassCommitsLastState() {
+  auto s=settings();s.passMax=1;s.maxNewtonIterations=1;s.maxSubsteps=8;
+  s.relativeTolerance=1.e-10;s.forceAbsoluteTolerance=1.e-20;
+  s.torqueAbsoluteTolerance=1.e-26;s.contactGapTolerance=1.e-16;
+  auto bodies=pairAtGap(s.rough.gap);
+  bodies[0].velocity={1.e-3,3.e-3,0.};bodies[1].velocity={-1.e-3,-3.e-3,0.};
+  bodies[0].omega={10.,20.,30.};bodies[1].omega={-20.,30.,10.};
+  const auto original=bodies;
+  g::PersistentContactState history{preloadedState(s)};const auto oldHistory=history;
+  std::vector<g::GapCache> cache(1);const std::vector<g::Vec3> zero(2);
+  const auto d=g::advanceParticles(bodies,zero,zero,step,0.,s,&cache,&history);
+  require(d.maxIterationPasses==1,"one exhausted physical solve must count exactly once");
+  require(d.substeps==1&&d.newtonIterations==1,"pass_max must not retry subdivisions or renew the budget");
+  require(!identicalBody(bodies[0],original[0])||!identicalBody(bodies[1],original[1]),
+          "pass_max must advance the final iterate, not freeze old bodies");
+  for(const auto& body:bodies)require(g::finite(body.position)&&g::finite(body.velocity)&&g::finite(body.omega),
+                                    "accepted maximum-iteration bodies must remain finite");
+  const auto gap=g::closestEllipsoidGap(bodies[0],bodies[1]);
+  const auto expected=g::roughContact(bodies[0],bodies[1],gap.normal,gap.leverI,gap.leverJ,
+      history[0].normalLoad,0.,step,oldHistory[0],s.rough,history[0].active);
+  nearVector(history[0].elasticSlip,expected.candidateState.elasticSlip,1.e-20,1.e-10,
+             "accepted slip history is integrated once from the original state");
+  nearVector(history[0].elasticRoll,expected.candidateState.elasticRoll,1.e-20,1.e-10,
+             "accepted rolling history is integrated once from the original state");
+  require(history[0].normalLoad>=0.,"passed contact reaction remains unilateral");
+}
+
+void maximumIterationPassAllowsNextRoughGap() {
+  auto s=settings();s.passMax=1;s.maxNewtonIterations=1;
+  auto bodies=pairAtGap(s.rough.gap-2.*s.contactGapTolerance);
+  g::PersistentContactState history(1);std::vector<g::GapCache> cache(1);
+  const std::vector<g::Vec3> zero(2);
+  const auto d=g::advanceParticles(bodies,zero,zero,step,0.,s,&cache,&history);
+  require(d.substeps==1,"a finite rough-gap violation from a passed step must be usable next step");
+  auto invalid=pairAtGap(.5*s.rough.gap);
+  history.assign(1,{});cache.assign(1,{});bool rejected=false;
+  try{g::advanceParticles(invalid,zero,zero,step,0.,s,&cache,&history);}
+  catch(const std::runtime_error&){rejected=true;}
+  require(rejected,"pass_max must not bypass an unusable geometric domain");
+}
+
 #ifdef SLURRY_USE_PETSC
 void normalGuessRestartPreservesBudgetAndHistory() {
   const auto file = std::filesystem::path(__FILE__).parent_path() /
@@ -1317,6 +1364,8 @@ int main(int argc, char** argv) {
       {"decreasing_normal_load_projects_stored_slip", decreasingNormalLoadProjectsStoredSlip},
       {"coupled_friction_load_reversal", coupledFrictionLoadReversal},
       {"failed_step_does_not_commit", failedStepDoesNotCommit},
+      {"maximum_iteration_pass_commits_last_state", maximumIterationPassCommitsLastState},
+      {"maximum_iteration_pass_allows_next_rough_gap", maximumIterationPassAllowsNextRoughGap},
 #ifdef SLURRY_USE_PETSC
       {"npc_iteration_override_respects_shared_budget", [] { nonlinearWorkAccounting(false); }},
       {"failed_krylov_attempt_is_counted", [] { nonlinearWorkAccounting(true); }},

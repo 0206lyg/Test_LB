@@ -10,7 +10,7 @@ namespace slurry { namespace gr_re2 {
 namespace graphite {
 struct PairParameters {
   double hamaker=.99e-19,sigma=3e-9,switchGap=400e-9,cutoffGap=500e-9;
-  // The geometric surface remains at roughnessGap. Local adhesion replaces a
+  // The bare rough-contact reference remains at roughnessGap. Local adhesion replaces a
   // fraction of the near-contact RE2 energy with the same interaction at
   // d=localGap+(h-roughnessGap). The fraction is an effective contribution,
   // not a measured real-contact area fraction. Zero preserves legacy RE2.
@@ -22,10 +22,19 @@ struct PairParameters {
   bool surfaceAdhesion=false;
   double adhesionWork=.0219,adhesionRange=.67e-9;
   double curvatureSwitchGap=5e-9,curvatureCutoffGap=20e-9;
-  // Effective free-CMC excess pressure (Pa) and decay length (m). Zero pressure
-  // preserves the existing potential exactly. Adsorbed-CMC adhesion is separate.
+  // CMC contact version 1: actual carbon gap still determines the RE2
+  // background, while finite-range adhesion opens from the coating contact
+  // plane. Zero contactGap selects the bare reference for exact compatibility.
+  // Retention screens both attractive energies, including their geometry
+  // derivatives. It is an effective cohesion closure, not an EDL force law.
+  double contactGap=0.,cohesionRetention=1.;
+  // Legacy exponential free-CMC pressure (Pa) and decay length (m). Active
+  // legacy pressure cannot be combined with coated-contact cohesion screening.
   double freeCmcRepulsionPressure=0.,freeCmcRepulsionLength=5e-9;
 };
+inline double effectiveContactGap(const PairParameters&p){
+  return p.contactGap>0.?p.contactGap:p.roughnessGap;
+}
 // Planar work already present in the geometric-gap LJ background. This is a
 // surface energy (J/m^2), not the complete curved-pair separation work (J).
 inline double surfaceBackgroundWork(const PairParameters&p){
@@ -39,10 +48,21 @@ inline void validatePairParameters(const PairParameters&p){
     throw std::domain_error("Invalid RE2 parameters");
   if(!std::isfinite(p.localGapFraction)||p.localGapFraction<0.||p.localGapFraction>1.)
     throw std::domain_error("RE2 local gap fraction must be finite and between zero and one");
+  if(!std::isfinite(p.contactGap)||p.contactGap<0.
+     ||(p.contactGap>0.&&(!std::isfinite(p.roughnessGap)||!(p.roughnessGap>0.)
+                         ||p.contactGap<p.roughnessGap)))
+    throw std::domain_error("CMC contact gap must be zero (bare reference) or finite and at least h0>0");
+  if(!std::isfinite(p.cohesionRetention)||p.cohesionRetention<0.||p.cohesionRetention>1.)
+    throw std::domain_error("CMC cohesion retention must be finite and between zero and one");
+  if((effectiveContactGap(p)!=p.roughnessGap||p.cohesionRetention!=1.)
+     &&p.localGapFraction>0.)
+    throw std::domain_error("Coated-contact cohesion cannot be combined with legacy local-gap adhesion");
   if(!std::isfinite(p.freeCmcRepulsionPressure)||p.freeCmcRepulsionPressure<0.
      ||!std::isfinite(p.freeCmcRepulsionLength)||!(p.freeCmcRepulsionLength>0.))
     throw std::domain_error("Free-CMC repulsion requires finite pressure>=0 and finite length>0");
   if(p.freeCmcRepulsionPressure>0.){
+    if(effectiveContactGap(p)!=p.roughnessGap||p.cohesionRetention!=1.)
+      throw std::domain_error("Legacy free-CMC exponential cannot be combined with coated-contact cohesion");
     const double work=p.freeCmcRepulsionPressure*p.freeCmcRepulsionLength;
     const double energyPerLength=work*p.freeCmcRepulsionLength;
     if(!std::isfinite(p.roughnessGap)||!(p.roughnessGap>0.)
@@ -65,9 +85,9 @@ inline void validatePairParameters(const PairParameters&p){
        ||!std::isfinite(p.adhesionWork)||!(p.adhesionWork>0.)
        ||!std::isfinite(p.adhesionRange)||!(p.adhesionRange>0.)
        ||!std::isfinite(p.curvatureSwitchGap)||!std::isfinite(p.curvatureCutoffGap)
-       ||!(p.roughnessGap+p.adhesionRange<=p.curvatureSwitchGap)
+       ||!(effectiveContactGap(p)+p.adhesionRange<=p.curvatureSwitchGap)
        ||!(p.curvatureSwitchGap<p.curvatureCutoffGap)||!(p.curvatureCutoffGap<=p.switchGap))
-      throw std::domain_error("Invalid surface adhesion: require h0>0, range>0, h0+range<=curvature switch<curvature cutoff<=far switch");
+      throw std::domain_error("Invalid surface adhesion: require h0>0, range>0, Hc+range<=curvature switch<curvature cutoff<=far switch");
     const double background=surfaceBackgroundWork(p);
     if(!std::isfinite(background)||background<0.||p.adhesionWork<background)
       throw std::domain_error("Surface adhesion work must be at least the nonnegative planar background work; repulsive screening is a separate model");
@@ -75,7 +95,7 @@ inline void validatePairParameters(const PairParameters&p){
 }
 // Strict lower bound on the geometric gap. Only the legacy local-gap model
 // has an extra shifted-gap singularity. Surface adhesion uses a polynomial
-// continuation for trial h<h0; the accepted rough constraint remains h>=h0.
+// continuation for trial h<Hc; the accepted rough constraint remains h>=Hc.
 inline double minimumPairGap(const PairParameters&p){
   return !p.surfaceAdhesion&&p.localGapFraction>0.?std::max(0.,p.roughnessGap-p.localGap):0.;
 }
@@ -180,7 +200,7 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
       const AD sw=smoothSwitch((h-p.curvatureSwitchGap)/(p.curvatureCutoffGap-p.curvatureSwitchGap));
       ua=ua+sw*(nearA-ua);ur=ur+sw*(nearR-ur);
     }
-    const AD s=h-p.roughnessGap;
+    const AD s=h-effectiveContactGap(p);
     if(s.v<p.adhesionRange){
       constexpr double pi=3.1415926535897932384626433832795;
       const double excessWork=p.adhesionWork-surfaceBackgroundWork(p);
@@ -188,7 +208,8 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
       // G=pi*lambda_D=2*pi/sqrt(det_t K). The quadratic pair energy is
       // the Derjaguin integral of phi_coh=-DeltaW*(1-s/range)_+.
       // Its energy AND force vanish at the cutoff. For Newton trial points
-      // s<0 use the same analytic polynomial; accepted states obey h>=h0.
+      // s<0 use the same analytic polynomial; accepted states obey h>=Hc.
+      // DeltaW retains the bare h0 benchmark when Hc moves with adsorption.
       // Differentiating localLength includes moving-contact force and torque.
       ua=ua-(.5*pi*excessWork*p.adhesionRange)*localLength*opening*opening;
     }
@@ -213,6 +234,9 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
     // curvature cutoff. Keep the same analytic continuation for H<h0 trials.
     ur=ur+localLength*(pi*energyPerLength)*exp(-(h-p.roughnessGap)/decay);
   }
+  // Screen the complete attractive energy before its force/torque derivatives
+  // are unpacked. Avoid extra arithmetic in the unchanged pure-Gr branch.
+  if(p.cohesionRetention!=1.)ua=ua*p.cohesionRetention;
   if(gap.gap>p.switchGap){const AD t=(h-p.switchGap)/(p.cutoffGap-p.switchGap);const AD sw=smoothSwitch(t);ua=ua*sw;ur=ur*sw;}
   unpack(ua,result.forceAttractiveI,result.torqueAttractiveI,result.torqueAttractiveJ);
   unpack(ur,result.forceRepulsiveI,result.torqueRepulsiveI,result.torqueRepulsiveJ);

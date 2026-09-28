@@ -89,9 +89,9 @@ class LocalAdhesionInputTests(unittest.TestCase):
         cfg, _ = RUNNER.resolve(case())
         with self.assertRaisesRegex(ValueError, 'Rebuild'):
             RUNNER.require_local_adhesion_build(cfg, {'rough_contact': True})
-        RUNNER.require_local_adhesion_build(cfg, {'local_gap_adhesion': True})
+        RUNNER.require_local_adhesion_build(cfg, {'local_gap_adhesion': True, 'pass_max_version': 1})
         cfg['interaction']['local_gap_fraction'] = 0
-        RUNNER.require_local_adhesion_build(cfg, {})
+        RUNNER.require_local_adhesion_build(cfg, {'pass_max_version': 1})
 
 
 @unittest.skipUnless(shutil.which('g++'), 'C++ parser integration requires g++')

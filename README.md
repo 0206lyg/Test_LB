@@ -9,7 +9,7 @@ OpenLB 원본과 외부 라이브러리의 문서·LICENSE는 각 소스 트리�
 | --- | --- | --- |
 | `pure_cmc` | CMC Cross 유체 | `slurry/cases/run.json`의 `cmc`, `cmc250k_cross_parameters.csv` |
 | `pure_gr` | RE² graphite, 곡률 기반 근접 인력·표면 응착, lubrication, rough contact, Lees–Edwards, checkpoint/restart | `slurry/cases/pure_gr.json` |
-| `gr_cmc` | 같은 graphite 모델에 흡착 CMC에 따른 추가 접착력 감소와 free CMC 농도에 따른 보존 반발 포텐셜 적용 | `slurry/cases/gr_CMC.json` |
+| `gr_cmc` | 흡착 CMC의 피복 접촉·접착력 감소와 free CMC의 유효 응집 인력 차폐 | `slurry/cases/gr_CMC.json` |
 | `gr_baseline` | 기존 graphite Couette 및 기존 checkpoint/restart | `slurry/cases/gr_baseline.json` |
 
 ## 1. 설치, 빌드, 실행
@@ -113,11 +113,11 @@ W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 �
 사용하며, 이 모드에는 새 부착일·범위·곡률 연결 키를 넣을 수 없습니다.
 이전 결과 재현에는 당시의 JSON을 별도 `--config`로 지정합니다.
 
-### 2.1. 흡착 CMC와 free CMC 반발: `gr_CMC.json`
+### 2.1. CMC 피복 접촉과 유효 응집 인력 차폐: `gr_CMC.json`
 
-`slurry/cases/gr_CMC.json`은 현재 `pure_gr.json`의 물성·수치 설정을 복사하고
-아래 `cmc` 객체를 추가한 독립 설정입니다. 실행 모델 이름은 소문자 `gr_cmc`입니다.
-이번 업데이트를 적용한 뒤 공통 실행 파일을 한 번 재빌드합니다.
+`slurry/cases/gr_CMC.json`은 `pure_gr.json`의 물성·수치 설정을 복사하고 아래
+`cmc` 객체를 추가한 독립 설정입니다. 두 파일 사이에 자동 상속은 없습니다.
+실행 모델 이름은 소문자 `gr_cmc`입니다. 소스 업데이트 후 한 번 재빌드합니다.
 
 ```bash
 sbatch build_slurry_cpu.sbatch
@@ -125,9 +125,8 @@ sbatch build_slurry_cpu.sbatch
 sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 100
 ```
 
-이후 CMC 입력값만 바꿀 때에는 재빌드하지 않습니다. 여러 전단율은 기존과 같이
-`--shear-rates 0.01,1,100`으로 지정합니다. 기본 `run.json`의 자동 실행 목록은 유지하며,
-CMC 실행에는 `--cases gr_cmc`를 지정합니다.
+이후 JSON 값만 바꿀 때에는 재빌드하지 않습니다. 기본 `run.json`의 자동 실행 목록은
+유지하며, CMC 실행에는 `--cases gr_cmc`를 지정합니다.
 
 ```json
 "cmc": {
@@ -135,109 +134,110 @@ CMC 실행에는 `--cases gr_cmc`를 지정합니다.
   "free_g_L": 0.0,
   "adsorbed_saturation_g_L": 2.8984214285714285,
   "q_sat": 0.33,
-  "free_repulsion": {
+  "contact_offset_at_saturation_m": 2e-9,
+  "free_cohesion": {
     "enabled": true,
-    "strength": 1.0,
-    "decay_length_m": 5e-9,
-    "degree_of_substitution": 0.7,
-    "repeat_unit_molar_mass_kg_mol": 0.218,
-    "osmotic_coefficient": 0.5
+    "nonadhesive_concentration_g_L": 13.2
   }
 }
 ```
 
-두 농도의 분모는 **수상 부피 1 L**입니다. `adsorbed_g_L`은 흡착량 입력,
-`free_g_L`은 자유 CMC 입력이며 독립적으로 보존합니다. 계산에는
-`min(adsorbed_g_L, adsorbed_saturation_g_L)`를 사용합니다.
-따라서 기본 입력 3.8 g/L는 약 2.8984 g/L로 제한되지만 free CMC는 여전히 0입니다.
-상한을 넘는 양을 free CMC에 더하지 않습니다. 음수·비유한 값은 입력 오류입니다.
+두 농도는 **수상 부피 1 L 기준의 독립 입력**입니다. 흡착량에는
+`min(adsorbed_g_L, adsorbed_saturation_g_L)`를 사용하지만 초과량을 free CMC로
+옮기지 않습니다. 기본 3.8 g/L 입력은 약 2.8984 g/L로 제한되고 free 농도는 0으로
+남습니다. `free_g_L` 자체에는 포화 상한이 없습니다. 이미 농도이므로
+`1 g/L = 1 kg/m³`이며 흡착량을 다시 빼거나 수상 부피분율을 곱하지 않습니다.
+음수·비유한 농도는 입력 오류입니다.
 
 **포화량 근거:** [Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201](https://doi.org/10.1021/acsnano.6c10201)의
-겉보기 흡착량은 입자(Gr+CB) 질량 대비 약 **0.37 ± 0.09 wt%**입니다.
-이를 현재 graphite–water 모델의 기준 고형분 질량분율 0.44와 물 밀도 997 g/L에 적용하여
-`0.0037 × 997 × 0.44 / 0.56 = 2.8984 g/L`로 환산했습니다.
-논문의 총 고형분 중 작은 CMC 질량은 이 환산에서 생략했습니다.
-이는 논문이 직접 보고한 수상 농도가 아니라, 희석 후 측정된 혼합 입자 흡착량을
-이 모델에 옮긴 기준값입니다. JSON의 `_saturation_reference`와 드라이버 주석에도
-원자료와 환산식을 기록했습니다. 고형분·물질을 바꾸면 이 명시적 포화량을 재검토합니다.
+겉보기 흡착량 약 **0.37 ± 0.09 wt%**(Gr+CB 입자 질량 기준)를 현재 모델의 기준
+고형분 질량분율 0.44와 물 밀도 997 g/L에 적용하여
+`0.0037 × 997 × 0.44 / 0.56 = 2.8984 g/L`로 환산했습니다. 논문의 총 고형분 중
+작은 CMC 질량은 생략했습니다. 논문이 직접 측정한 수상 농도는 아니며,
+혼합 입자 흡착량을 graphite–water 모델로 옮긴 기준값입니다. 원자료와 환산식은
+JSON의 `_saturation_reference` 및 드라이버 주석에도 기록합니다.
 
-흡착률과 추가 접착력의 잔존율은 다음과 같습니다.
-
-\[
-\theta=\min(x_a/x_{a,\mathrm{sat}},1),\qquad
-q(\theta)=\bigl[1-(1-\sqrt{q_{\mathrm{sat}}})\theta\bigr]^2,
-\]
-\[
-W_{\mathrm{bg}}=\frac{A_H}{12\pi h_0^2}
- \left[1-\frac{(\sigma/h_0)^6}{30}\right],\qquad
-W_{\mathrm{eff}}=W_{\mathrm{bg}}+q(\theta)(W_{\mathrm{bare}}-W_{\mathrm{bg}}).
-\]
-
-`interaction.adhesion_work_J_m2`에는 **bare graphite의 기준값** 0.0219 J/m²를
-계속 입력합니다. 감소한 값을 이 필드에 다시 넣지 않습니다. 드라이버가 위 식을 한 번
-적용한 값을 C++ solver에 전달하므로 저장된 JSON을 다시 읽어도 중복 감소하지 않습니다.
-`q_sat=0.33`은 포화 시 **추가 접착력**의 잔존율이며, 논의에서 선택한 유사 계면 기반
-출발값입니다. CMC에서 직접 측정한 상수나 벌크 응력비를 뜻하지 않습니다.
-
-| 입력 조건 | 계산에 사용한 흡착량 (g/L) | 추가 접착력 잔존율 | solver의 총 부착일 (mJ/m²) |
-| --- | ---: | ---: | ---: |
-| 흡착량 0 | 0 | 1 | 21.9 |
-| 기본 흡착량 3.8 | 2.8984 | 0.33 | 7.6669 |
-| 포화량보다 더 큰 흡착량 | 2.8984 | 0.33 | 7.6669 |
-
-배경 RE² 인력, 접촉 간격, 마찰계수 0.1, 접선 강성, rolling 법칙의 형태는 유지합니다.
-접착력 감소에 따라 접촉을 유지하는 하중과 기존 rolling 기준력이 달라질 수 있으나,
-마찰계수 자체를 변경하지 않습니다. **`free_g_L`은 이제 입자쌍의 보존 반발 포텐셜에
-사용합니다.** 연속상 점도, lubrication 점도, 추가 접착력의 입력값은 이 항으로
-변경하지 않습니다. 접촉 생성·재형성의 억제를 통해 마찰 접촉망이 달라지는 모델이며,
-이미 형성된 강한 접착 접촉을 모두 분리시키는 모델은 아닙니다.
-
-`free_g_L`은 이미 **농도**입니다. SI 질량농도 환산은
-`1 g/L = 1 kg/m³`이므로 수치가 그대로입니다. 여기서 흡착량을 다시 빼거나 고형분·
-수상 부피분율을 곱하지 않습니다. 예를 들어 포화량을 반올림하여 2.8 g/L로 가정한
-총농도 4/16 g/L 비교라면 `free_g_L`에 1.2/13.2를 직접 입력합니다. 현재 JSON의
-포화량 2.8984214 g/L를 엄밀히 사용할 경우 대응 입력은 1.1015786/13.1015786입니다.
-총농도에서 free 농도를 계산하는 작업은 사용자의 실험 조건 해석이며 드라이버가
-두 독립 입력을 자동 재분배하지 않습니다.
-
-반발항은 \(s=H-h_0\ge0\)에서 다음과 같습니다.
+탄소 표면 간격 \(H\), bare 접촉 기준 \(h_0\), 피복층의 기계적 접촉 기준 \(H_c\)를
+분리합니다. 흡착률과 접촉 기준은
 
 \[
-\Pi_b=\phi_{\rm osm}\frac{DS}{M_0}RTc_f,\qquad
-P_R=\alpha_R\Pi_b,\qquad
-\Phi_f=\pi\lambda_{ij}^{D}P_R\ell^2e^{-s/\ell}.
+\theta_a=\min(x_a/x_{a,\mathrm{sat}},1),\qquad
+H_c=h_0+\Delta H_{\mathrm{sat}}\theta_a.
 \]
 
-여기서 `strength`가 \(\alpha_R\), `decay_length_m`가 \(\ell\)입니다.
-온도는 기존 `fluid.temperature_K`를 사용합니다. 298.15 K에서 기준 압력은 약
-**3.98 kPa × free_g_L**이며 `strength`를 곱한 압력을 사용합니다.
-기존 원거리 switch를 포함한 **전체 포텐셜을 미분**하여 곡률·배향 변화에 따른
-힘과 토크까지 계산합니다. 기존 배경 RE²·흡착 접착력·접촉 마찰 법칙을 유지합니다.
-`free_g_L=0`, `strength=0` 또는 `enabled=false`이면 새 반발항은 0입니다.
+`contact_offset_at_saturation_m`은 **두 피복층을 합친 접촉 간격 증가량**
+\(\Delta H_{\mathrm{sat}}\)입니다. 기본 2 nm는 시험 가정이며 포화 흡착층 두께의
+실측값이 아닙니다. \(x_f\)는 \(H_c\)를 바꾸지 않습니다. 초기 배치 최소 간격이
+\(H_c\)보다 작으면 드라이버가 \(H_c\)까지 올려 유효 설정에 기록합니다.
 
-기본 free 농도는 이전 흡착-only 시험을 유지하도록 **0**으로 두었습니다.
-5 nm와 `strength=1`은 **시험 출발값**이며 90k CMC–graphite에서 측정된 상수나
-4→16 g/L 유변 전이의 검증 결과가 아닙니다. Free 농도에 흡착 포화량 같은 상한이나
-overlap 농도에서의 스위치를 두지 않습니다. \(G'\), \(G''\)는 보정 대상으로
-사용하지 않습니다. 식·단위·물리적 해석은 [free CMC 반발 설명](docs/free-cmc-repulsion.md)에 있습니다.
+흡착에 따른 추가 접착 에너지의 기존 감소식은 유지합니다.
 
-실행 전, solver나 입자 배치를 시작하지 않고 환산값을 확인할 수 있습니다.
+\[
+q_a=\left[1-(1-\sqrt{q_{\mathrm{sat}}})\theta_a\right]^2,
+\quad W_{\mathrm{bg}}(h_0)=\frac{A_H}{12\pi h_0^2}
+\left[1-\frac{(\sigma/h_0)^6}{30}\right],
+\]
+\[
+\Delta W_{\mathrm{ads}}=q_a[W_{\mathrm{bare}}-W_{\mathrm{bg}}(h_0)].
+\]
+
+`interaction.adhesion_work_J_m2`에는 bare 기준값 0.0219 J/m²를 계속 입력합니다.
+드라이버가 보낸 부착일에서 bare 기준 \(W_{\mathrm{bg}}(h_0)\)를 뺀 값이
+\(\Delta W_{\mathrm{ads}}\)이며, 접착 개방 거리는 \(H-H_c\)로 계산합니다.
+접촉면을 옮겼다는 이유로 접착 에너지까지 다시 낮추지 않습니다.
+`q_sat=0.33`은 추가 접착력 잔존율의 출발값이며 직접 측정한 CMC 상수나 벌크 응력비가 아닙니다.
+
+Free CMC는 기존 exponential 반발항을 **대체**하여 전체 응집 인력을 다음처럼 차폐합니다.
+
+\[
+u=\min(x_f/x_f^\star,1),\qquad
+q_f=1-10u^3+15u^4-6u^5,
+\]
+\[
+\boxed{\Phi_{ij}=q_f\left[\Phi_{\mathrm{RE^2,att}}(H)
++\Phi_{\mathrm{adh}}(H-H_c;x_a)\right]+\Phi_{\mathrm{RE^2,rep}}(H).}
+\]
+
+기존 곡률 보정과 원거리 switch를 포함한 스칼라 포텐셜을 자동 미분하므로 힘과
+토크를 일관되게 계산합니다. \(x_f=0\) 또는 `free_cohesion.enabled=false`이면
+\(q_f=1\), \(x_f\ge x_f^\star\)이고 활성 상태이면 \(q_f=0\)입니다.
+`nonadhesive_concentration_g_L`의 기본값 13.2 g/L는 현재 고농도 시험의 비접착
+끝점 가정입니다. 이 quintic 함수는 **유효 응집 인력 차폐를 표현하는 구성식**이며
+실측 electrostatic force law가 아닙니다. Bare Hamaker 입력은 유지하지만 CMC의
+유효 RE² 인력은 실제로 감소합니다. 단거리 접착력만 없애고 RE² 인력을 남기는 모델이 아닙니다.
+
+기계적 접촉은 \(H\ge H_c\), \(N\ge0\), \(N(H-H_c)=0\)를 만족하도록 기존 solver가
+풉니다. Sliding 법칙 \(|\mathbf F_t|\le\mu N\), \(\mu=0.1\), 접선 강성 및 기존
+rolling 법칙은 유지합니다. 새 rolling·twisting 항이나 법선 스프링은 추가하지 않습니다.
+저농도에서는 접착력이 접촉 예압을 만들 수 있고, 고농도 비접착 끝점에서는 유동이
+만든 압축 반력이 마찰을 전달합니다. 새 접촉의 기존 adhesive rolling 기준력도 순접착력에
+따라 계산됩니다. 연속상 점도와 lubrication의 점도·기하학적 간격 정의는 유지합니다.
+
+기존 JSON의 `cmc.free_repulsion`은 `enabled=false`라도 명시적 오류로 거부합니다.
+그 객체를 제거하고 위 `free_cohesion` 및 접촉 간격 설정을 사용합니다. 옛 압력·감쇠
+길이와 새 농도 척도 사이에는 자동 환산이 없습니다. 예전 exponential은 C++의 과거
+실패 상태 replay 호환용으로만 남습니다. 상세한 수식·전환 예시는
+[CMC 피복 접촉과 free-CMC 모델 설명](docs/free-cmc-repulsion.md)에 있습니다.
+
+실행 전 환산값은 solver나 입자 배치 없이 확인할 수 있습니다.
 
 ```bash
 python3 slurry/drivers/gr_re2/run_graphite.py --config slurry/cases/gr_CMC.json --dry-run
 ```
 
-`effective_config.json`에는 입력값과 bare 기준 부착일을,
-`manifest.json`의 `derived.cmc`에는 실제 적용 흡착량·포화 제한 여부·잔존율·환산 부착일을
-남깁니다. `derived.cmc.free_repulsion`에는 SI free 질량농도, 명목 전하 농도, 기준
-삼투압 및 실제 적용 반발압도 기록합니다. `resolved_run.cfg`의 `adhesion_work`가
-C++에 전달되는 실제 부착일입니다. 활성 반발은 `free_cmc_repulsion_pressure`와
-`free_cmc_repulsion_length`로 전달합니다. 재시작은
-`--cases gr_cmc --restart 폴더명`으로 지정합니다.
-접착력이나 활성 반발 법칙이 달라지는 설정 변경은 재시작 호환성 검사에서 거부하며
-새 계산으로 비교합니다. 기존의 free 반발 0인 checkpoint는 새 항도 0인 설정으로
-계속 사용할 수 있습니다. 종료 시각 등 실행 제어 설정은 기존 규칙을 따릅니다.
-실행 시간·종료 strain·checkpoint 사용법은 `pure_gr`와 같습니다.
+`effective_config.json`에는 독립 입력과 bare 부착일을 보존하고,
+`manifest.json`의 `derived.cmc`에는 적용 흡착량·잔존율·\(H_c\)·모델 버전을 기록합니다.
+그 아래 `free_cohesion`에는 SI free 농도, 농도비, `cohesion_retention`을 기록합니다.
+CMC 물리가 활성화되면 `resolved_run.cfg`의 `cmc_contact_gap`,
+`cmc_cohesion_retention`, `cmc_contact_version`으로 C++에 전달합니다.
+
+CMC 객체가 없거나 \(x_a=x_f=0\)이면 기존 pure-Gr 힘 법칙을 정확히 회복합니다.
+새 피복 접촉·차폐 설정과 물리적으로 다른 옛 CMC checkpoint는 재시작할 수 없습니다.
+동일 물리 설정은 `--cases gr_cmc --restart 폴더명`으로 이어갑니다.
+
+검증 대상은 90k CMC의 4/16 g/L 끝점입니다. 이 모델만으로 목표 Newtonian 점도가
+이미 재현되었다고 주장하지 않습니다. 고농도에서 접촉과 점성 응력이 충분히 발생하는지
+먼저 확인하고 중간 농도 전이를 검토합니다. \(G'\), \(G''\)는 보정에 사용하지 않습니다.
 
 ### 2.2. 이번 업데이트에서 확인한 legacy 정리 후보
 
@@ -336,18 +336,52 @@ checkpoint를 사용합니다. 오래 걸리는 step과 파일 쓰기가 180초 
 LB step으로 `checkpoints/checkpoint_00000000000000000200`처럼 이름을 붙입니다.
 모든 rank가 파일을 닫은 뒤 `.partial`을 완료 폴더로 바꾸고 `latest_checkpoint.txt`를 갱신합니다.
 복원 시 바이너리 checksum을 검사합니다. 형식 1은 같은 OpenLB 자료형 배치와 MPI rank 수를
-전제로 합니다. 바이너리 형식은 유지하며, 새 힘 법칙의 종류·버전·물리값을 호환성 기록에
-추가하여 서로 다른 법칙의 재시작을 차단합니다. 유체 전체를 저장하므로 용량은 입자 수보다 격자 크기에 좌우됩니다.
+전제로 합니다. 외부 checkpoint 형식은 1을 유지하고, 내부 입자 상태 형식 2에는
+반복 한도 초과 허용의 누적 횟수를 추가합니다. 내부 형식 1도 읽으며 그 경우 누적 횟수는
+0에서 시작합니다. 새 힘 법칙의 종류·버전·물리값을 호환성 기록에 추가하여 서로 다른
+법칙의 재시작을 차단합니다. 유체 전체를 저장하므로 용량은 입자 수보다 격자 크기에 좌우됩니다.
 
 ## 4. 입자 solver, 실패 기록, 재현
 
 PETSc 비선형 풀이, Newton line search, GMRES 선형 풀이와 접촉 블록 preconditioner를 사용합니다.
 법선 접촉은 관성 스케일을 사용한 min-map으로 풀고, 독립적인 Fischer–Burmeister
-상보성 잔차로 최종 검증합니다. PETSc 종료 판정 후에도
-물리적인 힘·토크·접촉 조건을 검사하고, 수렴한 substep만 접촉 이력에 반영합니다.
-실패했다고 물리 허용오차를 자동 완화하거나 legacy solver로 돌아가지 않습니다.
+상보성 잔차로 최종 검증합니다. PETSc 종료 판정 후 물리적인 힘·토크·접촉 조건을
+검사합니다. 현재 코드에는 이 수렴 조건을 모두 만족한 뒤에도 정해진 최소 횟수까지
+비선형 반복을 강제하는 기능이 없습니다. 선형 KSP의 수렴 기준도 이번 변경에서 바꾸지 않습니다.
 
-모든 subdivision 시도 후 입자 단계가 실패하면 결과 폴더에 다음 진단을 남깁니다.
+### 반복 한도 도달 시 계속 계산: `numerics.pass_max`
+
+기본값은 **1**입니다. 생산 JSON의 `numerics` 객체에 다음처럼 지정합니다.
+
+```json
+"pass_max": 1
+```
+
+| 값 | 동작 |
+| --- | --- |
+| `1` (기본) | 실제 최대 비선형 반복 횟수에 도달했지만 유한하고 평가 가능한 마지막 상태가 있으면, 그 상태를 현재 substep 결과로 채택하고 다음 substep으로 진행 |
+| `0` | 수렴 실패를 허용하지 않는 기존 동작: 시간 분할 재시도 후에도 실패하면 진단을 남기고 종료 |
+
+`pass_max`는 허용 횟수가 아니라 **0/1 정책 스위치**입니다. 1인 경우 반복 한도 도달
+때마다 적용하며, 해당 실패 때문에 시간 분할을 더 작게 하여 다시 풀지 않습니다.
+수렴하지 않은 값을 채택한 사실은 숨기지 않고 기존 잔차와 함께 기록합니다. NaN/Inf,
+정의되지 않는 기하·힘 평가, domain 오류처럼 마지막 상태를 평가할 수 없는 실패까지
+통과시키지는 않습니다. 다른 실패는 기존 재시도·종료 경로를 따릅니다.
+
+`history.csv` 끝에 두 열을 추가합니다.
+
+| 열 | 의미 |
+| --- | --- |
+| `max_iteration_passes` | 해당 외부 LB step 안에서 반복 한도 도달 후 결과를 채택한 substep 수 |
+| `max_iteration_passes_total` | 실행 시작 이후 같은 사건의 누적 횟수; checkpoint/restart에서도 이어짐 |
+
+history 출력 간격은 바꾸지 않습니다. 출력 사이에 발생한 사건도 누적 열에 반영됩니다.
+기존 checkpoint에는 이 횟수가 없으므로 이전 형식을 읽을 때 0으로 시작합니다.
+기존 history를 이어 쓸 때에는 새 열을 추가하며 과거 행의 새 값은 0으로 채웁니다.
+이 기록은 실패를 수렴으로 재분류하는 것이 아니라, 비수렴 결과를 허용한 횟수입니다.
+
+정책상 허용되지 않는 실패가 모든 subdivision 시도 후에도 남으면 결과 폴더에 다음
+진단을 남깁니다.
 
 | 파일 | 내용 |
 | --- | --- |
@@ -790,7 +824,10 @@ MPI 바이너리에서는 첫 명령에 `--ranks 2`를 추가합니다. 두 번�
 검사용 시간 간격만 줄여 시간 기준 저장 경로를 실행할 수 있습니다.
 두 번째 검사는 주기 저장이 없는 상태에서 실제 종료 신호 후 저장·재시작 및 손상 파일 거부를 확인합니다.
 
-### CMC 흡착 업데이트의 검증
+### 이전 CMC 흡착 업데이트의 검증
+
+아래는 피복 접촉·free-CMC 차폐를 추가하기 전 흡착 감소 구현의 검증 기록입니다.
+현재 변경 전체의 검증 횟수나 장시간 유변학 결과가 아닙니다.
 
 입력·표면/기존 접착력·재시작·CMC controller 관련 Python 검사 **47개**와
 기존 C++ 표면 접착력 검사 **7그룹**을 통과했습니다. 포화 제한, free CMC 독립 보존,

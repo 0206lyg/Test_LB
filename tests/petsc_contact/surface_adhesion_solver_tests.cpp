@@ -27,7 +27,7 @@ g::ParticleStepSettings settings() {
   s.pair.curvatureSwitchGap=5.e-9;s.pair.curvatureCutoffGap=20.e-9;
   s.nearField.enabled=false;s.rough.enabled=true;s.rough.friction=1.;
   s.rough.tangentialStiffness=80.;
-  s.maxSubsteps=1;s.maxNewtonIterations=80;s.maxKrylovIterations=200;s.maxLineSearch=24;
+  s.maxSubsteps=1;s.maxNewtonIterations=80;s.passMax=0;s.maxKrylovIterations=200;s.maxLineSearch=24;
   s.relativeTolerance=1.e-7;s.forceAbsoluteTolerance=1.e-14;
   s.torqueAbsoluteTolerance=1.e-21;s.contactGapTolerance=1.e-13;
   return s;
@@ -185,6 +185,99 @@ void offsetTiltedCutoffCrossings() {
           "Closing pair lacks a resolved cohesive force");
   std::cout<<"PASS: offset/tilted moving pair crosses cohesive cutoff in both directions\n";
 }
+
+g::ParticleStepSettings coatedSettings(double retention) {
+  auto s=settings();
+  s.maxSubsteps=256;
+  s.pair.contactGap=s.rough.gap=4.e-9;
+  const double bareBackground=g::surfaceBackgroundWork(s.pair);
+  s.pair.adhesionWork=bareBackground+.33*(s.pair.adhesionWork-bareBackground);
+  s.pair.cohesionRetention=retention;
+  s.rough.friction=.1;
+  return s;
+}
+
+void coatedAdhesivePreloadAndFriction() {
+  const auto s=coatedSettings(1.);
+  auto bodies=facePair(s.rough.gap);
+  const std::vector<g::Vec3> zero(2);
+  g::PersistentContactState history;
+  std::vector<g::GapCache> cache;
+  constexpr double dt=1.e-7;
+  const auto info=g::advanceParticles(bodies,zero,zero,dt,0.,s,&cache,&history);
+  accepted(info,s);
+  require(info.maxIterationPasses==0,"Coated preload test bypassed convergence");
+  require(history[0].active,"Coated attraction did not create a mechanically active contact");
+  const auto pair=g::evaluatePair(bodies[0],bodies[1],s.pair);
+  const double attractiveLoad=g::dot(pair.forceI,pair.normal);
+  require(attractiveLoad>2.e-7&&attractiveLoad<4.e-7,"Coated fixture lacks the expected finite adhesive load");
+  near(pair.gap,4.e-9,s.contactGapTolerance,0.,"Coated contact occurs above bare carbon contact");
+  near(history[0].normalLoad,attractiveLoad,1.e-12,1.e-3,
+       "Coated normal reaction balances adhesion without external compression");
+
+  const auto committed=history[0];
+  const double length=bodies[0].axes[0];
+  std::vector<int> slots{0};
+  d::Residual residual{bodies,zero,zero,s,cache,history,slots,dt,0.,length,1.,1};
+  d::Vector q(13,0.);
+  auto moved=bodies[1];moved.position[0]+=50.e-9;
+  for(int k=0;k<4;++k) {
+    const auto gap=g::closestEllipsoidGap(bodies[0],moved);
+    moved.position=g::add(moved.position,g::scale(gap.normal,s.rough.gap-gap.gap));
+  }
+  for(int k=0;k<3;++k)q[6+k]=(moved.position[k]-bodies[1].position[k])/length;
+  q[12]=committed.normalLoad;
+  d::Evaluation evaluation;std::string error;
+  require(residual(q,evaluation,error),"Coated sliding trial failed: "+error);
+  require(evaluation.contacts[0].sliding,"Coated contact did not transmit Coulomb sliding friction");
+  near(g::norm(evaluation.contacts[0].tangentForce),.1*committed.normalLoad,1.e-18,1.e-12,
+       "Coated adhesive contact uses existing mu=.1 and normal reaction");
+  require(sameState(history[0],committed),"Coated trial committed slip history");
+  std::cout<<"PASS: coated adhesive preload and existing Coulomb friction at Hc=4 nm\n";
+}
+
+void screenedCompressedFrictionAndUnloadedRelease() {
+  auto s=coatedSettings(0.);
+  auto bodies=facePair(s.rough.gap);
+  const std::vector<g::Vec3> zero(2);
+  constexpr double normalLoad=1.e-7,tangentialDrive=2.e-6,dt=1.e-7;
+  const std::vector<g::Vec3> force{{tangentialDrive,0.,normalLoad},
+                                  {-tangentialDrive,0.,-normalLoad}};
+  g::PersistentContactState history;
+  std::vector<g::GapCache> cache;
+  const auto compressed=g::advanceParticles(bodies,force,zero,dt,0.,s,&cache,&history);
+  accepted(compressed,s);
+  require(compressed.maxIterationPasses==0,"Screened compression test bypassed convergence");
+  require(history[0].active&&history[0].sliding,
+          "External compression failed to create sliding coated contact without adhesion");
+  near(history[0].normalLoad,normalLoad,1.e-10,1.e-3,
+       "Screened reaction is supplied by external compression");
+  near(g::norm(history[0].tangentForce),.1*history[0].normalLoad,1.e-18,1.e-12,
+       "Screened coated contact retains mu=.1 Coulomb friction");
+  near(history[0].rollingCap,0.,0.,0.,"Nonadhesive contact birth must not add adhesive rolling resistance");
+  near(history[0].rollingStiffness,0.,0.,0.,"Nonadhesive contact has no adhesive rolling spring");
+  const auto pair=g::evaluatePair(bodies[0],bodies[1],s.pair);
+  near(g::norm(pair.forceAttractiveI),0.,0.,0.,"Screened compressed pair retains no cohesive force");
+
+  // A separate unloaded, aligned release fixture resolves the tiny existing
+  // RE2 repulsion. No tensile force or new normal-contact law is introduced.
+  bodies=facePair(s.rough.gap);
+  cache.clear();
+  history.assign(1,g::RoughContactState{});
+  history[0].active=true;history[0].normal={0.,0.,1.};
+  history[0].normalLoad=normalLoad;
+  s.forceAbsoluteTolerance=1.e-20;s.torqueAbsoluteTolerance=1.e-27;
+  constexpr double releaseDt=1.e-3;
+  const auto released=g::advanceParticles(bodies,zero,zero,releaseDt,0.,s,&cache,&history);
+  accepted(released,s);
+  require(released.maxIterationPasses==0,"Unloaded release test bypassed convergence");
+  require(!history[0].active,"Screened contact without compressive load failed to release");
+  near(history[0].normalLoad,0.,0.,0.,"Unloaded screened contact has no normal preload");
+  near(g::norm(history[0].tangentForce),0.,0.,0.,"Unloaded screened contact has no friction load");
+  require(g::closestEllipsoidGap(bodies[0],bodies[1]).gap>s.rough.gap+s.contactGapTolerance,
+          "Unloaded fixture did not open beyond contact tolerance");
+  std::cout<<"PASS: screened coated Coulomb friction under compression and release without preload\n";
+}
 }
 
 int main(int argc,char** argv) {
@@ -192,6 +285,7 @@ int main(int argc,char** argv) {
   int result=0;
   try {
     closedFaceBalanceAndTrialHistory();contactCreationAndRelease();offsetTiltedCutoffCrossings();
+    coatedAdhesivePreloadAndFriction();screenedCompressedFrictionAndUnloadedRelease();
     std::cout<<"Surface adhesion PETSc solver tests passed\n";
   } catch(const std::exception& error) {
     std::cerr<<"Surface adhesion PETSc solver test failed: "<<error.what()<<'\n';result=1;
