@@ -1,178 +1,165 @@
-# 흡착 CMC와 접촉을 유지하는 free-CMC 반발
+# CMC 90k: 기존 반발 모델과 고농도 유효 순포텐셜
 
-90k CMC–graphite 모델은 흡착 CMC에 따른 추가 접착력 감소, 기존 외측 지수형 반발,
-접촉 근처에만 작용하는 내측 반발을 사용한다. 기계적 접촉은 탄소 표면 간격
-\(h_0=2\ \mathrm{nm}\)에서 유지한다. 피복으로 접촉면을 4 nm까지 옮기거나 free CMC가
-전체 인력을 곱셈 계수로 차폐하는 구성식은 사용하지 않는다.
+## 기본 설정과 모델의 의미
 
-## 입력과 농도
+`slurry/cases/gr_CMC.json`은 16 g/L에서 전체 유효 순포텐셜을 교체한다.
+`gr_CMC_4g_L.json`은 이전 설정을 유지한다. 기계적 접촉은 두 경우 모두 탄소 간격
+h0=2 nm이다. 흡착량을 전단에 따라 바꾸거나 별도의 CMC 점성저항을 추가하지 않는다.
 
-`slurry/cases/gr_CMC.json`은 `pure_gr.json`을 자동 상속하지 않는 독립 설정이다.
-기본 CMC 설정은 다음과 같다.
+새 고농도 모델의 9 nm cutoff와 힘의 크기는 접촉 활성화·해제를 위한 모델 선택값이다.
+**9 nm에서 실제 van der Waals 인력이 없어짐을 의미하지 않으며, 측정된 CMC 차폐식이 아니다.**
+완전 적용 시 RE² 꼬리도 함께 제거한다. 기존 인력을 밑에 남기면 아래 표와 다른 모델이다.
+
+## 농도와 보간
+
+흡착량과 free 농도는 수상 1 L 기준의 독립 입력이다. `1 g/L = 1 kg/m³`이다.
+흡착량이 포화값을 넘으면 흡착 계산에만 포화값을 쓰며 초과량을 free로 옮기지 않는다.
+
+| 총농도 기준 | adsorbed CMC (g/L) | free CMC (g/L) |
+| --- | ---: | ---: |
+| 4 g/L | 2.8984214285714285 | 1.1015785714285715 |
+| 16 g/L | 2.8984214285714285 | 13.101578571428572 |
+
+포화값은 Gwag et al., DOI [10.1021/acsnano.6c10201](https://doi.org/10.1021/acsnano.6c10201)의
+Gr+CB 대비 겉보기 흡착량 약 0.37 ± 0.09 wt%를 기준으로,
+`0.0037 × 997 × 0.44 / 0.56`으로 옮긴 모델 기준값이다.
+논문이 직접 보고한 수상 2.8984 g/L 측정값은 아니다.
+
+`cmc.net_potential`을 생략하거나 `enabled=false`로 두면 새 에너지는 사용하지 않는다.
+활성화한 경우 다음 농도 보간을 사용한다.
+
+\[
+w=\operatorname{clip}\left(\frac{c_f-c_{\rm start}}
+ {c_{\rm full}-c_{\rm start}},0,1\right),\qquad
+U=(1-w)U_{\rm previous}(H,c_f)+wU_{\rm net}(H).
+\]
+
+`U_previous`는 같은 입력 농도의 기존 RE²+흡착 접착+free 반발 모델이다.
+4 g/L의 포텐셜을 모든 중간 농도에 고정해서 쓰는 것이 아니다.
+`w=0`은 기존 계산 경로를 그대로 실행하며, `w=1`은 이전 에너지를 계산·상쇄하지 않고
+새 에너지를 직접 계산한다. 따라서 완전 적용 시 반올림으로 남는 RE² 꼬리가 없다.
+두 농도 사이의 선형 보간은 구성식 선택이다. 중간 농도에는 기존 꼬리와 안정점이
+남을 수 있으며 아래의 단순한 힘 부호 구간은 `w=1`의 기준 입자쌍에 해당한다.
 
 ```json
-"cmc": {
-  "adsorbed_g_L": 2.8984214285714285,
-  "free_g_L": 13.10157857142857,
-  "adsorbed_saturation_g_L": 2.8984214285714285,
-  "q_sat": 0.33,
-  "free_repulsion": {
-    "enabled": true,
-    "strength": 1.0,
-    "decay_length_m": 5e-9,
-    "degree_of_substitution": 0.7,
-    "repeat_unit_molar_mass_kg_mol": 0.218,
-    "osmotic_coefficient": 0.5,
-    "inner_work_per_g_L_J_m2": 0.000543218,
-    "inner_range_m": 6.7e-10,
-    "inner_exponent": 2.1
-  }
+"net_potential": {
+  "enabled": true,
+  "start_free_g_L": 1.1015785714285715,
+  "full_free_g_L": 13.101578571428572,
+  "contact_force_N": 1.5e-10,
+  "barrier_force_N": 2e-11,
+  "attraction_range_m": 1e-9,
+  "repulsion_range_m": 6e-9
 }
 ```
 
-흡착량과 free 농도는 **수상 1 L 기준의 독립 입력**이다. 흡착량은 포화값까지만
-적용하며, 초과 입력을 free CMC로 옮기지 않는다. `free_g_L`에는 상한을 두지 않는다.
-`1 g/L = 1 kg/m³`이므로 흡착량을 다시 빼거나 수상 부피분율을 곱하지 않는다.
+## 새 순포텐셜의 정의
 
-| 총농도를 나누는 예 | 흡착량 (g/L) | free 농도 (g/L) |
-| --- | ---: | ---: |
-| 4 g/L | 2.8984214285714285 | 1.1015785714285715 |
-| 16 g/L, 기본 설정 | 2.8984214285714285 | 13.10157857142857 |
-
-이는 입력 예이며 드라이버가 질량 수지를 자동 재분배하지는 않는다. 포화값은
-[Gwag et al., DOI 10.1021/acsnano.6c10201](https://doi.org/10.1021/acsnano.6c10201)의
-Gr+CB 대비 겉보기 흡착량 약 0.37 ± 0.09 wt%를 모델 기준으로 환산한 값이다.
+La=1 nm, Lr=6 nm, Hs=h0+La=3 nm, Hr=Hs+Lr=9 nm이다.
+FA=150 pN, FB=20 pN이며 기준 곡률 길이는 입력 입자 반경·반두께에서
+lambda_ref=a²/c=13.6125 µm로 계산한다.
 
 \[
-x_{a,\mathrm{sat}}=0.0037\times997\times\frac{0.44}{0.56}
-=2.8984214285714285\ \mathrm{g/L}.
+U_{\rm net}=\frac{\lambda^D_{ij}}{\lambda_{\rm ref}}(U_A^0+U_R^0),\qquad
+U_A^0=-\frac{F_A L_a}{3}\left[1-\frac{H-h_0}{L_a}\right]_+^3.
 \]
 
-작은 CMC 질량을 총 고형분 환산에서 생략했으며, 논문이 직접 보고한 수상 농도는 아니다.
-`gr_CMC.json`(16 g/L)과 `gr_CMC_4g_L.json`(4 g/L)의 초기 배치 최소 간격은 모두 10 nm이다.
-이 초기 배치 조건은 기계적 접촉 간격 2 nm와 별개이다.
-
-## 흡착 CMC: 같은 포화 잔류 접착력
+반발 에너지는 다음과 같다. z=(Hr-H)/Lr이다.
 
 \[
-\theta_a=\min(x_a/x_{a,\mathrm{sat}},1),\qquad
-q_a=\left[1-(1-\sqrt{q_{\mathrm{sat}}})\theta_a\right]^2,
-\]
-\[
-W_{\mathrm{bg}}(h_0)=\frac{A_H}{12\pi h_0^2}
-\left[1-\frac{(\sigma/h_0)^6}{30}\right],\qquad
-\Delta W_{\mathrm{ads}}=q_a[W_{\mathrm{bare}}-W_{\mathrm{bg}}(h_0)].
+U_R^0=\begin{cases}
+\frac{8}{15}F_B L_r,&H\le H_s,\\
+16F_B L_r\left(\frac{z^3}{3}-\frac{z^4}{2}+\frac{z^5}{5}\right),&H_s<H<H_r,\\
+0,&H\ge H_r.
+\end{cases}
 \]
 
-`interaction.adhesion_work_J_m2`에는 bare 기준값을 입력한다. 드라이버가 전달하는
-\(W_{\mathrm{bg}}+\Delta W_{\mathrm{ads}}\)에서 C++이 배경 일을 한 번 빼서 추가
-접착력을 계산한다. `q_sat=0.33`은 포화 시 **추가 접착력**의 잔존율이며,
-RE² 배경 인력 전체의 잔존율이나 실측 벌크 응력비가 아니다. 포화 흡착량을 쓰는
-4·16 g/L 조건의 이 항은 동일하다.
+정면 face-to-face에서는 lambda_D=lambda_ref이고, 분리 방향을 양으로 잡은 힘은
+2–3 nm에서 `-FA(1-x)²` (x=(H-h0)/La), 3–9 nm에서
+`16 FB y²(1-y)²` (y=(H-Hs)/Lr), 9 nm 이상에서 0이다.
 
-탄소 표면 간격을 \(H\), 접촉으로부터의 개방 거리를 \(s=H-h_0\)라 두면 기존
-추가 접착 포텐셜은 다음과 같다. \([z]_+=\max(z,0)\)이다.
+3 nm와 9 nm에서 에너지 및 1·2차 미분이 연속이다. 3 nm는 장벽의 최대점이고,
+그 안쪽에는 비접촉 안정점이 없다. 9 nm 밖은 상호작용이 없는 평탄한 영역이다.
+양의 간격 `H<h0` solver trial에는 안쪽 다항식을 연장하되, 허용되는 접촉 상태는
+기존 `H>=h0` 제약을 따른다.
 
-\[
-U_{\mathrm{adh}}=-\frac{\pi\lambda_{ij}^{D}\Delta W_{\mathrm{ads}}\delta_a}{2}
-\left[1-\frac{s}{\delta_a}\right]_+^2,
-\qquad \delta_a=0.67\ \mathrm{nm}.
-\]
+임의 배향에서는 곡률 길이의 위치·회전 미분까지 포함한다. 힘만 사후에 잘라내거나
+토크를 별도 법칙으로 주지 않는다. attractive/repulsive 출력은 각각 위 두 에너지의
+미분이며, 임의 배향에서는 곡률 변화에 따른 성분도 포함한다.
 
-## Free CMC: 외측 반발과 내측 반발
+| 정렬 입자쌍 | 최대 접근 반발 (pN) | 최대 분리 인력 (pN) | 접근 일 (J) | 접촉 탈출 일 (J) |
+| --- | ---: | ---: | ---: | ---: |
+| Face–face | 20.0 | 150.0 | 6.40e-20 | 5.00e-20 |
+| Edge–face | 0.5545 | 4.1589 | 1.7745e-21 | 1.3863e-21 |
+| Edge–edge | 0.2938 | 2.2039 | 9.4031e-22 | 7.3462e-22 |
 
-외측 반발은 `7004d4762b`의 압력 환산과 지수형 포텐셜을 유지한다.
+이 표는 입자쌍의 보존력 검증값이다. 16 g/L의 1 Pa·s를 계산한 벌크 유변학 결과가 아니다.
+접촉 에너지는 무한 분리 상태보다 FF 기준 1.4e-20 J 높다. 접촉은 장벽 안의 국소 상태이며
+분산 상태보다 낮은 에너지의 영구 응집 상태로 설계하지 않았다.
+기존 모델처럼 Brownian 힘은 추가하지 않았다. EF/EE 에너지 장벽은 298.15 K의 kBT보다
+작으므로 이 표를 열적 결합 수명의 예측으로 해석하지 않는다.
 
-\[
-P_f=\texttt{strength}\;\chi RT\frac{\mathrm{DS}\,c_f}{M_0},\qquad
-U_{\mathrm{out}}=\pi\lambda_{ij}^{D}P_f\ell^2\exp(-s/\ell).
-\]
+## 보존하는 기존 모델 (w=0)
 
-\(c_f\)는 kg/m³, \(M_0\)는 kg/mol이며, 기본값은
-`strength=1`, \(\chi=0.5\), \(\mathrm{DS}=0.7\), \(M_0=0.218\ \mathrm{kg/mol}\),
-\(\ell=5\ \mathrm{nm}\)이다. \(P_f\)의 단위는 Pa이다.
-이는 명목 전하 농도를 이용한 유효 반발 압력 척도이며, 측정된 이온 농도나
-미시적인 electrostatic force law를 그대로 재현한 식은 아니다.
-
-내측 반발은 같은 기계적 접촉면을 기준으로 유한 범위에서만 작용한다.
+흡착 CMC는 추가 접착력을 줄인다.
 
 \[
-\boxed{U_{\mathrm{in}}=
-\frac{\pi\lambda_{ij}^{D}W_s\delta_i}{p}
-\left[1-\frac{s}{\delta_i}\right]_+^{p}},\qquad
-W_s=\kappa c_f,
-\]
-\[
-\delta_i=0.67\ \mathrm{nm},\qquad p=2.1,\qquad
-\kappa=0.000543218\ \frac{\mathrm{J/m^2}}{\mathrm{g/L}}.
+\theta_a=\min(c_a/c_{a,\rm sat},1),\quad
+q_a=[1-(1-\sqrt{q_{\rm sat}})\theta_a]^2,\quad q_{\rm sat}=0.33.
 \]
 
-여기서 \(c_f\)는 g/L 단위 입력이다. \(W_s\)는 J/m²이며 \(U_{\mathrm{in}}\)은 J이다.
-\(p>2\)이므로 내측 cutoff에서 에너지와 1·2차 미분이 연속적으로 0이 된다.
-\(\kappa\), 범위, 지수는 접촉 인력을 남기면서 근접 응집 에너지를 줄이기 위한
-모델 선택값이며 측정된 CMC 물성값은 아니다.
-
-전체 포텐셜은
+배경 표면 일은 `Wbg=AH[1-(sigma/h0)^6/30]/(12 pi h0²)`이고,
+추가 접착력은 `DeltaW=qa(Wbare-Wbg)`를 쓴다.
+`interaction.adhesion_work_J_m2`는 항상 bare 입력으로 유지하여 재입력 때
+흡착 감소를 두 번 적용하지 않는다.
 
 \[
-U_{ij}=U_{\mathrm{RE^2}}+U_{\mathrm{adh}}+U_{\mathrm{out}}+U_{\mathrm{in}}.
+U_{\rm adh}=-\frac{\pi\lambda^D_{ij}\Delta W\delta_a}{2}
+ [1-(H-h_0)/\delta_a]_+^2,\qquad\delta_a=0.67\ {\rm nm}.
 \]
 
-기존 RE² 곡률 보정과 원거리 switch를 유지한다. 각 반발항도 스칼라 포텐셜에
-더하므로 간격뿐 아니라 이동하는 접촉점의 곡률 길이 \(\lambda_{ij}^{D}\)까지
-자동 미분하여 힘과 토크를 얻는다. 계산 후 인력을 잘라내거나 접촉 법선력만
-상쇄하지 않는다. 전단률에 따라 계수나 흡착량을 강제로 바꾸는 항은 없다.
+이전 free CMC 구성식은 외측 반발과 내측 반발이다.
 
-`strength`는 외측 반발만 조절한다. `enabled=false`는 두 반발항을 모두 끈다.
-기존 JSON에서 `inner_work_per_g_L_J_m2`를 생략하면 기본값은 **0**이므로 기존 외측
-반발만 작동한다. 위 기본 CMC 파일은 내측 계수를 명시하여 새 항을 활성화한다.
+\[
+P_f=\texttt{strength}\,\chi RT\frac{\mathrm{DS}\,c_f}{M_0},\qquad
+U_{\rm out}=\pi\lambda^D_{ij}P_f\ell^2e^{-(H-h_0)/\ell},
+\]
+\[
+W_s=\kappa c_f,\qquad
+U_{\rm in}=\frac{\pi\lambda^D_{ij}W_s\delta_i}{p}
+ [1-(H-h_0)/\delta_i]_+^p.
+\]
 
-## 입자쌍 기준 확인값
+기존 설정은 strength=1, ell=5 nm, chi=0.5, DS=0.7,
+M0=0.218 kg/mol, kappa=0.000543218 (J/m²)/(g/L), delta_i=0.67 nm, p=2.1이다.
+명목 전하 농도를 이용한 유효 압력 환산이며 측정한 미시적 표면력 그 자체가 아니다.
+`free_repulsion.enabled`는 기존 두 반발항만 제어한다. 새 모델을 끄려면
+**`net_potential.enabled=false`**를 사용한다.
+기존 inner 계수를 생략하면 0이고, 새 net 객체를 생략하면 이전 모델 그대로다.
 
-다음은 포화 흡착, 정면 face-to-face 배향, \(T=298\ \mathrm K\), 위 계수의 입자쌍
-기준값이다. 양의 힘은 분리 방향 반발, 음의 힘은 인력이다. 기본 실행의 free 농도
-13.10157857 g/L 및 온도 298.15 K와 구별한다.
+## 설정 전달, 수치 허용오차, 재시작
 
-| 항목 | \(c_f=13.2\ \mathrm{g/L}\) |
-| --- | ---: |
-| 접촉점 순힘 | −10.000 nN |
-| 분리 중 최대 인력의 크기 | 17.121 nN |
-| 접촉 상태에서 장벽까지의 탈출 에너지 | \(12.224\times10^{-18}\) J |
-| 외측 인력 우물에서 장벽까지의 진입 에너지 | \(13.067\times10^{-18}\) J |
-| 접근 경로의 최대 반발력 | 1.921 nN |
+새 C++ 입력은 `cmc_net_blend`, `cmc_net_contact_force`, `cmc_net_barrier_force`,
+`cmc_net_attraction_range`, `cmc_net_repulsion_range`, `cmc_net_reference_length`이다.
+빌드 기능 키 `cmc_net_potential_version`은 1이다. rough_contact와 surface_adhesion을
+사용하고 접촉면 이동/기존 cohesion-retention과 혼용하지 않는다.
+두 새 범위의 합과 h0는 기존 far switch보다 작거나 같아야 한다.
 
-같은 조건에서 \(c_f=1.1\ \mathrm{g/L}\)의 접촉점 순힘은 −301.38 nN이다.
-고농도에서도 접촉점 인력과 유한한 탈출 장벽을 남기며, 내측 범위
-\(0<s<\delta_i\)에 별도의 비접촉 안정 간격을 만들지 않는 선택이다.
-이 입자쌍 확인은 다입자 구조, 4 g/L의 yield stress 또는 16 g/L의
-약 1 Pa·s Newtonian plateau를 검증한 결과가 아니다.
+활성 순포텐셜의 여섯 계수와 버전은 checkpoint signature에 포함된다.
+순포텐셜 비활성 시 해당 키를 signature에 넣지 않아 이전 계산과의 호환성을 보존한다.
+서로 다른 물리 설정의 checkpoint는 섞지 않는다. 이전 16 g/L 결과는 새 계산으로 시작한다.
+Particle replay는 새 버전 7을 쓰며 기존 버전 1–6을 읽을 수 있다.
 
-## 접촉, 호환성, 실행
-
-기계적 접촉은 기존 \(H\ge h_0\), \(N\ge0\), \(N(H-h_0)=0\)을 유지한다.
-Sliding·rolling 법칙, 마찰계수, 접선 강성, 연속상 점도, lubrication 및 입자 solver는
-변경하지 않는다. 기존 adhesive rolling 기준력은 기존 방식대로 생성 시의
-순접착력에서 정해지며 새 반발항의 영향은 그 힘에 반영된다.
-
-옛 `cmc.free_cohesion`과 `cmc.contact_offset_at_saturation_m` 입력은 드라이버가
-거부한다. 해당 키를 제거하고 위 `free_repulsion` 객체를 사용한다.
-CMC 객체가 없거나 흡착·free 농도가 모두 0이면 기존 pure-Gr 힘 법칙을 회복한다.
-흡착량을 유지하고 free 농도만 0으로 만들면 반발항만 사라진다.
-
-새 내측 C++ 입력은 `free_cmc_inner_repulsion_work`, `free_cmc_inner_repulsion_range`,
-`free_cmc_inner_repulsion_power`이며 빌드 정보의
-`free_cmc_inner_repulsion_version`은 1이어야 한다. 외측 입력은 기존
-`free_cmc_repulsion_pressure`, `free_cmc_repulsion_length`를 유지한다.
-`manifest.json`의 `derived.cmc.free_repulsion`에는 환산 압력·내측 표면 일 척도와
-활성 여부를 기록한다. 활성 물리 계수는 checkpoint signature에도 반영한다.
-**동일 물리 설정의 checkpoint만 재시작**하며 농도나 포텐셜을 바꾼 비교는 새 계산으로
-수행한다. 비활성 CMC 항은 기존 pure-Gr signature를 바꾸지 않는다.
-
-소스 변경 후 기존 명령으로 한 번 재빌드한 다음 실행한다.
+16 g/L에서 절대 힘 허용오차는 1e-15 N, 토크는 1.65e-21 N·m이다.
+기존 1e-13 N은 약 0.3 pN인 새 EE 장벽의 약 1/3이므로 낮췄다.
+상대 허용오차, solver 알고리즘, 초기 입자 배치, friction/rolling, lubrication,
+연속상 점도는 유지한다. 접촉 수명 등의 새 시계열 로그는 추가하지 않는다.
+4 g/L JSON은 이번 순포텐셜 변경에서 그대로 보존한다.
 
 ```bash
 sbatch build_slurry_cpu.sbatch
-sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 100
+# 빌드 완료 후
+sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 10,100
 ```
 
-두 번째 명령은 빌드 완료 후 제출한다. 이후 JSON 값만 바꿀 때는 재빌드가 필요 없다.
+입력/manifest의 계수와 빌드 버전으로 실행 모델을 구별한다.

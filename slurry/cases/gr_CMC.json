@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "description": "Graphite with 90k CMC at total 16 g/L: saturated adsorbed CMC reduces excess adhesion; free CMC provides the original outer approach barrier and a compact inner repulsion that weakens the contact well. Mechanical contact stays at the bare 2 nm gap.",
+  "description": "Graphite with 90k CMC at total 16 g/L: saturated adsorption defines the legacy adhesion reference; free CMC fully activates a compact phenomenological net potential with explicit contact attraction and a finite approach barrier, screening the complete legacy potential including the RE2 tail. Mechanical contact stays at the bare 2 nm gap.",
   "fluid": {
     "density_kg_m3": 997.0,
     "dynamic_viscosity_Pa_s": 0.00089,
@@ -35,8 +35,9 @@
     "particle_max_iterations": 60,
     "particle_tolerance": 0.01,
     "lubrication_cutoff_cells": 1.0,
-    "particle_force_absolute_tolerance_N": 1e-13,
-    "particle_torque_absolute_tolerance_N_m": 1.65e-19,
+    "particle_force_absolute_tolerance_N": 1e-15,
+    "particle_torque_absolute_tolerance_N_m": 1.65e-21,
+    "_absolute_tolerance_reference": "The net potential can have an orientation-dependent barrier of about 0.3 pN. These absolute residual tolerances resolve forces below that scale; relative tolerance and all iteration/substep limits are unchanged. This change is specific to the 16 g/L case.",
     "contact_gap_tolerance_m": 1e-12,
     "pass_max": 1
   },
@@ -70,7 +71,7 @@
     "adsorbed_saturation_g_L": 2.8984214285714285,
     "_saturation_reference": "Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201: apparent adsorption 0.37 +/- 0.09 wt% per particle mass (Gr+CB). Approximate reference conversion for this graphite-water model (neglecting the small CMC share of the paper's total solids): 0.0037 * 997 g/L * 0.44 / 0.56 = 2.8984214285714285 g/L aqueous phase. This is a converted model benchmark, not a directly reported 2.9 g/L measurement. Reassess this explicit reference if solids loading or material changes.",
     "q_sat": 0.33,
-    "_adhesion_model": "theta=min(adsorbed_g_L/adsorbed_saturation_g_L,1); q=(1-(1-sqrt(q_sat))*theta)^2; W_eff=W_bg+q*(W_bare-W_bg). interaction.adhesion_work_J_m2 remains the bare graphite reference.",
+    "_adhesion_model": "Legacy branch: theta=min(adsorbed_g_L/adsorbed_saturation_g_L,1); q=(1-(1-sqrt(q_sat))*theta)^2; W_eff=W_bg+q*(W_bare-W_bg). interaction.adhesion_work_J_m2 remains the bare graphite reference. The net-potential blend below acts on the complete legacy potential, not just this excess adhesion.",
     "_q_sat_reference": "0.33 is the agreed starting benchmark for saturated excess-adhesion retention, not a measured CMC constant.",
     "_free_cmc_units": "free_g_L is already g CMC per litre of aqueous phase: 1 g/L = 1 kg/m3. It is not total CMC; do not subtract adsorbed CMC again or apply a solids-volume factor. Free CMC is never capped or increased by the adsorbed-input clamp.",
     "free_repulsion": {
@@ -84,8 +85,19 @@
       "inner_range_m": 6.7e-10,
       "inner_exponent": 2.1
     },
-    "_free_repulsion_model": "Outer: P=strength*osmotic_coefficient*DS/M0*R*T*free_g_L; Phi_outer=pi*lambda_D*P*ell^2*exp(-(H-h0)/ell). Inner: Ws=inner_work_per_g_L_J_m2*free_g_L; Phi_inner=pi*lambda_D*Ws*delta/p*(1-(H-h0)/delta)^p for H-h0<delta, zero otherwise. Both differentiate the full potential including curvature. enabled gates both terms; strength scales only the outer term. Neither term screens attraction or moves mechanical contact.",
-    "_free_repulsion_reference": "Trial constitutive parameters, not measured graphite-CMC force constants. Compact range equals the 0.67 nm adhesion interval and p=2.1 smooths its cutoff. Setting inner_work_per_g_L_J_m2=0 restores the old outer-only model. Free CMC changes conservative repulsion only; medium viscosity and friction remain explicit independent inputs.",
-    "_initialization": "The common 10 nm initial clearance excludes the inner side of the analyzed outer barrier. This is only a geometric initial-placement condition; rough_contact.roughness_gap_m remains 2 nm and no aging or preshear is performed by initialization."
+    "_free_repulsion_model": "Legacy branch: P=strength*osmotic_coefficient*DS/M0*R*T*free_g_L; Phi_outer=pi*lambda_D*P*ell^2*exp(-(H-h0)/ell). Ws=inner_work_per_g_L_J_m2*free_g_L; Phi_inner=pi*lambda_D*Ws*delta/p*(1-(H-h0)/delta)^p for H-h0<delta, zero otherwise. Both differentiate the full potential including curvature. enabled gates both repulsions; strength scales only the outer term. These parameters remain available when the net model is disabled or partially blended.",
+    "_free_repulsion_reference": "Trial constitutive parameters, not measured graphite-CMC force constants. Disabling net_potential restores the outer-plus-inner legacy model; additionally setting inner_work_per_g_L_J_m2=0 restores its outer-only form. Medium viscosity and friction remain explicit independent inputs.",
+    "net_potential": {
+      "enabled": true,
+      "start_free_g_L": 1.1015785714285715,
+      "full_free_g_L": 13.101578571428572,
+      "contact_force_N": 1.5e-10,
+      "barrier_force_N": 2e-11,
+      "attraction_range_m": 1e-09,
+      "repulsion_range_m": 6e-09
+    },
+    "_net_potential_model": "Phenomenological total-potential screening: blend=clamp((free_g_L-start_free_g_L)/(full_free_g_L-start_free_g_L),0,1); U=(1-blend)*U_legacy(free_g_L)+blend*U_net. The legacy branch uses the same current free concentration, not a frozen 4 g/L potential. At full blend the legacy adsorption, outer/inner repulsion and entire RE2 tail are replaced. U_net is zero at and beyond h0+attraction_range_m+repulsion_range_m=9 nm. Geometry scales with local Derjaguin length divided by reference a*a/c, derived from the configured semiaxes (13.6125 micrometres here). Force parameters specify the reference geometry, not every orientation.",
+    "_net_potential_reference": "Unmeasured starting constitutive parameters. Activation starts at the saturated-adsorption 4 g/L benchmark and reaches full strength at 16 g/L. The shipped 4 g/L case and pure graphite retain their legacy laws. This is an explicit hypothesis for concentration-dependent total interactions, not a claim of established molecular screening.",
+    "_initialization": "The common 10 nm initial clearance exceeds the active net potential's 9 nm support. This is only a geometric initial-placement condition; rough_contact.roughness_gap_m remains 2 nm and no aging or preshear is performed by initialization."
   }
 }

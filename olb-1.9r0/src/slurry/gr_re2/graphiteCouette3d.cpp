@@ -179,6 +179,12 @@ void simulate(const Config& c){
   solver.pair.freeCmcInnerRepulsionWork=c.free_cmc_inner_repulsion_work;
   solver.pair.freeCmcInnerRepulsionRange=c.free_cmc_inner_repulsion_range;
   solver.pair.freeCmcInnerRepulsionPower=c.free_cmc_inner_repulsion_power;
+  solver.pair.cmcNetBlend=c.cmc_net_blend;
+  solver.pair.cmcNetContactForce=c.cmc_net_contact_force;
+  solver.pair.cmcNetBarrierForce=c.cmc_net_barrier_force;
+  solver.pair.cmcNetAttractionRange=c.cmc_net_attraction_range;
+  solver.pair.cmcNetRepulsionRange=c.cmc_net_repulsion_range;
+  solver.pair.cmcNetReferenceLength=c.cmc_net_reference_length;
   solver.pair.contactGap=c.cmc_contact_gap;
   solver.pair.cohesionRetention=c.cmc_cohesion_retention;
   solver.nearField.viscosity=c.dynamic_viscosity;solver.nearField.matchingGap=c.lubrication_cutoff_cells*c.dx;
@@ -241,6 +247,13 @@ void simulate(const Config& c){
   log<<" switch_gap_nm="<<c.switch_gap*1.e9<<" cutoff_gap_nm="<<c.cutoff_gap*1.e9
      <<" free_cmc_repulsion_pressure_Pa="<<c.free_cmc_repulsion_pressure
      <<" free_cmc_repulsion_length_nm="<<c.free_cmc_repulsion_length*1.e9<<std::endl;
+  if(c.cmc_net_blend>0.)
+    log<<"cmc_net_potential_version=1 cmc_net_blend="<<c.cmc_net_blend
+       <<" cmc_net_contact_force_N="<<c.cmc_net_contact_force
+       <<" cmc_net_barrier_force_N="<<c.cmc_net_barrier_force
+       <<" cmc_net_attraction_range_nm="<<c.cmc_net_attraction_range*1.e9
+       <<" cmc_net_repulsion_range_nm="<<c.cmc_net_repulsion_range*1.e9
+       <<" cmc_net_reference_length_m="<<c.cmc_net_reference_length<<std::endl;
   log<<"particle_solver="<<c.particle_solver<<" particle_tolerance="<<c.particle_tolerance
      <<" force_absolute_tolerance_N="<<c.particle_force_absolute_tolerance
      <<" torque_absolute_tolerance_N_m="<<c.particle_torque_absolute_tolerance
@@ -274,7 +287,13 @@ void simulate(const Config& c){
         <<",\"free_cmc_inner_repulsion_version\":1"
         <<",\"free_cmc_inner_repulsion_work_J_m2\":"<<c.free_cmc_inner_repulsion_work
         <<",\"free_cmc_inner_repulsion_range_m\":"<<c.free_cmc_inner_repulsion_range
-        <<",\"free_cmc_inner_repulsion_power\":"<<c.free_cmc_inner_repulsion_power<<"}"
+        <<",\"free_cmc_inner_repulsion_power\":"<<c.free_cmc_inner_repulsion_power
+        <<",\"cmc_net_potential_version\":1,\"cmc_net_blend\":"<<c.cmc_net_blend
+        <<",\"cmc_net_contact_force_N\":"<<c.cmc_net_contact_force
+        <<",\"cmc_net_barrier_force_N\":"<<c.cmc_net_barrier_force
+        <<",\"cmc_net_attraction_range_m\":"<<c.cmc_net_attraction_range
+        <<",\"cmc_net_repulsion_range_m\":"<<c.cmc_net_repulsion_range
+        <<",\"cmc_net_reference_length_m\":"<<c.cmc_net_reference_length<<"}"
       <<",\n\"cmc_contact\":{\"model_version\":"<<c.cmc_contact_version
       <<",\"contact_gap_m\":"<<solver.rough.gap<<",\"cohesion_retention\":"<<c.cmc_cohesion_retention<<"}"
       <<",\n\"pass_max\":"<<c.pass_max
@@ -402,9 +421,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #endif
     return 0;
   }

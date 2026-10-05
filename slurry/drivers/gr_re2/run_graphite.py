@@ -46,6 +46,7 @@ def integer(value, name, minimum=0):
 SURFACE_ADHESION_VERSION = 1
 FREE_CMC_REPULSION_VERSION = 1
 FREE_CMC_INNER_REPULSION_VERSION = 1
+CMC_NET_POTENTIAL_VERSION = 1
 MOLAR_GAS_CONSTANT = 8.31446261815324
 PASS_MAX_VERSION = 1
 LOCAL_ADHESION_DEFAULTS = {
@@ -64,6 +65,10 @@ FREE_CMC_CHECKPOINT_KEYS = (
 INNER_CMC_CHECKPOINT_KEYS = (
     'free_cmc_inner_repulsion_work', 'free_cmc_inner_repulsion_range',
     'free_cmc_inner_repulsion_power', 'free_cmc_inner_repulsion_version')
+NET_CMC_CHECKPOINT_KEYS = (
+    'cmc_net_blend', 'cmc_net_contact_force', 'cmc_net_barrier_force',
+    'cmc_net_attraction_range', 'cmc_net_repulsion_range',
+    'cmc_net_reference_length', 'cmc_net_potential_version')
 # Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201, report adsorption
 # saturation of 0.37 +/- 0.09 wt% relative to graphite + carbon-black mass.
 # This default is OUR approximate transfer to a 44 wt% graphite/water
@@ -80,6 +85,75 @@ FREE_CMC_REPULSION_DEFAULTS = {
     # Omission preserves the 7004d4762b outer-only model. The new case opts in.
     'inner_work_per_g_L_J_m2': 0.0, 'inner_range_m': 6.7e-10,
     'inner_exponent': 2.1}
+CMC_NET_POTENTIAL_DEFAULTS = {
+    'enabled': False,
+    'start_free_g_L': 1.1015785714285715,
+    'full_free_g_L': 13.101578571428572,
+    'contact_force_N': 1.5e-10, 'barrier_force_N': 2e-11,
+    'attraction_range_m': 1e-9, 'repulsion_range_m': 6e-9}
+
+
+def resolve_net_cmc(cmc, cfg):
+    """Blend the full legacy potential at this c_f with a compact net law.
+
+    This phenomenological replacement screens the complete legacy potential,
+    including its RE2 tail. The legacy branch retains the current free CMC
+    concentration throughout interpolation; it is not frozen at the 4 g/L case.
+    """
+    supplied = cmc.get('net_potential', {})
+    if not isinstance(supplied, dict):
+        raise ValueError('cmc.net_potential must be a JSON object')
+    unknown = sorted(str(key) for key in supplied if key not in CMC_NET_POTENTIAL_DEFAULTS
+                     and not (isinstance(key, str) and key.startswith('_')))
+    if unknown:
+        raise ValueError('Unknown cmc.net_potential fields: '+', '.join(unknown))
+    params = dict(CMC_NET_POTENTIAL_DEFAULTS)
+    params.update(supplied)
+    if not isinstance(params['enabled'], bool):
+        raise ValueError('cmc.net_potential.enabled must be a JSON boolean')
+    positive(params['start_free_g_L'], 'cmc.net_potential.start_free_g_L', zero=True)
+    for key in ('full_free_g_L', 'contact_force_N', 'barrier_force_N',
+                'attraction_range_m', 'repulsion_range_m'):
+        positive(params[key], 'cmc.net_potential.'+key)
+    if params['full_free_g_L'] <= params['start_free_g_L']:
+        raise ValueError('cmc.net_potential.full_free_g_L must exceed start_free_g_L')
+    span = params['full_free_g_L'] - params['start_free_g_L']
+    blend = (min(max((cmc['free_g_L']-params['start_free_g_L'])/span, 0.0), 1.0)
+             if params['enabled'] else 0.0)
+    a = cfg['particles']['diameter_m']/2
+    c = cfg['particles']['thickness_m']/2
+    # a*(a/c) avoids squaring a small SI length before dividing by c.
+    reference = a*(a/c) if c > 0 else math.inf
+    h0 = cfg['rough_contact']['roughness_gap_m']
+    saddle = h0 + params['attraction_range_m']
+    cutoff = saddle + params['repulsion_range_m']
+    attraction_energy = params['contact_force_N']*(params['attraction_range_m']/3)
+    barrier_energy = (8/15)*params['barrier_force_N']*params['repulsion_range_m']
+    if blend > 0:
+        if not cfg['rough_contact']['enabled'] or not cfg['interaction']['surface_adhesion']:
+            raise ValueError('Net CMC potential requires rough_contact.enabled=true '
+                             'and interaction.surface_adhesion=true')
+        if not h0 < saddle < cutoff <= cfg['interaction']['switch_gap_m']:
+            raise ValueError('Net CMC potential requires roughness_gap_m + attraction_range_m '
+                             '+ repulsion_range_m <= interaction.switch_gap_m with distinct endpoints')
+        for key, value in (('reference_length_m', reference),
+                           ('reference_attraction_energy_J', attraction_energy),
+                           ('reference_barrier_energy_J', barrier_energy)):
+            positive(value, 'derived.cmc.net_potential.'+key)
+        for value in (1/params['attraction_range_m'], 1/params['repulsion_range_m'],
+                      1/reference, attraction_energy/reference, barrier_energy/reference):
+            if not math.isfinite(value):
+                raise ValueError('Net CMC potential scales must be representable')
+    state = {key: params[key] for key in CMC_NET_POTENTIAL_DEFAULTS}
+    state.update(active=blend > 0, blend=blend, model_version=CMC_NET_POTENTIAL_VERSION,
+                 reference_length_m=reference, saddle_gap_m=saddle, cutoff_gap_m=cutoff,
+                 reference_attraction_energy_J=attraction_energy,
+                 reference_barrier_energy_J=barrier_energy,
+                 model='phenomenological total-potential screening, including the RE2 tail',
+                 interpolation='(1-blend)*legacy_potential_at_same_free_g_L + blend*net_potential',
+                 legacy_potential_weight=1-blend,
+                 re2_tail_weight=1-blend)
+    return params, state
 
 
 def resolve_free_cmc(cmc, cfg):
@@ -178,8 +252,10 @@ def resolve_cmc(cfg):
     if legacy:
         raise ValueError('The coated-contact/free-cohesion model cannot be combined with '
                          'the restored CMC repulsion model. Remove legacy cmc fields: '+', '.join(legacy)+
-                         '; contact remains at rough_contact.roughness_gap_m and attraction is not screened.')
-    unknown = sorted(str(key) for key in supplied if key not in CMC_DEFAULTS and key != 'free_repulsion'
+                         '; contact remains at rough_contact.roughness_gap_m. '
+                         'Use cmc.net_potential for the explicit total-potential model.')
+    unknown = sorted(str(key) for key in supplied if key not in CMC_DEFAULTS
+                     and key not in ('free_repulsion', 'net_potential')
                      and not (isinstance(key, str) and key.startswith('_')))
     if unknown:
         raise ValueError('Unknown cmc fields: '+', '.join(unknown))
@@ -191,6 +267,7 @@ def resolve_cmc(cfg):
     if cmc['q_sat'] > 1:
         raise ValueError('cmc.q_sat must be between zero and one')
     cmc['free_repulsion'], free_metadata = resolve_free_cmc(cmc, cfg)
+    cmc['net_potential'], net_metadata = resolve_net_cmc(cmc, cfg)
     adsorbed = min(cmc['adsorbed_g_L'], cmc['adsorbed_saturation_g_L'])
     theta = adsorbed / cmc['adsorbed_saturation_g_L']
     # Preserve the exact endpoint values, including the pure-Gr fingerprint.
@@ -217,7 +294,8 @@ def resolve_cmc(cfg):
         background_work_J_m2=background_work,
         effective_adhesion_work_J_m2=effective_work,
         free_repulsion=free_metadata,
-        free_cmc_physics_enabled=free_metadata['active'])
+        net_potential=net_metadata,
+        free_cmc_physics_enabled=free_metadata['active'] or net_metadata['active'])
     return cmc, metadata
 
 
@@ -483,6 +561,14 @@ def solver_values(cfg, output, particles, max_steps):
             values.update(free_cmc_inner_repulsion_work=free['inner_repulsion_work_J_m2'],
                           free_cmc_inner_repulsion_range=free['inner_range_m'],
                           free_cmc_inner_repulsion_power=free['inner_exponent'])
+        net = cmc_metadata['net_potential']
+        if net['active']:
+            values.update(cmc_net_blend=net['blend'],
+                          cmc_net_contact_force=net['contact_force_N'],
+                          cmc_net_barrier_force=net['barrier_force_N'],
+                          cmc_net_attraction_range=net['attraction_range_m'],
+                          cmc_net_repulsion_range=net['repulsion_range_m'],
+                          cmc_net_reference_length=net['reference_length_m'])
     return values
 
 
@@ -498,6 +584,10 @@ def require_local_adhesion_build(cfg, build_info):
                              'Rebuild with build_slurry_cpu.sbatch before running.')
         if free['inner_active'] and build_info.get('free_cmc_inner_repulsion_version') != FREE_CMC_INNER_REPULSION_VERSION:
             raise ValueError('This configuration requires the compact inner free-CMC repulsion potential. '
+                             'Rebuild with build_slurry_cpu.sbatch before running.')
+        if (cmc_metadata['net_potential']['active']
+                and build_info.get('cmc_net_potential_version') != CMC_NET_POTENTIAL_VERSION):
+            raise ValueError('This configuration requires the net CMC total-potential model. '
                              'Rebuild with build_slurry_cpu.sbatch before running.')
     if cfg['interaction']['surface_adhesion']:
         if build_info.get('surface_adhesion_version') != SURFACE_ADHESION_VERSION:
@@ -584,7 +674,9 @@ def validate_restart(cfg,meta,checkpoint,ranks,max_steps=0,allow_complete=False)
             ('outer', 'free_cmc_repulsion_pressure', 'free_cmc_repulsion_version',
              FREE_CMC_REPULSION_VERSION, FREE_CMC_CHECKPOINT_KEYS),
             ('inner', 'free_cmc_inner_repulsion_work', 'free_cmc_inner_repulsion_version',
-             FREE_CMC_INNER_REPULSION_VERSION, INNER_CMC_CHECKPOINT_KEYS)):
+             FREE_CMC_INNER_REPULSION_VERSION, INNER_CMC_CHECKPOINT_KEYS),
+            ('net potential', 'cmc_net_blend', 'cmc_net_potential_version',
+             CMC_NET_POTENTIAL_VERSION, NET_CMC_CHECKPOINT_KEYS)):
         active = values.get(physical_key, 0.0) > 0
         saved_active = immutable.get(physical_key, 0.0) > 0
         if active != saved_active:

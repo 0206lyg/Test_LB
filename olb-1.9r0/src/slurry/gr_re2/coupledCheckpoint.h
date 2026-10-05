@@ -89,6 +89,11 @@ inline std::map<std::string,double> physics(const Config& c,const Units& u,std::
     KEEP(free_cmc_inner_repulsion_power);
     out["free_cmc_inner_repulsion_version"]=1.;
   }
+  if(c.cmc_net_blend>0.){
+    KEEP(cmc_net_blend);KEEP(cmc_net_contact_force);KEEP(cmc_net_barrier_force);
+    KEEP(cmc_net_attraction_range);KEEP(cmc_net_repulsion_range);KEEP(cmc_net_reference_length);
+    out["cmc_net_potential_version"]=1.;
+  }
   if(c.cmc_contact_version>0){
     // No new keys for inactive CMC: existing pure-Gr checkpoints remain valid.
     KEEP(cmc_contact_gap);KEEP(cmc_cohesion_retention);KEEP(cmc_contact_version);

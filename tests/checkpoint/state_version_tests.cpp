@@ -147,10 +147,51 @@ void signatures() {
   require(cp::signature(cfg,units,2,1)!=inner,"Changed inner range accepted by checkpoint signature");
   cfg.free_cmc_inner_repulsion_range=5.e-10;cfg.free_cmc_inner_repulsion_power=2.4;
   require(cp::signature(cfg,units,2,1)!=inner,"Changed inner power accepted by checkpoint signature");
+  cfg.free_cmc_inner_repulsion_work=0.;
+  cfg.cmc_net_contact_force=1.7e-10;cfg.cmc_net_barrier_force=2.3e-11;
+  cfg.cmc_net_attraction_range=1.1e-9;cfg.cmc_net_repulsion_range=6.3e-9;
+  cfg.cmc_net_reference_length=14.e-6;
+  require(cp::signature(cfg,units,2,1)==pure,"Dormant net CMC changed the legacy checkpoint signature");
+  cfg.cmc_net_blend=.63;
+  const auto net=cp::signature(cfg,units,2,1);
+  require(net!=pure&&net.find("cmc_net_potential_version=1\n")!=std::string::npos,
+      "Active net CMC is missing from the checkpoint signature");
+  for(auto field:{&c::Config::cmc_net_blend,&c::Config::cmc_net_contact_force,
+      &c::Config::cmc_net_barrier_force,&c::Config::cmc_net_attraction_range,
+      &c::Config::cmc_net_repulsion_range,&c::Config::cmc_net_reference_length}) {
+    auto changed=cfg;changed.*field*=1.1;
+    require(cp::signature(changed,units,2,1)!=net,"Changed net-CMC parameter accepted by checkpoint signature");
+  }
+}
+
+void netConfiguration(const cp::fs::path& directory) {
+  const std::string base="surface_adhesion=1\ncmc_net_blend=0.63\n"
+      "cmc_net_contact_force=1.7e-10\ncmc_net_barrier_force=2.3e-11\n"
+      "cmc_net_attraction_range=1.1e-9\ncmc_net_repulsion_range=6.3e-9\n"
+      "cmc_net_reference_length=1.4e-5\n";
+  const auto parse=[&](const std::string& text) {
+    const auto path=directory/"net.cfg";{std::ofstream output(path);output<<text;}
+    std::string program="config-test",option="--config",name=path.string();
+    char* args[]={program.data(),option.data(),name.data()};
+    return c::parseConfig(3,args);
+  };
+  const auto parsed=parse(base);
+  require(parsed.cmc_net_blend==.63&&parsed.cmc_net_contact_force==1.7e-10
+      &&parsed.cmc_net_barrier_force==2.3e-11&&parsed.cmc_net_attraction_range==1.1e-9
+      &&parsed.cmc_net_repulsion_range==6.3e-9&&parsed.cmc_net_reference_length==14.e-6,
+      "Net-CMC configuration fields were not parsed");
+  for(const std::string invalid:{"cmc_net_blend=1.1\n","cmc_net_contact_force=0\n",
+      "cmc_net_barrier_force=nan\n","cmc_net_attraction_range=0\n",
+      "cmc_net_repulsion_range=4e-7\n","cmc_net_reference_length=0\n",
+      "rough_contact_enabled=0\n","surface_adhesion=0\n","local_gap_fraction=0.1\n",
+      "cmc_contact_gap=3e-9\n","cmc_cohesion_retention=0.5\n"})
+    rejects([&]{parse(base+invalid);},"Invalid net-CMC configuration accepted");
+  const auto inactive=parse("cmc_net_blend=0\n");
+  require(!inactive.surface_adhesion,"Inactive net CMC unexpectedly changed the legacy model");
 }
 }
 int main() {
-  try {Scratch scratch;migrateLegacyAndRoundtrip(scratch.path);signatures();
+  try {Scratch scratch;migrateLegacyAndRoundtrip(scratch.path);signatures();netConfiguration(scratch.path);
     std::cout<<"PASS: checkpoint v1 migration, v2 counters, ABI/version guards and physics signatures\n";
     return 0;
   }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}

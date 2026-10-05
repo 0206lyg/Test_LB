@@ -113,98 +113,55 @@ W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 �
 사용하며, 이 모드에는 새 부착일·범위·곡률 연결 키를 넣을 수 없습니다.
 이전 결과 재현에는 당시의 JSON을 별도 `--config`로 지정합니다.
 
-### 2.1. 흡착 CMC와 free-CMC 반발: `gr_CMC.json`
+### 2.1. CMC 90k: 저농도 접착과 고농도 유효 순포텐셜
 
-`slurry/cases/gr_CMC.json`은 `pure_gr.json`을 자동 상속하지 않는 독립 설정입니다.
-실행 모델은 `gr_cmc`입니다. 흡착 CMC는 추가 접착력을 낮추며, free CMC는 기존
-외측 지수형 반발과 새 내측 반발을 더합니다. **기계적 접촉은 2 nm로 유지**하고,
-피복에 의한 4 nm 접촉면 이동과 free CMC에 의한 전체 인력 차폐는 사용하지 않습니다.
+`slurry/cases/gr_CMC.json`은 16 g/L의 새로운 **현상론적 순포텐셜**을 사용합니다.
+`gr_CMC_4g_L.json`은 이전 외측/내측 free-CMC 반발 모델을 그대로 사용합니다.
+두 조건의 흡착 CMC는 2.8984214285714285 g/L로 같고, 기계적 접촉은 2 nm입니다.
+
+16 g/L에서는 기존 RE², 추가 접착력, 외측/내측 반발의 합을 새 에너지로 교체합니다.
+기준 face-to-face 입자쌍에서 2–3 nm는 최대 150 pN의 인력,
+3–9 nm는 최대 20 pN의 반발이고, 9 nm 이상은 순힘과 에너지가 0입니다.
+**9 nm의 장거리 인력 제거는 채택한 모델링 가정이며, 측정된 CMC 차폐 길이가 아닙니다.**
 
 ```json
-"cmc": {
-  "adsorbed_g_L": 2.8984214285714285,
-  "free_g_L": 13.10157857142857,
-  "adsorbed_saturation_g_L": 2.8984214285714285,
-  "q_sat": 0.33,
-  "free_repulsion": {
-    "enabled": true,
-    "strength": 1.0,
-    "decay_length_m": 5e-9,
-    "degree_of_substitution": 0.7,
-    "repeat_unit_molar_mass_kg_mol": 0.218,
-    "osmotic_coefficient": 0.5,
-    "inner_work_per_g_L_J_m2": 0.000543218,
-    "inner_range_m": 6.7e-10,
-    "inner_exponent": 2.1
-  }
+"net_potential": {
+  "enabled": true,
+  "start_free_g_L": 1.1015785714285715,
+  "full_free_g_L": 13.101578571428572,
+  "contact_force_N": 1.5e-10,
+  "barrier_force_N": 2e-11,
+  "attraction_range_m": 1e-9,
+  "repulsion_range_m": 6e-9
 }
 ```
 
-두 농도는 **수상 1 L 기준의 독립 입력**입니다. 흡착량은 포화값까지만 적용하고
-초과량을 free CMC로 옮기지 않습니다. `free_g_L`에는 상한이 없으며,
-`1 g/L = 1 kg/m³`이므로 흡착량을 다시 빼거나 수상 부피분율을 곱하지 않습니다.
-같은 포화 흡착량에서 총 4 g/L의 free 입력은 1.1015785714285715 g/L,
-총 16 g/L의 기본 free 입력은 13.10157857142857 g/L입니다.
+이 객체는 `cmc` 안에 둡니다. Free 농도에 따라 기존 모델과 새 순포텐셜 사이의
+에너지를 선형 보간합니다. 시작 농도 이하는 기존 모델이고, 완전 적용 농도 이상은
+새 순포텐셜입니다. `enabled=false` 또는 객체 생략 시 이전 물리 모델로 돌아갑니다.
+그때도 별도로 입력한 수치 허용오차는 그대로 사용합니다.
+기존 `free_repulsion` 입력은 보간 및 이전 모델 재현을 위해 남겨 둡니다.
 
-포화값은 [Gwag et al., DOI 10.1021/acsnano.6c10201](https://doi.org/10.1021/acsnano.6c10201)의
-Gr+CB 대비 겉보기 흡착량 약 0.37 ± 0.09 wt%를
-`0.0037 × 997 × 0.44 / 0.56 = 2.8984214285714285 g/L`로 환산한 기준값입니다.
-작은 CMC 질량을 환산에서 생략했으며 논문이 직접 보고한 수상 농도는 아닙니다.
-흡착에 따른 추가 접착력 잔존율은 기존
-\(q_a=[1-(1-\sqrt{q_{\rm sat}})\theta_a]^2\),
-\(\theta_a=\min(x_a/x_{a,\rm sat},1)\)을 유지합니다.
-따라서 포화 상태의 두 농도는 동일한 `q_sat=0.33`을 사용합니다.
-Bare 부착일에서 기존 배경 일을 뺀 추가 접착력에만 이 잔존율을 적용합니다.
+순포텐셜은 곡률까지 자동 미분하므로 힘과 토크가 같은 에너지에서 나옵니다.
+별도의 CMC 점성저항, 전단률 의존 계수, 피복 탈착, 마찰계수 변경은 없습니다.
+입자 배치도 두 경우 모두 기존의 최소 10 nm 간격을 사용합니다.
+16 g/L의 작은 힘을 구분하기 위해 절대 힘·토크 허용오차만 각각
+1e-15 N, 1.65e-21 N·m로 낮췄습니다. Solver 알고리즘·상대 허용오차는 유지합니다.
 
-탄소 간격 \(H\), \(s=H-h_0\), \([z]_+=\max(z,0)\)에 대해 free 반발은
-
-\[
-U_{\rm out}=\pi\lambda_{ij}^{D}P_f\ell^2e^{-s/\ell},\qquad
-U_{\rm in}=\frac{\pi\lambda_{ij}^{D}W_s\delta_i}{p}
-\left[1-\frac{s}{\delta_i}\right]_+^p,
-\]
-\[
-W_s=\kappa c_f,\quad
-\kappa=0.000543218\ \frac{\mathrm{J/m^2}}{\mathrm{g/L}},\quad
-\delta_i=0.67\ \mathrm{nm},\quad p=2.1.
-\]
-
-외측은 `7004d4762b`의 압력 환산과 `strength=1`, \(\ell=5\ \mathrm{nm}\)를
-유지합니다. 내측은 \(s<\delta_i\)에서만 작용하며 접촉점을 이동시키지 않습니다.
-두 항을 스칼라 포텐셜에 더하고 곡률까지 자동 미분하여 힘과 토크를 계산합니다.
-전단률별 계수 변경이나 흡착·탈착 동역학은 추가하지 않습니다.
-`strength`는 외측만, `enabled`는 두 반발항 모두를 제어합니다.
-옛 JSON에서 `inner_work_per_g_L_J_m2`를 생략하면 **0**이므로 외측만 작동합니다.
-위 기본 설정은 계수를 명시하여 내측 반발을 활성화합니다.
-
-기준 입자쌍 계산(정면 face-to-face, 포화 흡착, free 13.2 g/L, 298 K)에서는
-접촉점 순힘 −10.000 nN, 분리 중 최대 인력 17.121 nN,
-탈출 장벽 \(12.224\times10^{-18}\) J를 남깁니다. 내측 범위에 별도의 비접촉 안정
-간격을 만들지 않는 선택입니다. 이 조건은 기본 free 13.10157857 g/L와 구별합니다.
-계수는 모델 선택값이며 **16 g/L의 약 1 Pa·s Newtonian plateau는 아직 검증하지
-않았습니다.** 수식·단위·진입 장벽 등은 [CMC 모델 설명](docs/free-cmc-repulsion.md)에 있습니다.
-
-`gr_CMC.json`(16 g/L)과 `gr_CMC_4g_L.json`(4 g/L)의 초기 배치 최소 간격은 모두 10 nm입니다.
-마찰·rolling·lubrication·연속상 점도와 solver는 이번 변경에서 유지합니다.
-옛 `cmc.free_cohesion`, `cmc.contact_offset_at_saturation_m` 입력은 드라이버가
-거부하므로 제거하고 위 `free_repulsion` 설정을 사용합니다.
-CMC가 없거나 흡착·free 농도가 모두 0이면 기존 pure-Gr 힘 법칙을 회복합니다.
-
-내측 입력은 `free_cmc_inner_repulsion_work`, `free_cmc_inner_repulsion_range`,
-`free_cmc_inner_repulsion_power`로 C++에 전달되며 빌드 정보의
-`free_cmc_inner_repulsion_version`은 1이어야 합니다.
-활성 물리 설정은 checkpoint signature에 포함하므로 **동일 물리 설정만 재시작**합니다.
-농도나 포텐셜을 바꾼 비교는 새 계산으로 수행합니다.
+새 빌드의 `cmc_net_potential_version`은 1입니다. 활성 순포텐셜의 모든 계수는
+checkpoint 물리 signature에 포함됩니다. 이전 16 g/L 계산은 새 포텐셜과 물리가
+다르므로 새 계산으로 시작합니다. 순포텐셜이 비활성인 기존 계산의 signature는
+변경하지 않습니다.
 
 소스 업데이트 후 한 번 재빌드하고, 빌드가 끝난 뒤 실행합니다.
 
 ```bash
 sbatch build_slurry_cpu.sbatch
-sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 100
+sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 10,100
 ```
 
-이후 JSON 값만 바꿀 때는 재빌드하지 않습니다. 기본 `run.json`의 자동 실행 목록은
-유지하며 CMC 실행에는 `--cases gr_cmc`를 지정합니다.
+수식, 계수 정의, 농도 보간 및 이전 반발 모델은
+[CMC 모델 설명](docs/free-cmc-repulsion.md)에 정리되어 있습니다.
 
 ### 2.2. 이번 업데이트에서 확인한 legacy 정리 후보
 

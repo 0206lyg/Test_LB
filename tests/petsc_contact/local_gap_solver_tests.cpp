@@ -89,8 +89,8 @@ void replayVersions() {
   input.force.resize(2);input.torque.resize(2);input.contacts.resize(1);input.cache.resize(1);
   input.contacts[0].active=true;input.contacts[0].normalLoad=9.36e-7;
   input.contacts[0].rollingCap=9.36e-14;
-  const auto v6=scratch.path/"v6.dat";d::writeParticleReplay(input,v6.string());
-  const auto read=d::readParticleReplay(v6.string());
+  const auto v7=scratch.path/"v7.dat";d::writeParticleReplay(input,v7.string());
+  const auto read=d::readParticleReplay(v7.string());
   const auto& a=input.settings.pair;const auto& b=read.settings.pair;
   require(a.roughnessGap==b.roughnessGap&&a.localGap==b.localGap
       &&a.localGapFraction==b.localGapFraction&&a.localSwitchExcessGap==b.localSwitchExcessGap
@@ -103,15 +103,15 @@ void replayVersions() {
   require(expected.forceI==actual.forceI&&expected.energy==actual.energy,"Replay changed local pair interaction");
 
   require(!b.surfaceAdhesion,"Legacy replay unexpectedly enabled surface adhesion");
-  // v1-v5 omit the inner-CMC line; v1-v3 also omit the outer-CMC line;
+  // v1-v6 omit net CMC; v1-v5 omit inner CMC; v1-v3 omit outer CMC;
   // v1-v2 omit surface parameters;
   // v1 additionally omits the legacy local line.
-  for(int version:{1,2,3,4,5}) {
-    std::ifstream source(v6);const auto oldPath=scratch.path/("v"+std::to_string(version)+".dat");
+  for(int version:{1,2,3,4,5,6}) {
+    std::ifstream source(v7);const auto oldPath=scratch.path/("v"+std::to_string(version)+".dat");
     std::ofstream target(oldPath);std::string line;int index=0;
     while(std::getline(source,line)) {
       if(index==0)target<<"GR_PARTICLE_REPLAY "<<version<<'\n';
-      else if(index!=9&&(version>=5||index!=8)&&(version>=4||index!=7)
+      else if(index!=10&&(version>=6||index!=9)&&(version>=5||index!=8)&&(version>=4||index!=7)
           &&(version>=3||index!=6)&&(version!=1||index!=5))target<<line<<'\n';
       ++index;
     }
@@ -119,6 +119,7 @@ void replayVersions() {
     require(!old.settings.pair.surfaceAdhesion,"Legacy replay unexpectedly enabled surface adhesion");
     require(old.settings.pair.freeCmcRepulsionPressure==0.,"Legacy replay unexpectedly enabled free-CMC repulsion");
     require(old.settings.pair.freeCmcInnerRepulsionWork==0.,"Legacy replay unexpectedly enabled inner CMC repulsion");
+    require(old.settings.pair.cmcNetBlend==0.,"Legacy replay unexpectedly enabled net CMC potential");
     require(old.settings.passMax==(version>=5?input.settings.passMax:0),
         "Legacy failure replay must retain its maximum-iteration policy");
     require(old.settings.pair.localGapFraction==(version==1?0.:a.localGapFraction),
@@ -153,6 +154,44 @@ void replayVersions() {
   const auto after=g::evaluatePair(restored.bodies[0],restored.bodies[1],p);
   require(before.forceI==after.forceI&&before.energy==after.energy,
           "Replay changed surface adhesion interaction");
+  // A genuine v6 inner-CMC file must retain its nonzero terms and use net blend 0.
+  const auto oldInner=scratch.path/"inner_v6.dat";
+  {
+    std::ifstream source(surface);std::ofstream target(oldInner);std::string line;int index=0;
+    while(std::getline(source,line)) {
+      if(index==0)target<<"GR_PARTICLE_REPLAY 6\n";
+      else if(index!=10)target<<line<<'\n';
+      ++index;
+    }
+  }
+  const auto oldInnerRead=d::readParticleReplay(oldInner.string());
+  const auto oldInnerPair=g::evaluatePair(oldInnerRead.bodies[0],oldInnerRead.bodies[1],oldInnerRead.settings.pair);
+  require(oldInnerRead.settings.pair.cmcNetBlend==0.
+      &&oldInnerRead.settings.pair.freeCmcInnerRepulsionWork==p.freeCmcInnerRepulsionWork
+      &&oldInnerPair.forceI==before.forceI&&oldInnerPair.energy==before.energy,
+      "Version 6 inner-CMC replay changed its original interaction");
+
+  input.settings.pair.cmcNetBlend=.63;
+  input.settings.pair.cmcNetContactForce=1.7e-10;
+  input.settings.pair.cmcNetBarrierForce=2.3e-11;
+  input.settings.pair.cmcNetAttractionRange=1.1e-9;
+  input.settings.pair.cmcNetRepulsionRange=6.3e-9;
+  input.settings.pair.cmcNetReferenceLength=14.e-6;
+  const auto net=scratch.path/"net.dat";d::writeParticleReplay(input,net.string());
+  const auto netRead=d::readParticleReplay(net.string());
+  const auto& netParameters=netRead.settings.pair;
+  require(netParameters.cmcNetBlend==input.settings.pair.cmcNetBlend
+      &&netParameters.cmcNetContactForce==input.settings.pair.cmcNetContactForce
+      &&netParameters.cmcNetBarrierForce==input.settings.pair.cmcNetBarrierForce
+      &&netParameters.cmcNetAttractionRange==input.settings.pair.cmcNetAttractionRange
+      &&netParameters.cmcNetRepulsionRange==input.settings.pair.cmcNetRepulsionRange
+      &&netParameters.cmcNetReferenceLength==input.settings.pair.cmcNetReferenceLength,
+      "Replay lost net-CMC potential parameters");
+  const auto netBefore=g::evaluatePair(input.bodies[0],input.bodies[1],input.settings.pair);
+  const auto netAfter=g::evaluatePair(netRead.bodies[0],netRead.bodies[1],netParameters);
+  require(netBefore.forceI==netAfter.forceI&&netBefore.energy==netAfter.energy,
+      "Replay changed the blended net-CMC interaction");
+  input.settings.pair.cmcNetBlend=0.;
   input.settings.pair.freeCmcRepulsionPressure=0.;
   input.settings.pair.freeCmcInnerRepulsionWork=0.;
   input.settings.pair.contactGap=input.settings.rough.gap=3.e-9;
@@ -163,9 +202,29 @@ void replayVersions() {
       &&coatedRead.settings.pair.cohesionRetention==.2&&coatedRead.settings.passMax==1,
       "Replay lost coated-contact law or maximum-iteration policy");
 }
+
+void netContactBirth() {
+  auto s=settings();s.pair.localGapFraction=0.;s.pair.surfaceAdhesion=true;s.pair.cmcNetBlend=1.;
+  auto b=bodies(s);
+  std::vector<g::Vec3> force(2),torque(2);std::vector<g::GapCache> cache(1);
+  g::PersistentContactState contacts(1);std::vector<int> slots{0};
+  const double L=b[0].axes[0];
+  d::Residual residual{b,force,torque,s,cache,contacts,slots,1.e-8,0.,L,1.,1};
+  const auto pair=g::evaluatePair(b[0],b[1],s.pair);
+  const double adhesion=std::max(0.,g::dot(pair.forceI,pair.normal));
+  d::Vector q(13,0.);q[12]=adhesion;d::Evaluation e;std::string error;
+  require(residual(q,e,error),"Net-CMC contact residual failed at h0");
+  require(adhesion>0.&&e.contacts[0].active,"Net-CMC attraction did not permit true contact");
+  require(std::abs(e.contacts[0].rollingCap-s.rough.rollingLength*adhesion)
+      <=1.e-10*s.rough.rollingLength*adhesion,"Net-CMC rolling birth used a legacy force");
+  require(!contacts[0].active,"Net-CMC residual mutated committed contact history");
+  s.rough.gap=3.e-9;bool rejected=false;
+  try {g::validateParticlePairSettings(s);}catch(const std::exception&){rejected=true;}
+  require(rejected,"Net-CMC potential accepted a different physical contact plane");
+}
 }
 
 int main() {
-  try {trialDomainAndBirth();replayVersions();std::cout<<"Local gap solver/replay tests passed\n";return 0;}
+  try {trialDomainAndBirth();replayVersions();netContactBirth();std::cout<<"Local gap solver/replay tests passed\n";return 0;}
   catch(const std::exception& error){std::cerr<<"Local gap solver/replay test failed: "<<error.what()<<'\n';return 1;}
 }

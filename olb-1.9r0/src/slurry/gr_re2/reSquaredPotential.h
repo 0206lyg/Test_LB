@@ -37,6 +37,15 @@ struct PairParameters {
   // Zero work preserves all previous pair models, including replay fixtures.
   double freeCmcInnerRepulsionWork=0.,freeCmcInnerRepulsionRange=.67e-9;
   double freeCmcInnerRepulsionPower=2.1;
+  // Effective net CMC interaction: replace, rather than add to, the complete
+  // legacy pair energy. Forces are reference aligned-face amplitudes (N);
+  // local curvature/reference length supplies the geometry dependence.
+  // The concentration-dependent blend is supplied by the caller and is held
+  // constant while differentiating a pair. Zero preserves legacy arithmetic.
+  double cmcNetBlend=0.;
+  double cmcNetContactForce=1.5e-10,cmcNetBarrierForce=2.e-11;
+  double cmcNetAttractionRange=1.e-9,cmcNetRepulsionRange=6.e-9;
+  double cmcNetReferenceLength=13.6125e-6;
 };
 inline double effectiveContactGap(const PairParameters&p){
   return p.contactGap>0.?p.contactGap:p.roughnessGap;
@@ -60,6 +69,34 @@ inline void validatePairParameters(const PairParameters&p){
     throw std::domain_error("CMC contact gap must be zero (bare reference) or finite and at least h0>0");
   if(!std::isfinite(p.cohesionRetention)||p.cohesionRetention<0.||p.cohesionRetention>1.)
     throw std::domain_error("CMC cohesion retention must be finite and between zero and one");
+  if(!std::isfinite(p.cmcNetBlend)||p.cmcNetBlend<0.||p.cmcNetBlend>1.
+     ||!std::isfinite(p.cmcNetContactForce)||!(p.cmcNetContactForce>0.)
+     ||!std::isfinite(p.cmcNetBarrierForce)||!(p.cmcNetBarrierForce>0.)
+     ||!std::isfinite(p.cmcNetAttractionRange)||!(p.cmcNetAttractionRange>0.)
+     ||!std::isfinite(p.cmcNetRepulsionRange)||!(p.cmcNetRepulsionRange>0.)
+     ||!std::isfinite(p.cmcNetReferenceLength)||!(p.cmcNetReferenceLength>0.))
+    throw std::domain_error("CMC net potential requires blend in [0,1] and finite forces/ranges/reference length>0");
+  if(p.cmcNetBlend>0.){
+    const double saddle=p.roughnessGap+p.cmcNetAttractionRange;
+    const double cutoff=saddle+p.cmcNetRepulsionRange;
+    const double attractionEnergy=p.cmcNetContactForce*(p.cmcNetAttractionRange/3.);
+    const double barrierEnergy=(8./15.)*p.cmcNetBarrierForce*p.cmcNetRepulsionRange;
+    const double outerCoefficient=16.*p.cmcNetBarrierForce*p.cmcNetRepulsionRange;
+    if(!p.surfaceAdhesion||p.localGapFraction!=0.||p.cohesionRetention!=1.
+       ||effectiveContactGap(p)!=p.roughnessGap
+       ||!std::isfinite(p.roughnessGap)||!(p.roughnessGap>0.)
+       ||!std::isfinite(saddle)||!(saddle>p.roughnessGap)
+       ||!std::isfinite(cutoff)||!(cutoff>saddle)||!(cutoff<=p.switchGap)
+       ||!std::isfinite(1./p.cmcNetAttractionRange)
+       ||!std::isfinite(1./p.cmcNetRepulsionRange)
+       ||!std::isfinite(1./p.cmcNetReferenceLength)
+       ||!std::isfinite(attractionEnergy)||!std::isfinite(barrierEnergy)
+       ||!(attractionEnergy>0.)||!(barrierEnergy>0.)
+       ||!std::isfinite(outerCoefficient)||!(outerCoefficient>0.)
+       ||!std::isfinite(attractionEnergy/p.cmcNetReferenceLength)
+       ||!std::isfinite(barrierEnergy/p.cmcNetReferenceLength))
+      throw std::domain_error("Active CMC net potential requires unshifted surface adhesion, no legacy local-gap/screening, cutoff<=far switch, and representable scales");
+  }
   if((effectiveContactGap(p)!=p.roughnessGap||p.cohesionRetention!=1.)
      &&p.localGapFraction>0.)
     throw std::domain_error("Coated-contact cohesion cannot be combined with legacy local-gap adhesion");
@@ -216,74 +253,110 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
   using namespace re2_detail;
   AD h(gap.gap);const Vec3 gi=scale(cross(gap.leverI,gap.normal),-1.),gj=cross(gap.leverJ,gap.normal);
   for(int k=0;k<3;++k){h.d[k]=gap.normal[k];h.d[3+k]=gi[k];h.d[6+k]=gj[k];}
-  AVec r{};for(int k=0;k<3;++k){r[k]=AD(dr[k]);r[k].d[k]=1.;}
-  const AD length=sqrt(re2_detail::dot(r,r));AVec rh{};for(int k=0;k<3;++k)rh[k]=r[k]/length;
-  const AD ell=orientationLength(bi,bj,rh,p.sigma);
-  AD ua=branch(h,ell,bi,bj,p,false),ur=branch(h,ell,bi,bj,p,true);
-  const bool localBackground=p.surfaceAdhesion&&gap.gap<p.curvatureCutoffGap;
-  const bool innerRepulsion=p.freeCmcInnerRepulsionWork>0.
-      &&gap.gap-p.roughnessGap<p.freeCmcInnerRepulsionRange;
-  AD localLength;
-  if(localBackground||p.freeCmcRepulsionPressure>0.||innerRepulsion){
-    const auto curvature=contactCurvature(bi,bj,gap);
-    localLength=AD(curvature.length);localLength.d=curvature.lengthDerivative;
-  }
-  if(localBackground){
-    const AD nearA=derjaguinBranch(h,localLength,p,false);
-    const AD nearR=derjaguinBranch(h,localLength,p,true);
-    if(gap.gap<=p.curvatureSwitchGap){ua=nearA;ur=nearR;}
-    else{
-      const AD sw=smoothSwitch((h-p.curvatureSwitchGap)/(p.curvatureCutoffGap-p.curvatureSwitchGap));
-      ua=ua+sw*(nearA-ua);ur=ur+sw*(nearR-ur);
+  AD ua,ur;
+  // At full replacement do not evaluate a large legacy attraction and then
+  // subtract it: the screened net model owns the entire pair energy.
+  if(p.cmcNetBlend!=1.){
+    AVec r{};for(int k=0;k<3;++k){r[k]=AD(dr[k]);r[k].d[k]=1.;}
+    const AD length=sqrt(re2_detail::dot(r,r));AVec rh{};for(int k=0;k<3;++k)rh[k]=r[k]/length;
+    const AD ell=orientationLength(bi,bj,rh,p.sigma);
+    ua=branch(h,ell,bi,bj,p,false);ur=branch(h,ell,bi,bj,p,true);
+    const bool localBackground=p.surfaceAdhesion&&gap.gap<p.curvatureCutoffGap;
+    const bool innerRepulsion=p.freeCmcInnerRepulsionWork>0.
+        &&gap.gap-p.roughnessGap<p.freeCmcInnerRepulsionRange;
+    AD localLength;
+    if(localBackground||p.freeCmcRepulsionPressure>0.||innerRepulsion){
+      const auto curvature=contactCurvature(bi,bj,gap);
+      localLength=AD(curvature.length);localLength.d=curvature.lengthDerivative;
     }
-    const AD s=h-effectiveContactGap(p);
-    if(s.v<p.adhesionRange){
+    if(localBackground){
+      const AD nearA=derjaguinBranch(h,localLength,p,false);
+      const AD nearR=derjaguinBranch(h,localLength,p,true);
+      if(gap.gap<=p.curvatureSwitchGap){ua=nearA;ur=nearR;}
+      else{
+        const AD sw=smoothSwitch((h-p.curvatureSwitchGap)/(p.curvatureCutoffGap-p.curvatureSwitchGap));
+        ua=ua+sw*(nearA-ua);ur=ur+sw*(nearR-ur);
+      }
+      const AD s=h-effectiveContactGap(p);
+      if(s.v<p.adhesionRange){
+        constexpr double pi=3.1415926535897932384626433832795;
+        const double excessWork=p.adhesionWork-surfaceBackgroundWork(p);
+        const AD opening=1.-s/p.adhesionRange;
+        // G=pi*lambda_D=2*pi/sqrt(det_t K). The quadratic pair energy is
+        // the Derjaguin integral of phi_coh=-DeltaW*(1-s/range)_+.
+        // Its energy AND force vanish at the cutoff. For Newton trial points
+        // s<0 use the same analytic polynomial; accepted states obey h>=Hc.
+        // DeltaW retains the bare h0 benchmark when Hc moves with adsorption.
+        // Differentiating localLength includes moving-contact force and torque.
+        ua=ua-(.5*pi*excessWork*p.adhesionRange)*localLength*opening*opening;
+      }
+    }
+    if(p.localGapFraction>0.&&gap.gap-p.roughnessGap<p.localCutoffExcessGap){
+      const AD s=h-p.roughnessGap,d=s+p.localGap;
+      // Differentiate the entire energy, including the local switch. Replacing
+      // both branches avoids double counting and keeps forces and torques
+      // conservative through the blend as well as at changing orientations.
+      AD weight(p.localGapFraction);
+      if(s.v>p.localSwitchExcessGap)
+        weight=weight*smoothSwitch((s-p.localSwitchExcessGap)/(p.localCutoffExcessGap-p.localSwitchExcessGap));
+      ua=ua+weight*(branch(d,ell,bi,bj,p,false)-ua);
+      ur=ur+weight*(branch(d,ell,bi,bj,p,true)-ur);
+    }
+    if(p.freeCmcRepulsionPressure>0.){
       constexpr double pi=3.1415926535897932384626433832795;
-      const double excessWork=p.adhesionWork-surfaceBackgroundWork(p);
-      const AD opening=1.-s/p.adhesionRange;
-      // G=pi*lambda_D=2*pi/sqrt(det_t K). The quadratic pair energy is
-      // the Derjaguin integral of phi_coh=-DeltaW*(1-s/range)_+.
-      // Its energy AND force vanish at the cutoff. For Newton trial points
-      // s<0 use the same analytic polynomial; accepted states obey h>=Hc.
-      // DeltaW retains the bare h0 benchmark when Hc moves with adsorption.
-      // Differentiating localLength includes moving-contact force and torque.
-      ua=ua-(.5*pi*excessWork*p.adhesionRange)*localLength*opening*opening;
+      const double decay=p.freeCmcRepulsionLength;
+      const double energyPerLength=(p.freeCmcRepulsionPressure*decay)*decay;
+      // U=pi*lambda_D*P*ell^2*exp[-(H-h0)/ell]. Differentiate both the gap
+      // and actual contact curvature; this term extends beyond the background's
+      // curvature cutoff. Keep the same analytic continuation for H<h0 trials.
+      ur=ur+localLength*(pi*energyPerLength)*exp(-(h-p.roughnessGap)/decay);
+    }
+    if(innerRepulsion){
+      constexpr double pi=3.1415926535897932384626433832795;
+      const AD opening=1.-(h-p.roughnessGap)/p.freeCmcInnerRepulsionRange;
+      const double energyPerLength=p.freeCmcInnerRepulsionWork*
+          (p.freeCmcInnerRepulsionRange/p.freeCmcInnerRepulsionPower);
+      // Differentiate the complete energy, including moving-contact curvature.
+      // Positive-gap Newton trials below h0 use the same analytic continuation;
+      // neither the physical contact constraint nor the adhesion plane moves.
+      ur=ur+localLength*(pi*energyPerLength)*realPower(opening,p.freeCmcInnerRepulsionPower);
+    }
+    // Screen the complete attractive energy before its force/torque derivatives
+    // are unpacked. Avoid extra arithmetic in the unchanged pure-Gr branch.
+    if(p.cohesionRetention!=1.)ua=ua*p.cohesionRetention;
+    if(gap.gap>p.switchGap){const AD t=(h-p.switchGap)/(p.cutoffGap-p.switchGap);const AD sw=smoothSwitch(t);ua=ua*sw;ur=ur*sw;}
+  }
+  if(p.cmcNetBlend>0.){
+    AD netA,netR;
+    const double saddle=p.roughnessGap+p.cmcNetAttractionRange;
+    const double cutoff=saddle+p.cmcNetRepulsionRange;
+    if(gap.gap<cutoff){
+      const auto curvature=contactCurvature(bi,bj,gap);
+      AD localLength(curvature.length);localLength.d=curvature.lengthDerivative;
+      const AD geometry=localLength/p.cmcNetReferenceLength;
+      if(gap.gap<saddle){
+        // The same cubic continues analytically below h0 for Newton trials;
+        // it neither shifts nor softens the accepted hard-contact constraint.
+        const AD opening=1.-(h-p.roughnessGap)/p.cmcNetAttractionRange;
+        netA=-(p.cmcNetContactForce*(p.cmcNetAttractionRange/3.))*power(opening,3);
+      }
+      if(gap.gap<=saddle){
+        netR=AD((8./15.)*p.cmcNetBarrierForce*p.cmcNetRepulsionRange);
+      }else{
+        // Integral of 16*FB*y^2*(1-y)^2, evaluated in z=1-y to
+        // avoid cancellation at the outer cutoff. U, dU and d2U join.
+        const AD z=(cutoff-h)/p.cmcNetRepulsionRange;
+        netR=(16.*p.cmcNetBarrierForce*p.cmcNetRepulsionRange)*
+            (power(z,3)/3.-power(z,4)/2.+power(z,5)/5.);
+      }
+      netA=geometry*netA;netR=geometry*netR;
+    }
+    if(p.cmcNetBlend==1.){ua=netA;ur=netR;}
+    else{
+      ua=(1.-p.cmcNetBlend)*ua+p.cmcNetBlend*netA;
+      ur=(1.-p.cmcNetBlend)*ur+p.cmcNetBlend*netR;
     }
   }
-  if(p.localGapFraction>0.&&gap.gap-p.roughnessGap<p.localCutoffExcessGap){
-    const AD s=h-p.roughnessGap,d=s+p.localGap;
-    // Differentiate the entire energy, including the local switch. Replacing
-    // both branches avoids double counting and keeps forces and torques
-    // conservative through the blend as well as at changing orientations.
-    AD weight(p.localGapFraction);
-    if(s.v>p.localSwitchExcessGap)
-      weight=weight*smoothSwitch((s-p.localSwitchExcessGap)/(p.localCutoffExcessGap-p.localSwitchExcessGap));
-    ua=ua+weight*(branch(d,ell,bi,bj,p,false)-ua);
-    ur=ur+weight*(branch(d,ell,bi,bj,p,true)-ur);
-  }
-  if(p.freeCmcRepulsionPressure>0.){
-    constexpr double pi=3.1415926535897932384626433832795;
-    const double decay=p.freeCmcRepulsionLength;
-    const double energyPerLength=(p.freeCmcRepulsionPressure*decay)*decay;
-    // U=pi*lambda_D*P*ell^2*exp[-(H-h0)/ell]. Differentiate both the gap
-    // and actual contact curvature; this term extends beyond the background's
-    // curvature cutoff. Keep the same analytic continuation for H<h0 trials.
-    ur=ur+localLength*(pi*energyPerLength)*exp(-(h-p.roughnessGap)/decay);
-  }
-  if(innerRepulsion){
-    constexpr double pi=3.1415926535897932384626433832795;
-    const AD opening=1.-(h-p.roughnessGap)/p.freeCmcInnerRepulsionRange;
-    const double energyPerLength=p.freeCmcInnerRepulsionWork*
-        (p.freeCmcInnerRepulsionRange/p.freeCmcInnerRepulsionPower);
-    // Differentiate the complete energy, including moving-contact curvature.
-    // Positive-gap Newton trials below h0 use the same analytic continuation;
-    // neither the physical contact constraint nor the adhesion plane moves.
-    ur=ur+localLength*(pi*energyPerLength)*realPower(opening,p.freeCmcInnerRepulsionPower);
-  }
-  // Screen the complete attractive energy before its force/torque derivatives
-  // are unpacked. Avoid extra arithmetic in the unchanged pure-Gr branch.
-  if(p.cohesionRetention!=1.)ua=ua*p.cohesionRetention;
-  if(gap.gap>p.switchGap){const AD t=(h-p.switchGap)/(p.cutoffGap-p.switchGap);const AD sw=smoothSwitch(t);ua=ua*sw;ur=ur*sw;}
   unpack(ua,result.forceAttractiveI,result.torqueAttractiveI,result.torqueAttractiveJ);
   unpack(ur,result.forceRepulsiveI,result.torqueRepulsiveI,result.torqueRepulsiveJ);
   result.forceI=add(result.forceAttractiveI,result.forceRepulsiveI);

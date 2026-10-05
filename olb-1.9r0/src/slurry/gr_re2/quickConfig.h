@@ -30,6 +30,10 @@ struct Config {
   // Compact inner repulsion. Work is already resolved from free concentration.
   double free_cmc_inner_repulsion_work=0.,free_cmc_inner_repulsion_range=6.7e-10;
   double free_cmc_inner_repulsion_power=2.1;
+  // Net CMC potential: zero blend preserves the previous interaction exactly.
+  double cmc_net_blend=0.,cmc_net_contact_force=1.5e-10,cmc_net_barrier_force=2e-11;
+  double cmc_net_attraction_range=1e-9,cmc_net_repulsion_range=6e-9;
+  double cmc_net_reference_length=13.6125e-6;
   // Coated contact: zero gap uses the bare roughness plane. Retention scales
   // total attractive pair energy, not the Coulomb friction coefficient.
   double cmc_contact_gap=0.,cmc_cohesion_retention=1.;
@@ -81,6 +85,8 @@ inline Config parseConfig(int argc,char**argv) {
     REAL(free_cmc_repulsion_pressure) REAL(free_cmc_repulsion_length)
     REAL(free_cmc_inner_repulsion_work) REAL(free_cmc_inner_repulsion_range)
     REAL(free_cmc_inner_repulsion_power)
+    REAL(cmc_net_blend) REAL(cmc_net_contact_force) REAL(cmc_net_barrier_force)
+    REAL(cmc_net_attraction_range) REAL(cmc_net_repulsion_range) REAL(cmc_net_reference_length)
     REAL(cmc_contact_gap) REAL(cmc_cohesion_retention)
     REAL(checkpoint_seconds)
     REAL(end_strain) REAL(particle_tolerance) REAL(lubrication_cutoff_cells)
@@ -148,6 +154,18 @@ inline Config parseConfig(int argc,char**argv) {
       throw std::runtime_error("Inner CMC repulsion scales must be representable");
   }
   const double contactGap=c.cmc_contact_gap>0.?c.cmc_contact_gap:c.roughness_gap;
+  if(!(c.cmc_net_blend>=0.&&c.cmc_net_blend<=1.
+       &&c.cmc_net_contact_force>0.&&c.cmc_net_barrier_force>0.
+       &&c.cmc_net_attraction_range>0.&&c.cmc_net_repulsion_range>0.
+       &&c.cmc_net_reference_length>0.))
+    throw std::runtime_error("Net CMC potential requires blend in [0,1] and positive forces, ranges and reference length");
+  if(c.cmc_net_blend>0.){
+    if(!c.surface_adhesion||!c.rough_contact_enabled||c.local_gap_fraction!=0.
+        ||contactGap!=c.roughness_gap||c.cmc_cohesion_retention!=1.)
+      throw std::runtime_error("Net CMC potential requires surface adhesion, rough contact at h0, no local-gap correction and unit cohesion retention");
+    if(!(c.roughness_gap+c.cmc_net_attraction_range+c.cmc_net_repulsion_range<=c.switch_gap))
+      throw std::runtime_error("Net CMC attraction and repulsion ranges must end before the far switch gap");
+  }
   if(!(c.cmc_contact_gap>=0.&&contactGap>=c.roughness_gap
        &&c.cmc_cohesion_retention>=0.&&c.cmc_cohesion_retention<=1.))
     throw std::runtime_error("Require CMC contact gap >= bare roughness gap and cohesion retention in [0,1]");
