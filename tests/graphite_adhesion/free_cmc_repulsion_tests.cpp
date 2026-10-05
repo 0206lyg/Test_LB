@@ -72,6 +72,21 @@ Bodies atGap(double gap, bool generic = false) {
              g::scale(n, gap)));
   return b;
 }
+Bodies centeredAtGap(double gap, int geometry) {
+  Bodies b;
+  const g::Vec3 normal=geometry==2?g::Vec3{1.,0.,0.}:g::Vec3{0.,0.,1.};
+  if(geometry==1)b.second.rotation=g::rotationIncrement({0.,pi/2.,0.});
+  b.second.position=g::add(g::add(support(b.first,normal),support(b.second,normal)),
+                           g::scale(normal,gap));
+  return b;
+}
+Bodies offsetFacesAtGap(double gap) {
+  Bodies b;
+  const auto normal=g::normalized({.025,.013,1.});
+  b.second.position=g::add(g::add(support(b.first,normal),support(b.second,normal)),
+                           g::scale(normal,gap));
+  return b;
+}
 g::PairResult evaluate(const Bodies& b, const g::PairParameters& p) {
   return g::evaluatePair(b.first, b.second, p);
 }
@@ -239,6 +254,181 @@ void farSwitch() {
   }
 }
 
+g::PairParameters compactOnly() {
+  auto p=freeOnly();
+  p.freeCmcRepulsionPressure=0.;
+  p.freeCmcInnerRepulsionWork=.000543218*13.2;
+  return p;
+}
+g::PairParameters saturatedCmc(double freeConcentration) {
+  g::PairParameters p;
+  p.sigma=.4197e-9;
+  p.surfaceAdhesion=true;
+  const double background=g::surfaceBackgroundWork(p);
+  p.adhesionWork=background+.33*(.0219-background);
+  p.freeCmcRepulsionPressure=.5*8.31446261815324*298.*.7*freeConcentration/.218;
+  p.freeCmcInnerRepulsionWork=.000543218*freeConcentration;
+  return p;
+}
+
+void compactAnalyticAndCutoff() {
+  const auto p=compactOnly();
+  const double a=1.65e-6,c=.20e-6;
+  const double lambda[3]={a*a/c,
+      2./std::sqrt((c/(a*a)+a/(c*c))*(c/(a*a)+1./a)),c};
+  for(int geometry=0;geometry<3;++geometry) {
+    const g::Vec3 normal=geometry==2?g::Vec3{1.,0.,0.}:g::Vec3{0.,0.,1.};
+    for(double h:{.9e-9,2.e-9,2.3e-9,2.66e-9,2.67e-9,3.e-9}) {
+      const auto r=evaluate(centeredAtGap(h,geometry),p);
+      const double opening=std::max(0.,1.-(h-p.roughnessGap)/p.freeCmcInnerRepulsionRange);
+      const double force=pi*lambda[geometry]*p.freeCmcInnerRepulsionWork*
+          std::pow(opening,p.freeCmcInnerRepulsionPower-1.);
+      const double energy=pi*lambda[geometry]*p.freeCmcInnerRepulsionWork*
+          p.freeCmcInnerRepulsionRange/p.freeCmcInnerRepulsionPower*
+          std::pow(opening,p.freeCmcInnerRepulsionPower);
+      near(r.energy,energy,1.e-29,2.e-9,"compact FF/EF/EE analytic energy");
+      nearVector(r.forceI,g::scale(normal,-force),1.e-20,2.e-9,
+                 "compact FF/EF/EE analytic force");
+      nearVector(r.torqueI,{},1.e-25,0.,"centered compact first torque");
+      nearVector(r.torqueJ,{},1.e-25,0.,"centered compact second torque");
+      require(r.ua==0. && r.energy==r.ur,"compact interaction is repulsive energy");
+    }
+  }
+  const double cutoff=p.roughnessGap+p.freeCmcInnerRepulsionRange;
+  const auto above=evaluate(atGap(cutoff+1.e-13,true),p);
+  require(above.energy==0. && above.forceI==g::Vec3{} && above.torqueI==g::Vec3{},
+          "compact interaction exactly zero outside its support");
+  // Check convergence to zero of energy, force and force derivative. For p>2
+  // the derivative vanishes, although it converges slowly when p is near two.
+  double previousEnergy=std::numeric_limits<double>::infinity();
+  double previousForce=previousEnergy,previousSlope=previousEnergy;
+  for(double distance:{1.e-11,1.e-12,1.e-13}) {
+    const auto nearCut=evaluate(centeredAtGap(cutoff-distance,0),p);
+    const double epsilon=.05*distance;
+    const double slope=(evaluate(centeredAtGap(cutoff-distance+epsilon,0),p).forceI[2]
+                       -evaluate(centeredAtGap(cutoff-distance-epsilon,0),p).forceI[2])/(2.*epsilon);
+    require(nearCut.energy<previousEnergy && g::norm(nearCut.forceI)<previousForce
+            && std::abs(slope)<previousSlope,"compact cutoff energy/force/slope converge to zero");
+    previousEnergy=nearCut.energy;
+    previousForce=g::norm(nearCut.forceI);
+    previousSlope=std::abs(slope);
+  }
+  require(evaluate(atGap(1.7e-9),p).energy>evaluate(atGap(2.e-9),p).energy,
+          "compact Newton trials below h0 remain unclamped");
+}
+
+void compactConservativeGeometry() {
+  const auto p=compactOnly();
+  for(bool offset:{false,true})for(double h:{1.7e-9,2.e-9,2.2e-9,2.5e-9,2.68e-9}) {
+    const auto b=offset?offsetFacesAtGap(h):atGap(h,true);
+    const auto result=evaluate(b,p);
+    for(int coordinate=0;coordinate<9;++coordinate) {
+      const double epsilon=coordinate<3?2.e-14:2.e-8;
+      const double numerical=(evaluate(perturb(b,coordinate,epsilon),p).energy
+                             -evaluate(perturb(b,coordinate,-epsilon),p).energy)/(2.*epsilon);
+      near(gradient(result,coordinate),numerical,coordinate<3?2.e-16:2.e-22,8.e-5,
+           "compact offset/tilted energy gradient "+std::to_string(coordinate));
+    }
+    const auto moment=g::sub(g::add(result.torqueI,result.torqueJ),
+        g::cross(g::sub(b.second.position,b.first.position),result.forceI));
+    nearVector(moment,{},3.e-24+2.e-11*g::norm(result.torqueI),0.,
+               "compact internal angular momentum conservation");
+    const auto swapped=evaluate({b.second,b.first},p);
+    near(swapped.energy,result.energy,1.e-28,2.e-9,"compact exchange energy");
+    nearVector(swapped.forceI,g::scale(result.forceI,-1.),1.e-19,2.e-8,
+               "compact exchange force");
+    nearVector(swapped.torqueI,result.torqueJ,1.e-25,2.e-8,"compact exchange torque");
+  }
+}
+
+void compactDisabledAndAttractionUnchanged() {
+  for(bool surface:{false,true})for(bool local:{false,true}) {
+    if(surface&&local)continue;
+    g::PairParameters p;
+    p.sigma=.4197e-9;
+    p.surfaceAdhesion=surface;
+    p.localGapFraction=local?.1:0.;
+    auto dormant=p;
+    dormant.freeCmcInnerRepulsionRange=.3e-9;
+    dormant.freeCmcInnerRepulsionPower=3.7;
+    for(double h:{1.9e-9,2.e-9,2.4e-9,8.e-9,450.e-9})
+      require(samePhysics(evaluate(atGap(h,true),p),evaluate(atGap(h,true),dormant)),
+              "zero compact work preserves pure/legacy physics bitwise");
+  }
+  auto active=saturatedCmc(13.2),outerOnly=active;
+  outerOnly.freeCmcInnerRepulsionWork=0.;
+  for(double h:{1.9e-9,2.e-9,2.3e-9,2.67e-9,3.e-9,20.e-9}) {
+    const auto before=evaluate(atGap(h,true),outerOnly),after=evaluate(atGap(h,true),active);
+    require(before.ua==after.ua && before.forceAttractiveI==after.forceAttractiveI
+            && before.torqueAttractiveI==after.torqueAttractiveI
+            && before.torqueAttractiveJ==after.torqueAttractiveJ,
+            "compact repulsion leaves attractive energy and gradients unchanged");
+    if(h>=3.e-9)require(samePhysics(before,after),"outer pair landscape unchanged exactly");
+  }
+}
+
+void contactAccessAndRelease() {
+  auto high=saturatedCmc(13.2),low=saturatedCmc(1.1),original=high;
+  original.freeCmcInnerRepulsionWork=0.;
+  require(g::effectiveContactGap(high)==high.roughnessGap,
+          "compact CMC uses the real h0 contact plane");
+  double pullOff=0.;
+  for(int geometry=0;geometry<3;++geometry) {
+    for(int k=0;k<=400;++k) {
+      const double h=2.e-9+(3.77e-9-2.e-9)*k/400.;
+      const auto r=evaluate(centeredAtGap(h,geometry),high);
+      const double outward=-g::dot(r.forceI,r.normal);
+      require(outward<0.,"no additional inward-approach barrier before actual h0 contact");
+      if(geometry==0)pullOff=std::max(pullOff,-outward);
+    }
+    for(int k=0;k<=400;++k) {
+      const double h=2.e-9*std::pow(200.,k/400.);
+      const auto r=evaluate(centeredAtGap(h,geometry),low);
+      require(-g::dot(r.forceI,r.normal)<0.,"low-free CMC retains attractive branch");
+    }
+  }
+  const auto contact=evaluate(centeredAtGap(2.e-9,0),high);
+  near(-g::dot(contact.forceI,contact.normal),-10.e-9,2.e-13,0.,
+       "high-free CMC retains finite attractive contact force");
+  near(pullOff,17.1212e-9,3.e-12,0.,"high-free pull-off is checked along full release path");
+  const double saddle=3.77806518044e-9,outerMinimum=20.9619877481e-9;
+  const double entry=evaluate(centeredAtGap(saddle,0),high).energy
+      -evaluate(centeredAtGap(outerMinimum,0),high).energy;
+  const double escape=evaluate(centeredAtGap(saddle,0),high).energy-contact.energy;
+  near(entry,13.06711191518e-18,2.e-25,0.,"outer entry barrier retained");
+  near(escape,12.2243e-18,1.e-22,0.,"contact release work reduced without moving contact");
+  const double oldEscape=evaluate(centeredAtGap(saddle,0),original).energy
+      -evaluate(centeredAtGap(2.e-9,0),original).energy;
+  require(escape<.12*oldEscape,"contact escape work reduced by more than eightfold");
+}
+
+void compactInvalidInputs() {
+  const double nan=std::numeric_limits<double>::quiet_NaN();
+  const double inf=std::numeric_limits<double>::infinity();
+  const std::vector<std::function<void(g::PairParameters&)>> corruptions{
+    [](auto& p){p.freeCmcInnerRepulsionWork=-1.;},
+    [=](auto& p){p.freeCmcInnerRepulsionWork=nan;},
+    [=](auto& p){p.freeCmcInnerRepulsionWork=inf;},
+    [](auto& p){p.freeCmcInnerRepulsionRange=0.;},
+    [](auto& p){p.freeCmcInnerRepulsionRange=-1.e-9;},
+    [=](auto& p){p.freeCmcInnerRepulsionRange=nan;},
+    [=](auto& p){p.freeCmcInnerRepulsionRange=inf;},
+    [](auto& p){p.freeCmcInnerRepulsionPower=2.;},
+    [=](auto& p){p.freeCmcInnerRepulsionPower=nan;},
+    [=](auto& p){p.freeCmcInnerRepulsionPower=inf;},
+    [](auto& p){p.roughnessGap=0.;},
+    [](auto& p){p.contactGap=3.e-9;},
+    [](auto& p){p.cohesionRetention=.5;},
+    [](auto& p){p.freeCmcInnerRepulsionRange=500.e-9;},
+    [](auto& p){p.freeCmcInnerRepulsionRange=std::numeric_limits<double>::denorm_min();},
+    [](auto& p){p.freeCmcInnerRepulsionWork=1.e308;}};
+  for(const auto& corrupt:corruptions) {
+    auto p=compactOnly();
+    corrupt(p);
+    rejects([&]{g::validatePairParameters(p);},"invalid compact repulsion rejected");
+  }
+}
+
 void invalidInputs() {
   const double nan = std::numeric_limits<double>::quiet_NaN();
   const double inf = std::numeric_limits<double>::infinity();
@@ -275,6 +465,11 @@ int main() {
       {"zero pressure and unchanged adhesion", disabledAndAdhesionUnchanged},
       {"pressure linearity, covariance, and particle exchange", pressureLinearityAndObjectivity},
       {"far switch energy, derivatives, and continuity", farSwitch},
+      {"compact FF/EF/EE analytic forces and cutoff", compactAnalyticAndCutoff},
+      {"compact tilted/offset forces, torques, and angular momentum", compactConservativeGeometry},
+      {"compact zero-work invariance and unchanged attraction", compactDisabledAndAttractionUnchanged},
+      {"contact access, preserved outer barrier, and finite release", contactAccessAndRelease},
+      {"invalid compact repulsion inputs", compactInvalidInputs},
       {"invalid free-CMC input rejection", invalidInputs}};
   int failures = 0;
   for (const auto& check : checks) {

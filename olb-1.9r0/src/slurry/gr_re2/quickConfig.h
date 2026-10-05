@@ -27,6 +27,9 @@ struct Config {
   // Free-CMC osmotic repulsion: pressure in Pa and decay length in m.
   // Zero pressure retains the previous pair potential exactly.
   double free_cmc_repulsion_pressure=0.,free_cmc_repulsion_length=5e-9;
+  // Compact inner repulsion. Work is already resolved from free concentration.
+  double free_cmc_inner_repulsion_work=0.,free_cmc_inner_repulsion_range=6.7e-10;
+  double free_cmc_inner_repulsion_power=2.1;
   // Coated contact: zero gap uses the bare roughness plane. Retention scales
   // total attractive pair energy, not the Coulomb friction coefficient.
   double cmc_contact_gap=0.,cmc_cohesion_retention=1.;
@@ -76,6 +79,8 @@ inline Config parseConfig(int argc,char**argv) {
     REAL(local_gap) REAL(local_gap_fraction) REAL(local_switch_excess_gap) REAL(local_cutoff_excess_gap)
     REAL(adhesion_work) REAL(adhesion_range) REAL(curvature_switch_gap) REAL(curvature_cutoff_gap)
     REAL(free_cmc_repulsion_pressure) REAL(free_cmc_repulsion_length)
+    REAL(free_cmc_inner_repulsion_work) REAL(free_cmc_inner_repulsion_range)
+    REAL(free_cmc_inner_repulsion_power)
     REAL(cmc_contact_gap) REAL(cmc_cohesion_retention)
     REAL(checkpoint_seconds)
     REAL(end_strain) REAL(particle_tolerance) REAL(lubrication_cutoff_cells)
@@ -130,13 +135,26 @@ inline Config parseConfig(int argc,char**argv) {
     throw std::runtime_error("Require local_gap > 0, 0 <= local_gap_fraction <= 1, and 0 <= local_switch_excess_gap < local_cutoff_excess_gap");
   if(!(c.free_cmc_repulsion_pressure>=0.&&c.free_cmc_repulsion_length>0.))
     throw std::runtime_error("Require free_cmc_repulsion_pressure >= 0 Pa and free_cmc_repulsion_length > 0 m");
+  if(!(c.free_cmc_inner_repulsion_work>=0.&&c.free_cmc_inner_repulsion_range>0.
+       &&c.free_cmc_inner_repulsion_power>2.))
+    throw std::runtime_error("Require inner repulsion work >= 0 J/m^2, range > 0 m and power > 2");
+  if(c.free_cmc_inner_repulsion_work>0.){
+    if(!c.surface_adhesion||!c.rough_contact_enabled
+        ||c.free_cmc_inner_repulsion_range>c.adhesion_range)
+      throw std::runtime_error("Inner CMC repulsion requires surface adhesion, rough contact and range <= adhesion_range");
+    const double scale=c.free_cmc_inner_repulsion_work*c.free_cmc_inner_repulsion_range;
+    if(!(scale>0.&&std::isfinite(scale)&&std::isfinite(1./c.free_cmc_inner_repulsion_range)
+         &&std::isfinite(c.roughness_gap/c.free_cmc_inner_repulsion_range)))
+      throw std::runtime_error("Inner CMC repulsion scales must be representable");
+  }
   const double contactGap=c.cmc_contact_gap>0.?c.cmc_contact_gap:c.roughness_gap;
   if(!(c.cmc_contact_gap>=0.&&contactGap>=c.roughness_gap
        &&c.cmc_cohesion_retention>=0.&&c.cmc_cohesion_retention<=1.))
     throw std::runtime_error("Require CMC contact gap >= bare roughness gap and cohesion retention in [0,1]");
   if(c.cmc_contact_version==0&&(contactGap!=c.roughness_gap||c.cmc_cohesion_retention!=1.))
     throw std::runtime_error("Active coated contact requires cmc_contact_version=1");
-  if(c.cmc_contact_version>0&&(!c.surface_adhesion||!c.rough_contact_enabled||c.free_cmc_repulsion_pressure>0.))
+  if(c.cmc_contact_version>0&&(!c.surface_adhesion||!c.rough_contact_enabled
+      ||c.free_cmc_repulsion_pressure>0.||c.free_cmc_inner_repulsion_work>0.))
     throw std::runtime_error("Coated contact requires surface adhesion and rough contact, without legacy exponential repulsion");
   if(c.free_cmc_repulsion_pressure>0.){
     if(!c.rough_contact_enabled)

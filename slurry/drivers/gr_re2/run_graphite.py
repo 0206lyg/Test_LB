@@ -44,7 +44,9 @@ def integer(value, name, minimum=0):
 
 
 SURFACE_ADHESION_VERSION = 1
-CMC_CONTACT_VERSION = 1
+FREE_CMC_REPULSION_VERSION = 1
+FREE_CMC_INNER_REPULSION_VERSION = 1
+MOLAR_GAS_CONSTANT = 8.31446261815324
 PASS_MAX_VERSION = 1
 LOCAL_ADHESION_DEFAULTS = {
     'local_gap_m': .3e-9, 'local_gap_fraction': 0.0,
@@ -55,10 +57,13 @@ SURFACE_ADHESION_DEFAULTS = {
 SURFACE_CHECKPOINT_KEYS = (
     'surface_adhesion', 'interaction_model_version', 'adhesion_work', 'adhesion_range',
     'curvature_switch_gap', 'curvature_cutoff_gap')
-CMC_CHECKPOINT_KEYS = (
+LEGACY_CMC_CHECKPOINT_KEYS = (
     'cmc_contact_gap', 'cmc_cohesion_retention', 'cmc_contact_version')
-LEGACY_FREE_CMC_CHECKPOINT_KEYS = (
+FREE_CMC_CHECKPOINT_KEYS = (
     'free_cmc_repulsion_pressure', 'free_cmc_repulsion_length', 'free_cmc_repulsion_version')
+INNER_CMC_CHECKPOINT_KEYS = (
+    'free_cmc_inner_repulsion_work', 'free_cmc_inner_repulsion_range',
+    'free_cmc_inner_repulsion_power', 'free_cmc_inner_repulsion_version')
 # Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201, report adsorption
 # saturation of 0.37 +/- 0.09 wt% relative to graphite + carbon-black mass.
 # This default is OUR approximate transfer to a 44 wt% graphite/water
@@ -67,47 +72,92 @@ LEGACY_FREE_CMC_CHECKPOINT_KEYS = (
 # recomputed from a case's target mass fraction. Override for other materials.
 CMC_DEFAULTS = {
     'adsorbed_g_L': 0.0, 'free_g_L': 0.0, 'q_sat': 0.33,
-    'adsorbed_saturation_g_L': 2.8984214285714285,
-    'contact_offset_at_saturation_m': 2e-9}
-FREE_CMC_COHESION_DEFAULTS = {
-    'enabled': True, 'nonadhesive_concentration_g_L': 13.2}
+    'adsorbed_saturation_g_L': 2.8984214285714285}
+FREE_CMC_REPULSION_DEFAULTS = {
+    'enabled': True, 'strength': 1.0, 'decay_length_m': 5e-9,
+    'degree_of_substitution': 0.7, 'repeat_unit_molar_mass_kg_mol': 0.218,
+    'osmotic_coefficient': 0.5,
+    # Omission preserves the 7004d4762b outer-only model. The new case opts in.
+    'inner_work_per_g_L_J_m2': 0.0, 'inner_range_m': 6.7e-10,
+    'inner_exponent': 2.1}
 
 
 def resolve_free_cmc(cmc, cfg):
-    """Effective cohesion retention, not a measured electrostatic force law.
+    """Resolve independent free CMC into outer pressure and inner surface work.
 
-    The supplied free concentration is independent of adsorption, is never
-    capped, and needs no numeric conversion: 1 g/L = 1 kg/m3. Only the
-    constitutive screening fraction saturates at its nonadhesive endpoint.
+    1 g/L = 1 kg/m3; do not subtract adsorption or multiply a volume fraction.
+    strength scales only the original outer exponential. enabled gates both
+    repulsions. The compact inner potential is pi*lambda*Ws*delta/p*(1-s/delta)^p
+    for s<delta, with Ws=kappa*c_f. No force or adhesion clipping is applied.
     """
-    supplied = cmc.get('free_cohesion', {})
+    supplied = cmc.get('free_repulsion', {})
     if not isinstance(supplied, dict):
-        raise ValueError('cmc.free_cohesion must be a JSON object')
-    unknown = sorted(str(key) for key in supplied if key not in FREE_CMC_COHESION_DEFAULTS
+        raise ValueError('cmc.free_repulsion must be a JSON object')
+    unknown = sorted(str(key) for key in supplied if key not in FREE_CMC_REPULSION_DEFAULTS
                      and not (isinstance(key, str) and key.startswith('_')))
     if unknown:
-        raise ValueError('Unknown cmc.free_cohesion fields: '+', '.join(unknown))
-    params = dict(FREE_CMC_COHESION_DEFAULTS)
+        raise ValueError('Unknown cmc.free_repulsion fields: '+', '.join(unknown))
+    params = dict(FREE_CMC_REPULSION_DEFAULTS)
     params.update(supplied)
     if not isinstance(params['enabled'], bool):
-        raise ValueError('cmc.free_cohesion.enabled must be a JSON boolean')
-    positive(params['nonadhesive_concentration_g_L'],
-             'cmc.free_cohesion.nonadhesive_concentration_g_L')
+        raise ValueError('cmc.free_repulsion.enabled must be a JSON boolean')
+    for key in ('strength', 'degree_of_substitution', 'osmotic_coefficient',
+                'inner_work_per_g_L_J_m2'):
+        positive(params[key], 'cmc.free_repulsion.'+key, zero=True)
+    for key in ('decay_length_m', 'repeat_unit_molar_mass_kg_mol',
+                'inner_range_m', 'inner_exponent'):
+        positive(params[key], 'cmc.free_repulsion.'+key)
+    if params['degree_of_substitution'] > 3:
+        raise ValueError('cmc.free_repulsion.degree_of_substitution must be at most 3')
+    if params['inner_exponent'] <= 2:
+        raise ValueError('cmc.free_repulsion.inner_exponent must exceed 2 for a smooth cutoff')
+    temperature = positive(cfg['fluid']['temperature_K'], 'fluid.temperature_K')
     concentration = cmc['free_g_L']
-    endpoint = params['nonadhesive_concentration_g_L']
-    # Compare before dividing, both for exact endpoints and overflow safety.
-    u = 1.0 if concentration >= endpoint else concentration / endpoint
-    retention = (1.0 if not params['enabled'] or u == 0 else 0.0 if u == 1 else
-                 (1-u)**3*(1+3*u+6*u*u))
-    active = retention != 1.0
-    if active and not cfg['interaction']['surface_adhesion']:
-        raise ValueError('Free CMC cohesion screening requires interaction.surface_adhesion=true')
+    repeats = concentration / params['repeat_unit_molar_mass_kg_mol']
+    charges = params['degree_of_substitution'] * repeats
+    bulk_pressure = params['osmotic_coefficient'] * MOLAR_GAS_CONSTANT * temperature * charges
+    pressure = params['strength'] * bulk_pressure if params['enabled'] else 0.0
+    inner_work = (params['inner_work_per_g_L_J_m2'] * concentration
+                  if params['enabled'] else 0.0)
+    surface_energy = pressure * params['decay_length_m']
+    energy_per_length = math.pi * surface_energy * params['decay_length_m']
+    inner_energy_per_length = math.pi * inner_work * params['inner_range_m'] / params['inner_exponent']
+    inner_pressure = (params['inner_exponent']-1) * inner_work / params['inner_range_m']
+    derived = {
+        'free_concentration_kg_m3': concentration,
+        'repeat_unit_concentration_mol_m3': repeats,
+        'nominal_charge_concentration_mol_m3': charges,
+        'bulk_osmotic_pressure_Pa': bulk_pressure,
+        'effective_repulsion_pressure_Pa': pressure,
+        'surface_energy_at_contact_J_m2': surface_energy,
+        'pair_energy_per_derjaguin_length_J_m': energy_per_length,
+        'inner_repulsion_work_J_m2': inner_work,
+        'inner_contact_pressure_Pa': inner_pressure,
+        'inner_pair_energy_per_derjaguin_length_J_m': inner_energy_per_length}
+    for key, value in derived.items():
+        positive(value, 'derived.cmc.free_repulsion.'+key, zero=True)
+    if (params['enabled'] and concentration > 0 and params['strength'] > 0
+            and params['degree_of_substitution'] > 0 and params['osmotic_coefficient'] > 0):
+        for key in ('effective_repulsion_pressure_Pa', 'surface_energy_at_contact_J_m2',
+                    'pair_energy_per_derjaguin_length_J_m'):
+            positive(derived[key], 'derived.cmc.free_repulsion.'+key)
+    if params['enabled'] and concentration > 0 and params['inner_work_per_g_L_J_m2'] > 0:
+        for key in ('inner_repulsion_work_J_m2', 'inner_contact_pressure_Pa',
+                    'inner_pair_energy_per_derjaguin_length_J_m'):
+            positive(derived[key], 'derived.cmc.free_repulsion.'+key)
+    active = pressure > 0 or inner_work > 0
     if active and not cfg['rough_contact']['enabled']:
-        raise ValueError('Free CMC cohesion screening requires rough_contact.enabled=true')
-    state = {key: params[key] for key in FREE_CMC_COHESION_DEFAULTS}
-    state.update(free_concentration_kg_m3=concentration,
-                 concentration_fraction=u, cohesion_retention=retention,
-                 model_version=CMC_CONTACT_VERSION, active=active)
+        raise ValueError('Free CMC repulsion requires rough_contact.enabled=true')
+    if inner_work > 0 and not cfg['interaction']['surface_adhesion']:
+        raise ValueError('Inner CMC repulsion requires interaction.surface_adhesion=true')
+    if inner_work > 0 and params['inner_range_m'] > cfg['interaction']['adhesion_range_m']:
+        raise ValueError('cmc.free_repulsion.inner_range_m must not exceed interaction.adhesion_range_m; '
+                         'the inner repulsion must stay within the adhesion interval')
+    state = {key: params[key] for key in FREE_CMC_REPULSION_DEFAULTS}
+    state.update(derived, temperature_K=temperature,
+                 model_version=FREE_CMC_REPULSION_VERSION,
+                 inner_model_version=FREE_CMC_INNER_REPULSION_VERSION,
+                 outer_active=pressure > 0, inner_active=inner_work > 0, active=active)
     return params, state
 
 
@@ -124,31 +174,29 @@ def resolve_cmc(cfg):
     supplied = cfg['cmc']
     if not isinstance(supplied, dict):
         raise ValueError('cmc must be a JSON object')
-    if 'free_repulsion' in supplied:
-        raise ValueError('cmc.free_repulsion is the obsolete exponential law; remove it and use '
-                         'cmc.free_cohesion for the coated-contact effective-cohesion model. '
-                         'These two models cannot be combined or silently interchanged.')
-    unknown = sorted(str(key) for key in supplied if key not in CMC_DEFAULTS and key != 'free_cohesion'
+    legacy = sorted(set(supplied) & {'free_cohesion', 'contact_offset_at_saturation_m'})
+    if legacy:
+        raise ValueError('The coated-contact/free-cohesion model cannot be combined with '
+                         'the restored CMC repulsion model. Remove legacy cmc fields: '+', '.join(legacy)+
+                         '; contact remains at rough_contact.roughness_gap_m and attraction is not screened.')
+    unknown = sorted(str(key) for key in supplied if key not in CMC_DEFAULTS and key != 'free_repulsion'
                      and not (isinstance(key, str) and key.startswith('_')))
     if unknown:
         raise ValueError('Unknown cmc fields: '+', '.join(unknown))
     cmc = dict(CMC_DEFAULTS)
     cmc.update(supplied)
-    for key in ('adsorbed_g_L', 'free_g_L', 'q_sat', 'contact_offset_at_saturation_m'):
+    for key in ('adsorbed_g_L', 'free_g_L', 'q_sat'):
         positive(cmc[key], 'cmc.'+key, zero=True)
     positive(cmc['adsorbed_saturation_g_L'], 'cmc.adsorbed_saturation_g_L')
     if cmc['q_sat'] > 1:
         raise ValueError('cmc.q_sat must be between zero and one')
-    cmc['free_cohesion'], free_metadata = resolve_free_cmc(cmc, cfg)
+    cmc['free_repulsion'], free_metadata = resolve_free_cmc(cmc, cfg)
     adsorbed = min(cmc['adsorbed_g_L'], cmc['adsorbed_saturation_g_L'])
     theta = adsorbed / cmc['adsorbed_saturation_g_L']
     # Preserve the exact endpoint values, including the pure-Gr fingerprint.
     q = (1.0 if theta == 0 or cmc['q_sat'] == 1 else cmc['q_sat'] if theta == 1
          else (1-(1-math.sqrt(cmc['q_sat']))*theta)**2)
     h0 = cfg['rough_contact']['roughness_gap_m']
-    contact_gap = h0 + cmc['contact_offset_at_saturation_m']*theta
-    positive(contact_gap, 'effective CMC contact gap')
-    contact_active = contact_gap != h0 or free_metadata['active']
     interaction = cfg['interaction']
     if cmc['adsorbed_g_L'] > 0 and not interaction['surface_adhesion']:
         raise ValueError('CMC adsorption requires interaction.surface_adhesion=true')
@@ -168,9 +216,7 @@ def resolve_cmc(cfg):
         bare_adhesion_work_J_m2=bare_work,
         background_work_J_m2=background_work,
         effective_adhesion_work_J_m2=effective_work,
-        bare_contact_gap_m=h0, contact_gap_m=contact_gap,
-        contact_model_version=CMC_CONTACT_VERSION if contact_active else 0,
-        free_cohesion=free_metadata,
+        free_repulsion=free_metadata,
         free_cmc_physics_enabled=free_metadata['active'])
     return cmc, metadata
 
@@ -299,17 +345,6 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
     requested_gap = p['minimum_gap_m']
     if cmc is not None:
         cfg['cmc'] = cmc
-        # Retain the requested value across resolve(effective_config.json),
-        # while allowing edits to the previously resolved placement gap.
-        if requested_gap == p.get('_resolved_minimum_gap_m'):
-            requested_gap = p.get('_requested_minimum_gap_m', requested_gap)
-        positive(requested_gap, 'requested particles.minimum_gap_m', zero=True)
-        p['_requested_minimum_gap_m'] = requested_gap
-        p['minimum_gap_m'] = max(requested_gap, cmc_metadata['contact_gap_m'])
-        p['_resolved_minimum_gap_m'] = p['minimum_gap_m']
-        if interaction['surface_adhesion'] and (cmc_metadata['contact_gap_m'] +
-                interaction['adhesion_range_m'] > interaction['curvature_switch_gap_m']):
-            raise ValueError('Require CMC contact_gap_m + adhesion_range_m <= curvature_switch_gap_m')
     if contact['enabled'] and p['minimum_gap_m'] < contact['roughness_gap_m']:
         raise ValueError('particles.minimum_gap_m must be at least rough_contact.roughness_gap_m')
     integer(max_steps, 'max_steps')
@@ -438,11 +473,16 @@ def solver_values(cfg, output, particles, max_steps):
         values.update(local_gap=interaction['local_gap_m'], local_gap_fraction=interaction['local_gap_fraction'],
                       local_switch_excess_gap=interaction['local_switch_excess_gap_m'],
                       local_cutoff_excess_gap=interaction['local_cutoff_excess_gap_m'])
-    # Inactive CMC leaves old pure-Gr physics and checkpoint fingerprints intact.
-    if cmc_metadata is not None and cmc_metadata['contact_model_version']:
-        values.update(cmc_contact_gap=cmc_metadata['contact_gap_m'],
-                      cmc_cohesion_retention=cmc_metadata['free_cohesion']['cohesion_retention'],
-                      cmc_contact_version=CMC_CONTACT_VERSION)
+    # Inactive terms leave old pure-Gr/outer-only checkpoint fingerprints intact.
+    if cmc_metadata is not None:
+        free = cmc_metadata['free_repulsion']
+        if free['outer_active']:
+            values.update(free_cmc_repulsion_pressure=free['effective_repulsion_pressure_Pa'],
+                          free_cmc_repulsion_length=free['decay_length_m'])
+        if free['inner_active']:
+            values.update(free_cmc_inner_repulsion_work=free['inner_repulsion_work_J_m2'],
+                          free_cmc_inner_repulsion_range=free['inner_range_m'],
+                          free_cmc_inner_repulsion_power=free['inner_exponent'])
     return values
 
 
@@ -451,9 +491,13 @@ def require_local_adhesion_build(cfg, build_info):
         raise ValueError('This driver requires the particle solver pass_max policy. '
                          'Rebuild with build_slurry_cpu.sbatch before running.')
     _, cmc_metadata = resolve_cmc(cfg)
-    if cmc_metadata is not None and cmc_metadata['contact_model_version']:
-        if build_info.get('cmc_contact_version') != CMC_CONTACT_VERSION:
-            raise ValueError('This configuration requires coated CMC contact and effective cohesion. '
+    if cmc_metadata is not None:
+        free = cmc_metadata['free_repulsion']
+        if free['outer_active'] and build_info.get('free_cmc_repulsion_version') != FREE_CMC_REPULSION_VERSION:
+            raise ValueError('This configuration requires the outer free-CMC repulsion potential. '
+                             'Rebuild with build_slurry_cpu.sbatch before running.')
+        if free['inner_active'] and build_info.get('free_cmc_inner_repulsion_version') != FREE_CMC_INNER_REPULSION_VERSION:
+            raise ValueError('This configuration requires the compact inner free-CMC repulsion potential. '
                              'Rebuild with build_slurry_cpu.sbatch before running.')
     if cfg['interaction']['surface_adhesion']:
         if build_info.get('surface_adhesion_version') != SURFACE_ADHESION_VERSION:
@@ -533,21 +577,26 @@ def validate_restart(cfg,meta,checkpoint,ranks,max_steps=0,allow_complete=False)
         values['interaction_model_version'] = SURFACE_ADHESION_VERSION
     elif any(key in immutable for key in SURFACE_CHECKPOINT_KEYS[1:]):
         raise ValueError('Restart contains surface adhesion parameters without its model identifier')
-    if any(key in immutable for key in LEGACY_FREE_CMC_CHECKPOINT_KEYS):
-        raise ValueError('Restart uses the obsolete free-CMC exponential law. '
-                         'Start a new run for the coated-contact effective-cohesion model.')
-    active = values.get('cmc_contact_version', 0) != 0
-    saved_active = immutable.get('cmc_contact_version', 0) != 0
-    if active != saved_active:
-        raise ValueError('Restart CMC contact/cohesion model differs. '
-                         'Start a new run for changed physics.')
-    if active:
-        missing = sorted(set(CMC_CHECKPOINT_KEYS) - set(immutable))
-        if missing or immutable.get('cmc_contact_version') != CMC_CONTACT_VERSION:
-            raise ValueError('Restart CMC contact version/fingerprint is incomplete or incompatible: '
-                             +', '.join(missing))
-    elif any(key in immutable for key in CMC_CHECKPOINT_KEYS):
-        raise ValueError('Restart contains an inactive or incomplete CMC contact fingerprint')
+    if any(key in immutable for key in LEGACY_CMC_CHECKPOINT_KEYS):
+        raise ValueError('Restart uses the coated-contact/free-cohesion model. '
+                         'Start a new run for the restored CMC repulsion model.')
+    for label, physical_key, version_key, version, keys in (
+            ('outer', 'free_cmc_repulsion_pressure', 'free_cmc_repulsion_version',
+             FREE_CMC_REPULSION_VERSION, FREE_CMC_CHECKPOINT_KEYS),
+            ('inner', 'free_cmc_inner_repulsion_work', 'free_cmc_inner_repulsion_version',
+             FREE_CMC_INNER_REPULSION_VERSION, INNER_CMC_CHECKPOINT_KEYS)):
+        active = values.get(physical_key, 0.0) > 0
+        saved_active = immutable.get(physical_key, 0.0) > 0
+        if active != saved_active:
+            raise ValueError('Restart '+label+' free-CMC repulsion differs. Start a new run for changed physics.')
+        if active:
+            missing = sorted(set(keys) - set(immutable))
+            if missing or immutable.get(version_key) != version:
+                raise ValueError('Restart '+label+' free-CMC version/fingerprint is incomplete or incompatible: '
+                                 +', '.join(missing))
+            values[version_key] = version
+        elif any(key in immutable for key in keys):
+            raise ValueError('Restart contains an inactive or incomplete '+label+' free-CMC fingerprint')
     changed=[]
     for key,saved in checkpoint['immutable_config'].items():
         actual=values.get(key)

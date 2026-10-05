@@ -132,6 +132,21 @@ void signatures() {
       "Active CMC physics missing from signature");
   cfg.cmc_cohesion_retention=0.;
   require(cp::signature(cfg,units,2,1)!=coated,"Changed screening did not invalidate checkpoint");
+  cfg.cmc_contact_version=0;cfg.cmc_contact_gap=0.;cfg.cmc_cohesion_retention=1.;
+  cfg.free_cmc_inner_repulsion_range=5.e-10;
+  cfg.free_cmc_inner_repulsion_power=2.3;
+  require(cp::signature(cfg,units,2,1)==pure,"Dormant inner repulsion changed pure checkpoint signature");
+  cfg.free_cmc_inner_repulsion_work=.007;
+  const auto inner=cp::signature(cfg,units,2,1);
+  require(inner!=pure&&inner.find("free_cmc_inner_repulsion_version=1\n")!=std::string::npos
+      &&inner.find("free_cmc_inner_repulsion_work=")!=std::string::npos,
+      "Active inner repulsion missing from checkpoint signature");
+  cfg.free_cmc_inner_repulsion_work=.008;
+  require(cp::signature(cfg,units,2,1)!=inner,"Changed inner work accepted by checkpoint signature");
+  cfg.free_cmc_inner_repulsion_work=.007;cfg.free_cmc_inner_repulsion_range=6.e-10;
+  require(cp::signature(cfg,units,2,1)!=inner,"Changed inner range accepted by checkpoint signature");
+  cfg.free_cmc_inner_repulsion_range=5.e-10;cfg.free_cmc_inner_repulsion_power=2.4;
+  require(cp::signature(cfg,units,2,1)!=inner,"Changed inner power accepted by checkpoint signature");
 }
 }
 int main() {

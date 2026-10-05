@@ -176,6 +176,9 @@ void simulate(const Config& c){
   solver.pair.curvatureCutoffGap=c.curvature_cutoff_gap;
   solver.pair.freeCmcRepulsionPressure=c.free_cmc_repulsion_pressure;
   solver.pair.freeCmcRepulsionLength=c.free_cmc_repulsion_length;
+  solver.pair.freeCmcInnerRepulsionWork=c.free_cmc_inner_repulsion_work;
+  solver.pair.freeCmcInnerRepulsionRange=c.free_cmc_inner_repulsion_range;
+  solver.pair.freeCmcInnerRepulsionPower=c.free_cmc_inner_repulsion_power;
   solver.pair.contactGap=c.cmc_contact_gap;
   solver.pair.cohesionRetention=c.cmc_cohesion_retention;
   solver.nearField.viscosity=c.dynamic_viscosity;solver.nearField.matchingGap=c.lubrication_cutoff_cells*c.dx;
@@ -267,7 +270,11 @@ void simulate(const Config& c){
           <<",\"local_cutoff_excess_gap_m\":"<<c.local_cutoff_excess_gap;
     meta<<",\"free_cmc_repulsion_version\":1"
         <<",\"free_cmc_repulsion_pressure_Pa\":"<<c.free_cmc_repulsion_pressure
-        <<",\"free_cmc_repulsion_length_m\":"<<c.free_cmc_repulsion_length<<"}"
+        <<",\"free_cmc_repulsion_length_m\":"<<c.free_cmc_repulsion_length
+        <<",\"free_cmc_inner_repulsion_version\":1"
+        <<",\"free_cmc_inner_repulsion_work_J_m2\":"<<c.free_cmc_inner_repulsion_work
+        <<",\"free_cmc_inner_repulsion_range_m\":"<<c.free_cmc_inner_repulsion_range
+        <<",\"free_cmc_inner_repulsion_power\":"<<c.free_cmc_inner_repulsion_power<<"}"
       <<",\n\"cmc_contact\":{\"model_version\":"<<c.cmc_contact_version
       <<",\"contact_gap_m\":"<<solver.rough.gap<<",\"cohesion_retention\":"<<c.cmc_cohesion_retention<<"}"
       <<",\n\"pass_max\":"<<c.pass_max
@@ -395,9 +402,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #endif
     return 0;
   }

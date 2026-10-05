@@ -31,6 +31,12 @@ struct PairParameters {
   // Legacy exponential free-CMC pressure (Pa) and decay length (m). Active
   // legacy pressure cannot be combined with coated-contact cohesion screening.
   double freeCmcRepulsionPressure=0.,freeCmcRepulsionLength=5e-9;
+  // Compact free-CMC overlap repulsion about the unchanged rough-contact gap.
+  // U=pi*lambda_D*W*delta/p * [1-(h-h0)/delta]_+^p. W is an effective
+  // planar work (J/m^2), supplied separately from adsorbed-CMC adhesion.
+  // Zero work preserves all previous pair models, including replay fixtures.
+  double freeCmcInnerRepulsionWork=0.,freeCmcInnerRepulsionRange=.67e-9;
+  double freeCmcInnerRepulsionPower=2.1;
 };
 inline double effectiveContactGap(const PairParameters&p){
   return p.contactGap>0.?p.contactGap:p.roughnessGap;
@@ -71,6 +77,26 @@ inline void validatePairParameters(const PairParameters&p){
        ||!std::isfinite(work)||!(work>0.)
        ||!std::isfinite(energyPerLength)||!(energyPerLength>0.))
       throw std::domain_error("Active free-CMC repulsion requires h0>0 and representable pressure-length scales");
+  }
+  if(!std::isfinite(p.freeCmcInnerRepulsionWork)||p.freeCmcInnerRepulsionWork<0.
+     ||!std::isfinite(p.freeCmcInnerRepulsionRange)||!(p.freeCmcInnerRepulsionRange>0.)
+     ||!std::isfinite(p.freeCmcInnerRepulsionPower)||!(p.freeCmcInnerRepulsionPower>2.))
+    throw std::domain_error("Compact free-CMC repulsion requires finite work>=0, range>0, and power>2");
+  if(p.freeCmcInnerRepulsionWork>0.){
+    if(effectiveContactGap(p)!=p.roughnessGap||p.cohesionRetention!=1.)
+      throw std::domain_error("Compact free-CMC repulsion cannot be combined with coated-contact cohesion");
+    const double energyPerLength=p.freeCmcInnerRepulsionWork*
+        (p.freeCmcInnerRepulsionRange/p.freeCmcInnerRepulsionPower);
+    const double pressure=(p.freeCmcInnerRepulsionPower-1.)*
+        (p.freeCmcInnerRepulsionWork/p.freeCmcInnerRepulsionRange);
+    if(!std::isfinite(p.roughnessGap)||!(p.roughnessGap>0.)
+       ||!std::isfinite(1./p.freeCmcInnerRepulsionRange)
+       ||!std::isfinite(p.roughnessGap/p.freeCmcInnerRepulsionRange)
+       ||!(p.roughnessGap+p.freeCmcInnerRepulsionRange>p.roughnessGap)
+       ||!(p.roughnessGap+p.freeCmcInnerRepulsionRange<=p.switchGap)
+       ||!std::isfinite(energyPerLength)||!(energyPerLength>0.)
+       ||!std::isfinite(pressure)||!(pressure>0.))
+      throw std::domain_error("Active compact free-CMC repulsion requires h0>0, cutoff<=far switch, and representable work-range scales");
   }
   if(p.localGapFraction>0.
      &&(!std::isfinite(p.roughnessGap)||!std::isfinite(p.localGap)||!(p.localGap>0.)||!(p.localGap<=p.roughnessGap)
@@ -124,6 +150,14 @@ inline AD operator/(const AD& a,const AD& b){AD c(a.v/b.v);for(int k=0;k<9;++k)c
 inline AD sqrt(const AD& a){AD c(std::sqrt(a.v));for(int k=0;k<9;++k)c.d[k]=a.d[k]/(2.*c.v);return c;}
 inline AD exp(const AD& a){AD c(std::exp(a.v));for(int k=0;k<9;++k)c.d[k]=c.v*a.d[k];return c;}
 inline AD power(AD a,int n){AD b(1.);for(;n;n>>=1,a=a*a)if(n&1)b=b*a;return b;}
+// The compact branch calls this only for nonnegative opening and power>2.
+// At its cutoff both the derivative and its first derivative vanish.
+inline AD realPower(const AD& a,double exponent){
+  AD c(std::pow(a.v,exponent));
+  const double slope=exponent*std::pow(a.v,exponent-1.);
+  for(int k=0;k<9;++k)c.d[k]=slope*a.d[k];
+  return c;
+}
 using AVec=std::array<AD,3>;using AMat=std::array<AD,9>;
 inline AD dot(const AVec&a,const AVec&b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
 inline AVec mv(const AMat&a,const AVec&b){AVec c{};for(int i=0;i<3;++i)for(int k=0;k<3;++k)c[i]=c[i]+a[3*i+k]*b[k];return c;}
@@ -187,8 +221,10 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
   const AD ell=orientationLength(bi,bj,rh,p.sigma);
   AD ua=branch(h,ell,bi,bj,p,false),ur=branch(h,ell,bi,bj,p,true);
   const bool localBackground=p.surfaceAdhesion&&gap.gap<p.curvatureCutoffGap;
+  const bool innerRepulsion=p.freeCmcInnerRepulsionWork>0.
+      &&gap.gap-p.roughnessGap<p.freeCmcInnerRepulsionRange;
   AD localLength;
-  if(localBackground||p.freeCmcRepulsionPressure>0.){
+  if(localBackground||p.freeCmcRepulsionPressure>0.||innerRepulsion){
     const auto curvature=contactCurvature(bi,bj,gap);
     localLength=AD(curvature.length);localLength.d=curvature.lengthDerivative;
   }
@@ -233,6 +269,16 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
     // and actual contact curvature; this term extends beyond the background's
     // curvature cutoff. Keep the same analytic continuation for H<h0 trials.
     ur=ur+localLength*(pi*energyPerLength)*exp(-(h-p.roughnessGap)/decay);
+  }
+  if(innerRepulsion){
+    constexpr double pi=3.1415926535897932384626433832795;
+    const AD opening=1.-(h-p.roughnessGap)/p.freeCmcInnerRepulsionRange;
+    const double energyPerLength=p.freeCmcInnerRepulsionWork*
+        (p.freeCmcInnerRepulsionRange/p.freeCmcInnerRepulsionPower);
+    // Differentiate the complete energy, including moving-contact curvature.
+    // Positive-gap Newton trials below h0 use the same analytic continuation;
+    // neither the physical contact constraint nor the adhesion plane moves.
+    ur=ur+localLength*(pi*energyPerLength)*realPower(opening,p.freeCmcInnerRepulsionPower);
   }
   // Screen the complete attractive energy before its force/torque derivatives
   // are unpacked. Avoid extra arithmetic in the unchanged pure-Gr branch.

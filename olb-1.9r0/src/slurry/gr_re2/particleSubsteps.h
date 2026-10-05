@@ -45,12 +45,12 @@ inline void validateParticlePairSettings(const ParticleStepSettings& s) {
   validatePairParameters(s.pair);
   if(s.pair.surfaceAdhesion&&!s.rough.enabled)
     throw std::invalid_argument("Surface adhesion requires the unilateral rough-contact constraint");
-  if(s.pair.freeCmcRepulsionPressure>0.&&!s.rough.enabled)
+  if((s.pair.freeCmcRepulsionPressure>0.||s.pair.freeCmcInnerRepulsionWork>0.)&&!s.rough.enabled)
     throw std::invalid_argument("Free CMC repulsion requires the unilateral rough-contact constraint");
   if((s.pair.contactGap>0.||s.pair.cohesionRetention!=1.)&&!s.rough.enabled)
     throw std::invalid_argument("Coated CMC contact requires the unilateral rough-contact constraint");
   if((s.pair.surfaceAdhesion||s.pair.localGapFraction>0.||s.pair.freeCmcRepulsionPressure>0.
-      ||s.pair.contactGap>0.||s.pair.cohesionRetention!=1.) && s.rough.enabled) {
+      ||s.pair.freeCmcInnerRepulsionWork>0.||s.pair.contactGap>0.||s.pair.cohesionRetention!=1.) && s.rough.enabled) {
     const double contactGap=effectiveContactGap(s.pair);
     const double scale=std::max(std::abs(s.rough.gap),std::abs(contactGap));
     if(!std::isfinite(s.rough.gap)

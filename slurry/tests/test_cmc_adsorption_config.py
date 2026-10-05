@@ -31,8 +31,12 @@ def resolved(inputs=None):
 def saved_checkpoint(cfg, meta):
     values = RUNNER.solver_values(cfg, Path('run'), Path('particles.csv'), 0)
     values['interaction_model_version'] = RUNNER.SURFACE_ADHESION_VERSION
+    if 'free_cmc_repulsion_pressure' in values:
+        values['free_cmc_repulsion_version'] = RUNNER.FREE_CMC_REPULSION_VERSION
+    if 'free_cmc_inner_repulsion_work' in values:
+        values['free_cmc_inner_repulsion_version'] = RUNNER.FREE_CMC_INNER_REPULSION_VERSION
     immutable = {key: values[key] for key in RUNNER.SURFACE_CHECKPOINT_KEYS}
-    immutable.update({key: values[key] for key in RUNNER.CMC_CHECKPOINT_KEYS if key in values})
+    immutable.update({key: values[key] for key in RUNNER.FREE_CMC_CHECKPOINT_KEYS + RUNNER.INNER_CMC_CHECKPOINT_KEYS if key in values})
     immutable.update(dt_s=meta['dt_s'], particle_count=cfg['particles']['count'], ranks=1)
     return {'step': 1, 'immutable_config': immutable}
 
@@ -68,8 +72,8 @@ class CmcInputTests(unittest.TestCase):
         self.assertEqual(meta['interaction']['bare_adhesion_work_J_m2'], .0219)
         self.assertEqual(cfg['interaction']['adhesion_work_J_m2'], .0219)
         self.assertEqual({key for key in values if values[key] != pure_values.get(key)},
-                         {'adhesion_work', 'cmc_contact_gap', 'cmc_cohesion_retention', 'cmc_contact_version'})
-        self.assertEqual(values['cmc_contact_gap'], h0 + 1e-9)
+                         {'adhesion_work'})
+        self.assertNotIn('cmc_contact_gap', values)
         self.assertEqual(values['roughness_gap'], h0)
 
     def test_saturation_clamps_without_moving_excess_to_free_cmc(self):
@@ -86,16 +90,16 @@ class CmcInputTests(unittest.TestCase):
         self.assertEqual(state['q'], .33)
         self.assertEqual(values['adhesion_work'], state['effective_adhesion_work_J_m2'])
 
-    def test_disabled_free_cohesion_records_cmc_without_physical_effect(self):
+    def test_disabled_free_repulsion_records_cmc_without_physical_effect(self):
         cfg0, _, values0 = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 0})
         cfg1, meta1, values1 = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 123.0,
-                                      'free_cohesion': {'enabled': False}})
+                                      'free_repulsion': {'enabled': False}})
         self.assertEqual(values0, values1)
         self.assertEqual(cfg0['fluid'], cfg1['fluid'])
         self.assertEqual(meta1['cmc']['free_g_L'], 123.0)
         self.assertFalse(meta1['cmc']['free_cmc_physics_enabled'])
         self.assertEqual(resolved({'free_g_L': 123.0,
-                                  'free_cohesion': {'enabled': False}})[2], resolved()[2])
+                                  'free_repulsion': {'enabled': False}})[2], resolved()[2])
 
     def test_resolve_roundtrip_is_idempotent_and_does_not_mutate_input(self):
         original = case()
@@ -115,7 +119,7 @@ class CmcInputTests(unittest.TestCase):
         self.assertEqual(meta['cmc']['q'], 0.0)
         self.assertEqual(values['adhesion_work'], meta['cmc']['background_work_J_m2'])
         self.assertGreater(values['adhesion_work'], 0)
-        for inputs in ({'adsorbed_g_L': 3.8, 'q_sat': 1.0, 'contact_offset_at_saturation_m': 0},
+        for inputs in ({'adsorbed_g_L': 3.8, 'q_sat': 1.0},
                        {'adsorbed_g_L': 0.0, 'q_sat': 0.0}):
             with self.subTest(inputs=inputs):
                 self.assertEqual(resolved(inputs)[2], resolved()[2])
@@ -135,8 +139,7 @@ class CmcInputTests(unittest.TestCase):
             original['cmc'] = value
             with self.subTest(section=value), self.assertRaises(ValueError):
                 RUNNER.resolve(original)
-        for key in ('adsorbed_g_L', 'free_g_L', 'q_sat', 'adsorbed_saturation_g_L',
-                    'contact_offset_at_saturation_m'):
+        for key in ('adsorbed_g_L', 'free_g_L', 'q_sat', 'adsorbed_saturation_g_L'):
             bad_values = [-1, math.nan, math.inf, -math.inf, True, '0.33', None, []]
             if key == 'q_sat':
                 bad_values.append(1.01)
@@ -155,7 +158,7 @@ class CmcInputTests(unittest.TestCase):
             legacy['interaction'].pop(key)
         baseline, _ = RUNNER.resolve(legacy)
         legacy['cmc'] = {'adsorbed_g_L': 0, 'free_g_L': 2.0,
-                         'free_cohesion': {'enabled': False}}
+                         'free_repulsion': {'enabled': False}}
         cfg, meta = RUNNER.resolve(legacy)
         self.assertEqual(RUNNER.solver_values(cfg, Path('r'), Path('p'), 0),
                          RUNNER.solver_values(baseline, Path('r'), Path('p'), 0))
@@ -172,37 +175,39 @@ class CmcInputTests(unittest.TestCase):
             with self.subTest(inputs=inputs), self.assertRaisesRegex(ValueError, 'adhesion_work'):
                 RUNNER.validate_restart(new_cfg, new_meta, checkpoint, 1)
         new_cfg, new_meta, _ = resolved({'adsorbed_g_L': 1.0, 'free_g_L': 16,
-                                       'free_cohesion': {'enabled': False}})
+                                       'free_repulsion': {'enabled': False}})
         self.assertTrue(RUNNER.validate_restart(new_cfg, new_meta, checkpoint, 1))
         saturated, sat_meta, _ = resolved({'adsorbed_g_L': 3.8})
         new_cfg, new_meta, _ = resolved({'adsorbed_g_L': 9.0})
         self.assertTrue(RUNNER.validate_restart(new_cfg, new_meta, saved_checkpoint(saturated, sat_meta), 1))
 
-    def test_coated_contact_gap_is_independent_of_free_cmc(self):
+    def test_contact_and_placement_remain_explicit_and_independent_of_cmc(self):
         cfg, meta, values = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 0})
-        self.assertEqual(values['cmc_contact_gap'], 4e-9)
-        self.assertEqual(cfg['particles']['minimum_gap_m'], 4e-9)
+        self.assertNotIn('cmc_contact_gap', values)
+        self.assertEqual(values['roughness_gap'], 2e-9)
+        self.assertEqual(cfg['particles']['minimum_gap_m'], 3e-9)
         self.assertEqual(meta['requested_minimum_gap_m'], 3e-9)
-        self.assertEqual(meta['effective_minimum_gap_m'], 4e-9)
+        self.assertEqual(meta['effective_minimum_gap_m'], 3e-9)
         _, _, free_values = resolved({'adsorbed_g_L': 3.8, 'free_g_L': 13.2})
-        for key in ('cmc_contact_gap', 'roughness_gap', 'sliding_friction',
-                    'tangential_stiffness', 'rolling_length', 'adhesion_work'):
+        for key in ('roughness_gap', 'sliding_friction', 'tangential_stiffness',
+                    'rolling_length', 'adhesion_work'):
             self.assertEqual(values[key], free_values[key])
-        cfg2, meta2 = RUNNER.resolve(json.loads(json.dumps(cfg)))
-        self.assertEqual(cfg, cfg2)
-        self.assertEqual(meta, meta2)
 
-    def test_contact_plane_cannot_push_adhesion_into_background_blend(self):
-        with self.assertRaisesRegex(ValueError, 'contact_gap_m.*curvature_switch'):
-            resolved({'adsorbed_g_L': 3.8, 'contact_offset_at_saturation_m': 3e-9})
+    def test_coating_offset_is_rejected_even_when_zero(self):
+        for offset in (0, 2e-9):
+            with self.subTest(offset=offset), self.assertRaisesRegex(ValueError, 'legacy cmc fields'):
+                resolved({'adsorbed_g_L': 3.8, 'contact_offset_at_saturation_m': offset})
 
-    def test_shipped_cmc_case_accepts_documentation_fields(self):
+    def test_shipped_cmc_case_is_saturated_16g_and_outside_inner_barrier(self):
         original = json.loads((ROOT/'slurry/cases/gr_CMC.json').read_text())
         cfg, meta = RUNNER.resolve(original)
-        self.assertEqual(cfg['cmc']['adsorbed_g_L'], 3.8)
-        self.assertEqual(cfg['cmc']['free_g_L'], 0)
+        self.assertEqual(cfg['cmc']['adsorbed_g_L'], cfg['cmc']['adsorbed_saturation_g_L'])
+        self.assertAlmostEqual(cfg['cmc']['adsorbed_g_L']+cfg['cmc']['free_g_L'], 16)
         self.assertEqual(meta['cmc']['q'], .33)
-        self.assertTrue(meta['cmc']['adsorbed_clamped'])
+        self.assertFalse(meta['cmc']['adsorbed_clamped'])
+        self.assertEqual(cfg['particles']['minimum_gap_m'], 1e-8)
+        self.assertEqual(cfg['rough_contact']['roughness_gap_m'], 2e-9)
+        self.assertGreater(meta['cmc']['free_repulsion']['inner_repulsion_work_J_m2'], 0)
 
 
 class CmcRestartSelectionTests(unittest.TestCase):
