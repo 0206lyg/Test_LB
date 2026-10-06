@@ -46,7 +46,14 @@ struct PairParameters {
   double cmcNetContactForce=1.5e-10,cmcNetBarrierForce=2.e-11;
   double cmcNetAttractionRange=1.e-9,cmcNetRepulsionRange=6.e-9;
   double cmcNetReferenceLength=13.6125e-6;
+  // Many-body attenuation applies only to the net attractive branch. Each
+  // endpoint counts its other neighbours using a smooth gap occupancy.
+  bool cmcCoordinationEnabled=false;
+  double cmcCoordinationStart=1.,cmcCoordinationEnd=2.,cmcCoordinationFloor=.1;
 };
+inline bool cmcCoordinationActive(const PairParameters&p){
+  return p.cmcCoordinationEnabled&&p.cmcNetBlend>0.;
+}
 inline double effectiveContactGap(const PairParameters&p){
   return p.contactGap>0.?p.contactGap:p.roughnessGap;
 }
@@ -69,6 +76,11 @@ inline void validatePairParameters(const PairParameters&p){
     throw std::domain_error("CMC contact gap must be zero (bare reference) or finite and at least h0>0");
   if(!std::isfinite(p.cohesionRetention)||p.cohesionRetention<0.||p.cohesionRetention>1.)
     throw std::domain_error("CMC cohesion retention must be finite and between zero and one");
+  if(!std::isfinite(p.cmcCoordinationStart)||p.cmcCoordinationStart<0.
+     ||!std::isfinite(p.cmcCoordinationEnd)||!(p.cmcCoordinationEnd>p.cmcCoordinationStart)
+     ||!std::isfinite(1./(p.cmcCoordinationEnd-p.cmcCoordinationStart))
+     ||!std::isfinite(p.cmcCoordinationFloor)||p.cmcCoordinationFloor<0.||p.cmcCoordinationFloor>1.)
+    throw std::domain_error("CMC coordination requires finite 0<=start<end and floor in [0,1]");
   if(!std::isfinite(p.cmcNetBlend)||p.cmcNetBlend<0.||p.cmcNetBlend>1.
      ||!std::isfinite(p.cmcNetContactForce)||!(p.cmcNetContactForce>0.)
      ||!std::isfinite(p.cmcNetBarrierForce)||!(p.cmcNetBarrierForce>0.)
@@ -167,6 +179,12 @@ struct PairResult {
   Vec3 forceAttractiveI{},forceRepulsiveI{};
   Vec3 torqueAttractiveI{},torqueAttractiveJ{},torqueRepulsiveI{},torqueRepulsiveJ{};
   double ua=0.,ur=0.,energy=0.,gap=std::numeric_limits<double>::infinity();
+  // Net attraction before coordination, already weighted by cmcNetBlend.
+  // These remain immutable inputs to the many-body assembly, which updates
+  // the ordinary total/attractive force and energy fields in place.
+  double cmcNetAttractiveEnergy=0.,cmcCoordinationOccupancy=0.,cmcCoordinationGapDerivative=0.;
+  Vec3 cmcNetAttractiveForceI{},cmcNetAttractiveTorqueI{},cmcNetAttractiveTorqueJ{};
+  bool cmcCoordinationApplied=false;
   Vec3 normal{},leverI{},leverJ{};
   bool active=false;
 };
@@ -253,6 +271,19 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
   using namespace re2_detail;
   AD h(gap.gap);const Vec3 gi=scale(cross(gap.leverI,gap.normal),-1.),gj=cross(gap.leverJ,gap.normal);
   for(int k=0;k<3;++k){h.d[k]=gap.normal[k];h.d[3+k]=gi[k];h.d[6+k]=gj[k];}
+  if(cmcCoordinationActive(p)){
+    const double opening=gap.gap-p.roughnessGap;
+    if(opening<=0.)result.cmcCoordinationOccupancy=1.;
+    else if(opening<p.cmcNetAttractionRange){
+      const double t=opening/p.cmcNetAttractionRange;
+      // Evaluate from the nearer endpoint. The complementary expression
+      // near t=0 can round above one and incorrectly reject a contact.
+      const double z=1.-t;
+      result.cmcCoordinationOccupancy=t<=.5?1.-t*t*t*(10.-15.*t+6.*t*t)
+                                                :z*z*z*(10.-15.*z+6.*z*z);
+      result.cmcCoordinationGapDerivative=-30.*t*t*z*z/p.cmcNetAttractionRange;
+    }
+  }
   AD ua,ur;
   // At full replacement do not evaluate a large legacy attraction and then
   // subtract it: the screened net model owns the entire pair energy.
@@ -351,6 +382,10 @@ inline PairResult evaluatePair(const Body&bi,const Body&bj,const PairParameters&
       }
       netA=geometry*netA;netR=geometry*netR;
     }
+    const AD weightedNetA=p.cmcNetBlend==1.?netA:netA*p.cmcNetBlend;
+    result.cmcNetAttractiveEnergy=weightedNetA.v;
+    unpack(weightedNetA,result.cmcNetAttractiveForceI,
+           result.cmcNetAttractiveTorqueI,result.cmcNetAttractiveTorqueJ);
     if(p.cmcNetBlend==1.){ua=netA;ur=netR;}
     else{
       ua=(1.-p.cmcNetBlend)*ua+p.cmcNetBlend*netA;

@@ -162,6 +162,22 @@ void signatures() {
     auto changed=cfg;changed.*field*=1.1;
     require(cp::signature(changed,units,2,1)!=net,"Changed net-CMC parameter accepted by checkpoint signature");
   }
+  cfg.cmc_coordination_start=.7;cfg.cmc_coordination_end=2.3;cfg.cmc_coordination_floor=.2;
+  require(cp::signature(cfg,units,2,1)==net,"Disabled coordination changed the previous net-CMC signature");
+  cfg.cmc_coordination_enabled=true;
+  const auto coordinated=cp::signature(cfg,units,2,1);
+  require(coordinated!=net&&coordinated.find("cmc_coordination_version=1\n")!=std::string::npos
+      &&coordinated.find("cmc_coordination_enabled=1\n")!=std::string::npos,
+      "Active coordination is missing from the checkpoint signature");
+  for(auto field:{&c::Config::cmc_coordination_start,&c::Config::cmc_coordination_end,
+      &c::Config::cmc_coordination_floor}) {
+    auto changed=cfg;changed.*field*=1.1;
+    require(cp::signature(changed,units,2,1)!=coordinated,
+        "Changed coordination parameter accepted by checkpoint signature");
+  }
+  cfg.cmc_net_blend=0.;
+  require(cp::signature(cfg,units,2,1)==pure,
+      "Coordination with zero net blend changed the legacy checkpoint signature");
 }
 
 void netConfiguration(const cp::fs::path& directory) {
@@ -188,11 +204,54 @@ void netConfiguration(const cp::fs::path& directory) {
     rejects([&]{parse(base+invalid);},"Invalid net-CMC configuration accepted");
   const auto inactive=parse("cmc_net_blend=0\n");
   require(!inactive.surface_adhesion,"Inactive net CMC unexpectedly changed the legacy model");
+  require(!parsed.cmc_coordination_enabled&&parsed.cmc_coordination_start==1.
+      &&parsed.cmc_coordination_end==2.&&parsed.cmc_coordination_floor==.1,
+      "Coordination defaults changed the legacy configuration");
+  const auto coordinated=parse(base+"cmc_coordination_enabled=1\ncmc_coordination_start=0.7\n"
+      "cmc_coordination_end=2.3\ncmc_coordination_floor=0.2\n");
+  require(coordinated.cmc_coordination_enabled&&coordinated.cmc_coordination_start==.7
+      &&coordinated.cmc_coordination_end==2.3&&coordinated.cmc_coordination_floor==.2,
+      "Coordination configuration fields were not parsed");
+  for(const std::string invalid:{"cmc_coordination_enabled=2\n","cmc_coordination_enabled=true\n",
+      "cmc_coordination_start=-0.1\n","cmc_coordination_start=2\n",
+      "cmc_coordination_end=1\n","cmc_coordination_start=nan\n",
+      "cmc_coordination_end=inf\n","cmc_coordination_floor=nan\n",
+      "cmc_coordination_floor=-0.1\n","cmc_coordination_floor=1.1\n",
+      "cmc_coordination_start=2.2250738585072014e-308\ncmc_coordination_end=2.225073858507202e-308\n"})
+    rejects([&]{parse(base+invalid);},"Invalid coordination configuration accepted");
+  require(parse(base+"cmc_coordination_floor=0\n").cmc_coordination_floor==0.
+      &&parse(base+"cmc_coordination_floor=1\n").cmc_coordination_floor==1.,
+      "Coordination floor endpoints must be valid");
+  const auto dormant=parse("cmc_net_blend=0\ncmc_coordination_enabled=1\n");
+  require(dormant.cmc_coordination_enabled&&!dormant.surface_adhesion,
+      "Zero-blend coordination must remain dormant");
+}
+
+void coordinationRestart(const cp::fs::path& directory) {
+  c::Config cfg;cfg.surface_adhesion=true;cfg.cmc_net_blend=1.;
+  c::Units units(cfg);
+  const auto previous=cp::signature(cfg,units,1,1);
+  cp::State state;state.bodies.resize(1);state.angularAcceleration.resize(1);state.step=17;
+  const auto path=directory/"net-before-coordination.bin";
+  cp::saveState(path,state,previous);
+  cfg.cmc_coordination_enabled=true;
+  const auto updated=cp::signature(cfg,units,1,1);
+  rejects([&]{cp::loadState(path,1,updated);},
+      "Previous net-potential state was accepted by the coordination model");
+  const auto activePath=directory/"coordination.bin";
+  cp::saveState(activePath,state,updated);
+  require(cp::loadState(activePath,1,updated).step==17,"Coordination checkpoint did not roundtrip");
+  rejects([&]{cp::loadState(activePath,1,previous);},
+      "Coordination state was accepted with coordination disabled");
+  cfg.cmc_coordination_enabled=false;cfg.cmc_coordination_floor=.8;
+  require(cp::loadState(path,1,cp::signature(cfg,units,1,1)).step==17,
+      "Disabled coordination rejected an unchanged net-potential checkpoint");
 }
 }
 int main() {
   try {Scratch scratch;migrateLegacyAndRoundtrip(scratch.path);signatures();netConfiguration(scratch.path);
-    std::cout<<"PASS: checkpoint v1 migration, v2 counters, ABI/version guards and physics signatures\n";
+    coordinationRestart(scratch.path);
+    std::cout<<"PASS: checkpoint v1 migration, v2 counters, ABI/version guards, coordination config and physics signatures\n";
     return 0;
   }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

@@ -47,6 +47,7 @@ SURFACE_ADHESION_VERSION = 1
 FREE_CMC_REPULSION_VERSION = 1
 FREE_CMC_INNER_REPULSION_VERSION = 1
 CMC_NET_POTENTIAL_VERSION = 1
+CMC_COORDINATION_VERSION = 1
 MOLAR_GAS_CONSTANT = 8.31446261815324
 PASS_MAX_VERSION = 1
 LOCAL_ADHESION_DEFAULTS = {
@@ -69,6 +70,9 @@ NET_CMC_CHECKPOINT_KEYS = (
     'cmc_net_blend', 'cmc_net_contact_force', 'cmc_net_barrier_force',
     'cmc_net_attraction_range', 'cmc_net_repulsion_range',
     'cmc_net_reference_length', 'cmc_net_potential_version')
+CMC_COORDINATION_CHECKPOINT_KEYS = (
+    'cmc_coordination_enabled', 'cmc_coordination_start',
+    'cmc_coordination_end', 'cmc_coordination_floor', 'cmc_coordination_version')
 # Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201, report adsorption
 # saturation of 0.37 +/- 0.09 wt% relative to graphite + carbon-black mass.
 # This default is OUR approximate transfer to a 44 wt% graphite/water
@@ -91,6 +95,45 @@ CMC_NET_POTENTIAL_DEFAULTS = {
     'full_free_g_L': 13.101578571428572,
     'contact_force_N': 1.5e-10, 'barrier_force_N': 2e-11,
     'attraction_range_m': 1e-9, 'repulsion_range_m': 6e-9}
+CMC_COORDINATION_DEFAULTS = {
+    'enabled': False, 'other_neighbors_start': 1.0,
+    'other_neighbors_end': 2.0, 'minimum_factor': 0.1}
+
+
+def resolve_cmc_coordination(net_params, blend):
+    """Validate the optional many-body correction without changing inactive laws."""
+    supplied = net_params.get('coordination', {})
+    if not isinstance(supplied, dict):
+        raise ValueError('cmc.net_potential.coordination must be a JSON object')
+    unknown = sorted(str(key) for key in supplied if key not in CMC_COORDINATION_DEFAULTS
+                     and not (isinstance(key, str) and key.startswith('_')))
+    if unknown:
+        raise ValueError('Unknown cmc.net_potential.coordination fields: '+', '.join(unknown))
+    params = dict(CMC_COORDINATION_DEFAULTS)
+    params.update(supplied)
+    if not isinstance(params['enabled'], bool):
+        raise ValueError('cmc.net_potential.coordination.enabled must be a JSON boolean')
+    for key in ('other_neighbors_start', 'other_neighbors_end', 'minimum_factor'):
+        positive(params[key], 'cmc.net_potential.coordination.'+key, zero=True)
+    if params['other_neighbors_end'] <= params['other_neighbors_start']:
+        raise ValueError('cmc.net_potential.coordination requires '
+                         'other_neighbors_start < other_neighbors_end')
+    if not math.isfinite(1/(params['other_neighbors_end']-params['other_neighbors_start'])):
+        raise ValueError('cmc.net_potential.coordination transition scale must be representable')
+    if params['minimum_factor'] > 1:
+        raise ValueError('cmc.net_potential.coordination.minimum_factor must be at most 1')
+    state = {key: params[key] for key in CMC_COORDINATION_DEFAULTS}
+    state.update(active=blend > 0 and params['enabled'],
+                 model_version=CMC_COORDINATION_VERSION,
+                 energy='E_A_net=sum_ij g(z_i-q_ij)*g(z_j-q_ij)*A_ij; z_i=sum_j q_ij',
+                 neighbor_weight='q=1-10t^3+15t^4-6t^5; t=clamp((h-h0)/attraction_range,0,1)',
+                 saturation='g=floor+(1-floor)*(1-10u^3+15u^4-6u^5); '
+                            'u=clamp((other_neighbors-start)/(end-start),0,1)',
+                 minimum_pair_factor=params['minimum_factor']**2,
+                 differentiation='Full configuration derivative, including neighbor-weight and saturation derivatives; '
+                                 'only net attraction is modified',
+                 entry_cost='Explicit pair repulsion is unchanged; coordination adds a geometry-dependent entry cost')
+    return params, state
 
 
 def resolve_net_cmc(cmc, cfg):
@@ -104,6 +147,7 @@ def resolve_net_cmc(cmc, cfg):
     if not isinstance(supplied, dict):
         raise ValueError('cmc.net_potential must be a JSON object')
     unknown = sorted(str(key) for key in supplied if key not in CMC_NET_POTENTIAL_DEFAULTS
+                     and key != 'coordination'
                      and not (isinstance(key, str) and key.startswith('_')))
     if unknown:
         raise ValueError('Unknown cmc.net_potential fields: '+', '.join(unknown))
@@ -120,6 +164,7 @@ def resolve_net_cmc(cmc, cfg):
     span = params['full_free_g_L'] - params['start_free_g_L']
     blend = (min(max((cmc['free_g_L']-params['start_free_g_L'])/span, 0.0), 1.0)
              if params['enabled'] else 0.0)
+    params['coordination'], coordination = resolve_cmc_coordination(params, blend)
     a = cfg['particles']['diameter_m']/2
     c = cfg['particles']['thickness_m']/2
     # a*(a/c) avoids squaring a small SI length before dividing by c.
@@ -151,6 +196,7 @@ def resolve_net_cmc(cmc, cfg):
                  reference_barrier_energy_J=barrier_energy,
                  model='phenomenological total-potential screening, including the RE2 tail',
                  interpolation='(1-blend)*legacy_potential_at_same_free_g_L + blend*net_potential',
+                 coordination=coordination,
                  legacy_potential_weight=1-blend,
                  re2_tail_weight=1-blend)
     return params, state
@@ -569,6 +615,12 @@ def solver_values(cfg, output, particles, max_steps):
                           cmc_net_attraction_range=net['attraction_range_m'],
                           cmc_net_repulsion_range=net['repulsion_range_m'],
                           cmc_net_reference_length=net['reference_length_m'])
+        coordination = net['coordination']
+        if coordination['active']:
+            values.update(cmc_coordination_enabled=1,
+                          cmc_coordination_start=coordination['other_neighbors_start'],
+                          cmc_coordination_end=coordination['other_neighbors_end'],
+                          cmc_coordination_floor=coordination['minimum_factor'])
     return values
 
 
@@ -588,6 +640,10 @@ def require_local_adhesion_build(cfg, build_info):
         if (cmc_metadata['net_potential']['active']
                 and build_info.get('cmc_net_potential_version') != CMC_NET_POTENTIAL_VERSION):
             raise ValueError('This configuration requires the net CMC total-potential model. '
+                             'Rebuild with build_slurry_cpu.sbatch before running.')
+        if (cmc_metadata['net_potential']['coordination']['active']
+                and build_info.get('cmc_coordination_version') != CMC_COORDINATION_VERSION):
+            raise ValueError('This configuration requires CMC coordination saturation. '
                              'Rebuild with build_slurry_cpu.sbatch before running.')
     if cfg['interaction']['surface_adhesion']:
         if build_info.get('surface_adhesion_version') != SURFACE_ADHESION_VERSION:
@@ -676,7 +732,9 @@ def validate_restart(cfg,meta,checkpoint,ranks,max_steps=0,allow_complete=False)
             ('inner', 'free_cmc_inner_repulsion_work', 'free_cmc_inner_repulsion_version',
              FREE_CMC_INNER_REPULSION_VERSION, INNER_CMC_CHECKPOINT_KEYS),
             ('net potential', 'cmc_net_blend', 'cmc_net_potential_version',
-             CMC_NET_POTENTIAL_VERSION, NET_CMC_CHECKPOINT_KEYS)):
+             CMC_NET_POTENTIAL_VERSION, NET_CMC_CHECKPOINT_KEYS),
+            ('coordination', 'cmc_coordination_enabled', 'cmc_coordination_version',
+             CMC_COORDINATION_VERSION, CMC_COORDINATION_CHECKPOINT_KEYS)):
         active = values.get(physical_key, 0.0) > 0
         saved_active = immutable.get(physical_key, 0.0) > 0
         if active != saved_active:

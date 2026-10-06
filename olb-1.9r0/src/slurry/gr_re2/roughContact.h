@@ -17,6 +17,9 @@ struct RoughContactSettings {
   double tangentialStiffness=9.;              // N/m
   double rollingLength=100.e-9;               // m; not the asperity height
   double rollingYieldAngle=.01;              // rad
+  // Coordination-dependent cohesion supplies the current net adhesive force
+  // at every evaluation. False retains the historical, birth-frozen law.
+  bool currentAdhesionRolling=false;
 };
 
 // One state per persistent, ordered particle-ID pair.  LE image changes must
@@ -144,6 +147,30 @@ inline RoughContactResult roughContact(
     state.rollingCap=settings.rollingLength*std::max(0.,adhesiveBirthForce);
     state.rollingStiffness=state.rollingCap/settings.rollingYieldAngle;
   }
+  if(settings.currentAdhesionRolling && old.active) {
+    const double cap=settings.rollingLength*std::max(0.,adhesiveBirthForce);
+    const double stiffness=cap/settings.rollingYieldAngle;
+    if(cap!=state.rollingCap || stiffness!=state.rollingStiffness) {
+      // A change of cohesion is not an imposed rolling displacement. Carry
+      // q=sqrt(k)*theta, the elastic-energy coordinate, into the new spring;
+      // simply retaining theta while increasing k would create energy.
+      // Weakening can reduce the admissible stored energy. Relax that excess
+      // BEFORE the physical angular increment and report it as released
+      // energy, not as plastic work done by a nonexistent angular motion.
+      const double oldEnergy=.5*state.rollingStiffness*dot(state.elasticRoll,state.elasticRoll);
+      if(stiffness>0. && oldEnergy>0.) {
+        const double capacity=.5*cap*(cap/stiffness);
+        const double retained=std::min(oldEnergy,capacity);
+        const double angle=std::sqrt(2.*retained/stiffness);
+        state.elasticRoll=scale(state.elasticRoll,angle/norm(state.elasticRoll));
+        out.releasedEnergy=std::max(0.,oldEnergy-retained);
+      } else {
+        state.elasticRoll={};
+        out.releasedEnergy=std::max(0.,oldEnergy);
+      }
+      state.rollingCap=cap;state.rollingStiffness=stiffness;
+    }
+  }
   out.trialSlip=add(state.elasticSlip,scale(slip,dt));
   out.trialRoll=add(state.elasticRoll,scale(roll,dt));
   const auto sliding=rough_detail::returnMap(out.trialSlip,
@@ -171,7 +198,7 @@ inline RoughContactResult roughContact(
   state.leverI=out.leverI;state.leverJ=out.leverJ;state.elasticEnergy=out.elasticEnergy;
   state.sliding=out.sliding;state.rolling=out.rolling;
   state.plasticSlipWork=out.plasticSlipWork;state.plasticRollWork=out.plasticRollWork;
-  state.releasedEnergy=0.;state.stepDuration=dt;
+  state.releasedEnergy=out.releasedEnergy;state.stepDuration=dt;
   out.candidateState=state;
   return out;
 }

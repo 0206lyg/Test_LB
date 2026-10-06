@@ -80,7 +80,7 @@ struct ParticleReplayInput {
   PersistentContactState contacts;
 };
 inline void writeParticleReplay(const ParticleReplayInput& x,const std::string& path) {
-  std::ofstream f(path);if(!f)return;f<<std::setprecision(17)<<"GR_PARTICLE_REPLAY 7\n";
+  std::ofstream f(path);if(!f)return;f<<std::setprecision(17)<<"GR_PARTICLE_REPLAY 8\n";
   const auto& s=x.settings;
   f<<x.dt<<' '<<x.time<<' '<<x.outerTime<<' '<<x.outerDt<<' '<<x.count<<' '<<x.substep<<'\n';
   f<<s.shearRate<<' '<<s.maxSubsteps<<' '<<s.maxNewtonIterations<<' '<<s.maxKrylovIterations<<' '<<s.maxLineSearch<<' '
@@ -98,6 +98,8 @@ inline void writeParticleReplay(const ParticleReplayInput& x,const std::string& 
   f<<s.pair.cmcNetBlend<<' '<<s.pair.cmcNetContactForce<<' '<<s.pair.cmcNetBarrierForce<<' '
     <<s.pair.cmcNetAttractionRange<<' '<<s.pair.cmcNetRepulsionRange<<' '
     <<s.pair.cmcNetReferenceLength<<'\n';
+  f<<s.pair.cmcCoordinationEnabled<<' '<<s.pair.cmcCoordinationStart<<' '
+    <<s.pair.cmcCoordinationEnd<<' '<<s.pair.cmcCoordinationFloor<<'\n';
   f<<s.nearField.viscosity<<' '<<s.nearField.matchingGap<<' '<<s.nearField.enabled<<' '<<s.nearField.tangential<<'\n';
   f<<s.rough.enabled<<' '<<s.rough.gap<<' '<<s.rough.friction<<' '<<s.rough.tangentialStiffness<<' '<<s.rough.rollingLength<<' '<<s.rough.rollingYieldAngle<<'\n';
   f<<x.bodies.size()<<'\n';
@@ -116,7 +118,7 @@ inline void writeParticleReplay(const ParticleReplayInput& x,const std::string& 
 }
 inline ParticleReplayInput readParticleReplay(const std::string& path) {
   ParticleReplayInput x;std::ifstream f(path);std::string magic;int version=0;f>>magic>>version;
-  if(magic!="GR_PARTICLE_REPLAY"||(version<1||version>7))throw std::runtime_error("Invalid particle replay header");
+  if(magic!="GR_PARTICLE_REPLAY"||(version<1||version>8))throw std::runtime_error("Invalid particle replay header");
   auto& s=x.settings;f>>x.dt>>x.time>>x.outerTime>>x.outerDt>>x.count>>x.substep;
   f>>s.shearRate>>s.maxSubsteps>>s.maxNewtonIterations>>s.maxKrylovIterations>>s.maxLineSearch
     >>s.relativeTolerance>>s.forceAbsoluteTolerance>>s.torqueAbsoluteTolerance>>s.contactGapTolerance>>s.finiteDifferenceStep;
@@ -141,8 +143,12 @@ inline ParticleReplayInput readParticleReplay(const std::string& path) {
   if(version>=7)f>>s.pair.cmcNetBlend>>s.pair.cmcNetContactForce>>s.pair.cmcNetBarrierForce
       >>s.pair.cmcNetAttractionRange>>s.pair.cmcNetRepulsionRange>>s.pair.cmcNetReferenceLength;
   // v1-v6 keep the zero-blend default and their original physical interaction.
+  if(version>=8)f>>s.pair.cmcCoordinationEnabled>>s.pair.cmcCoordinationStart
+      >>s.pair.cmcCoordinationEnd>>s.pair.cmcCoordinationFloor;
+  // v1-v7 retain pairwise interactions and frozen-birth rolling strengths.
   f>>s.nearField.viscosity>>s.nearField.matchingGap>>s.nearField.enabled>>s.nearField.tangential;
   f>>s.rough.enabled>>s.rough.gap>>s.rough.friction>>s.rough.tangentialStiffness>>s.rough.rollingLength>>s.rough.rollingYieldAngle;
+  s.rough.currentAdhesionRolling=cmcCoordinationActive(s.pair);
   std::size_t n=0;f>>n;if(n==0||n>100000)throw std::runtime_error("Unreasonable particle replay count");
   x.bodies.resize(n);x.force.resize(n);x.torque.resize(n);
   for(std::size_t i=0;i<n;++i){auto& b=x.bodies[i];

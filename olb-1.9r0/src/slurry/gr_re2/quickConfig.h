@@ -34,6 +34,9 @@ struct Config {
   double cmc_net_blend=0.,cmc_net_contact_force=1.5e-10,cmc_net_barrier_force=2e-11;
   double cmc_net_attraction_range=1e-9,cmc_net_repulsion_range=6e-9;
   double cmc_net_reference_length=13.6125e-6;
+  // Coordination screening is inactive unless enabled with a positive net blend.
+  bool cmc_coordination_enabled=false;
+  double cmc_coordination_start=1.,cmc_coordination_end=2.,cmc_coordination_floor=.1;
   // Coated contact: zero gap uses the bare roughness plane. Retention scales
   // total attractive pair energy, not the Coulomb friction coefficient.
   double cmc_contact_gap=0.,cmc_cohesion_retention=1.;
@@ -87,6 +90,7 @@ inline Config parseConfig(int argc,char**argv) {
     REAL(free_cmc_inner_repulsion_power)
     REAL(cmc_net_blend) REAL(cmc_net_contact_force) REAL(cmc_net_barrier_force)
     REAL(cmc_net_attraction_range) REAL(cmc_net_repulsion_range) REAL(cmc_net_reference_length)
+    REAL(cmc_coordination_start) REAL(cmc_coordination_end) REAL(cmc_coordination_floor)
     REAL(cmc_contact_gap) REAL(cmc_cohesion_retention)
     REAL(checkpoint_seconds)
     REAL(end_strain) REAL(particle_tolerance) REAL(lubrication_cutoff_cells)
@@ -101,6 +105,10 @@ inline Config parseConfig(int argc,char**argv) {
     if(key=="solver_diagnostics"){
       if(v!="0"&&v!="1")throw std::runtime_error("solver_diagnostics must be 0 or 1");
       c.solver_diagnostics=v=="1";continue;
+    }
+    if(key=="cmc_coordination_enabled"){
+      if(v!="0"&&v!="1")throw std::runtime_error("cmc_coordination_enabled must be 0 or 1");
+      c.cmc_coordination_enabled=v=="1";continue;
     }
     if(key=="pass_max"||key=="cmc_contact_version"){
       if(v!="0"&&v!="1")throw std::runtime_error(key+" must be 0 or 1");
@@ -166,6 +174,12 @@ inline Config parseConfig(int argc,char**argv) {
     if(!(c.roughness_gap+c.cmc_net_attraction_range+c.cmc_net_repulsion_range<=c.switch_gap))
       throw std::runtime_error("Net CMC attraction and repulsion ranges must end before the far switch gap");
   }
+  if(!(std::isfinite(c.cmc_coordination_start)&&std::isfinite(c.cmc_coordination_end)
+       &&std::isfinite(c.cmc_coordination_floor)
+       &&c.cmc_coordination_start>=0.&&c.cmc_coordination_end>c.cmc_coordination_start
+       &&c.cmc_coordination_floor>=0.&&c.cmc_coordination_floor<=1.
+       &&std::isfinite(1./(c.cmc_coordination_end-c.cmc_coordination_start))))
+    throw std::runtime_error("CMC coordination requires 0 <= start < end, a representable interval and floor in [0,1]");
   if(!(c.cmc_contact_gap>=0.&&contactGap>=c.roughness_gap
        &&c.cmc_cohesion_retention>=0.&&c.cmc_cohesion_retention<=1.))
     throw std::runtime_error("Require CMC contact gap >= bare roughness gap and cohesion retention in [0,1]");

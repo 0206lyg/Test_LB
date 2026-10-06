@@ -94,6 +94,12 @@ inline std::map<std::string,double> physics(const Config& c,const Units& u,std::
     KEEP(cmc_net_attraction_range);KEEP(cmc_net_repulsion_range);KEEP(cmc_net_reference_length);
     out["cmc_net_potential_version"]=1.;
   }
+  if(c.cmc_net_blend>0.&&c.cmc_coordination_enabled){
+    // Inactive coordination keeps all pre-coordination restart signatures exact.
+    KEEP(cmc_coordination_enabled);KEEP(cmc_coordination_start);
+    KEEP(cmc_coordination_end);KEEP(cmc_coordination_floor);
+    out["cmc_coordination_version"]=1.;
+  }
   if(c.cmc_contact_version>0){
     // No new keys for inactive CMC: existing pure-Gr checkpoints remain valid.
     KEEP(cmc_contact_gap);KEEP(cmc_cohesion_retention);KEEP(cmc_contact_version);

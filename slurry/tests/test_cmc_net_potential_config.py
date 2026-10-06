@@ -17,6 +17,7 @@ SPEC.loader.exec_module(RUNNER)
 START = 1.1015785714285715
 FULL = 13.101578571428572
 NET_KEYS = RUNNER.NET_CMC_CHECKPOINT_KEYS[:-1]
+COORD_KEYS = RUNNER.CMC_COORDINATION_CHECKPOINT_KEYS[:-1]
 
 
 def case(name='gr_CMC.json'):
@@ -35,7 +36,8 @@ def checkpoint(cfg, meta, values):
             ('surface_adhesion', 'interaction_model_version', RUNNER.SURFACE_CHECKPOINT_KEYS),
             ('free_cmc_repulsion_pressure', 'free_cmc_repulsion_version', RUNNER.FREE_CMC_CHECKPOINT_KEYS),
             ('free_cmc_inner_repulsion_work', 'free_cmc_inner_repulsion_version', RUNNER.INNER_CMC_CHECKPOINT_KEYS),
-            ('cmc_net_blend', 'cmc_net_potential_version', RUNNER.NET_CMC_CHECKPOINT_KEYS)):
+            ('cmc_net_blend', 'cmc_net_potential_version', RUNNER.NET_CMC_CHECKPOINT_KEYS),
+            ('cmc_coordination_enabled', 'cmc_coordination_version', RUNNER.CMC_COORDINATION_CHECKPOINT_KEYS)):
         if values.get(physical, 0) > 0:
             immutable.update({key: values[key] for key in keys if key != version})
             immutable[version] = 1
@@ -68,12 +70,13 @@ class NetCmcConfigTests(unittest.TestCase):
         _, _, baseline = resolved(four)
         enabled = copy.deepcopy(four)
         enabled['cmc']['net_potential'] = {'enabled': True}
+        enabled['cmc']['net_potential']['coordination'] = {'enabled': True}
         self.assertEqual(resolved(enabled)[2], baseline)
         self.assertFalse(set(NET_KEYS).intersection(baseline))
         pure = case('pure_gr.json')
         _, _, baseline = resolved(pure)
         pure['cmc'] = {'adsorbed_g_L': 0, 'free_g_L': 0,
-                       'net_potential': {'enabled': True}}
+                       'net_potential': {'enabled': True, 'coordination': {'enabled': True}}}
         self.assertEqual(resolved(pure)[2], baseline)
 
     def test_disabled_net_restores_full_legacy_config_and_shipped16_changes_only_named_settings(self):
@@ -96,6 +99,7 @@ class NetCmcConfigTests(unittest.TestCase):
     def test_reference_geometry_metadata_and_config_roundtrip(self):
         source = case()
         source['cmc']['net_potential']['_note'] = 'trial hypothesis'
+        source['cmc']['net_potential']['coordination']['_note'] = 'conservative saturation'
         before = copy.deepcopy(source)
         cfg, meta, values = resolved(source)
         self.assertEqual(source, before)
@@ -109,6 +113,8 @@ class NetCmcConfigTests(unittest.TestCase):
         self.assertIn('RE2 tail', net['model'])
         self.assertIn('same_free_g_L', net['interpolation'])
         self.assertNotIn('_note', net)
+        self.assertNotIn('_note', net['coordination'])
+        self.assertEqual(cfg['cmc']['net_potential']['coordination']['_note'], 'conservative saturation')
         cfg['particles']['thickness_m'] *= 2
         self.assertAlmostEqual(resolved(cfg)[2]['cmc_net_reference_length']/values['cmc_net_reference_length'], .5)
 
@@ -148,7 +154,8 @@ class NetCmcConfigTests(unittest.TestCase):
 class NetCmcCompatibilityTests(unittest.TestCase):
     def test_build_gate_is_conditional_on_actual_activation(self):
         info = {'pass_max_version': 1, 'surface_adhesion_version': 1,
-                'free_cmc_repulsion_version': 1, 'free_cmc_inner_repulsion_version': 1}
+                'free_cmc_repulsion_version': 1, 'free_cmc_inner_repulsion_version': 1,
+                'cmc_coordination_version': 1}
         cfg, _, _ = resolved()
         for version in (None, 0, 2):
             old = dict(info)
@@ -191,6 +198,117 @@ class NetCmcCompatibilityTests(unittest.TestCase):
             RUNNER.validate_restart(old_cfg, old_meta, old_saved, 1)
 
 
+class CmcCoordinationTests(unittest.TestCase):
+    def test_coordination_is_opt_in_and_only_active_on_the_net_branch(self):
+        enabled = case()
+        omitted = copy.deepcopy(enabled)
+        del omitted['cmc']['net_potential']['coordination']
+        _, old_meta, baseline = resolved(omitted)
+        self.assertFalse(old_meta['cmc']['net_potential']['coordination']['active'])
+        self.assertFalse(set(COORD_KEYS).intersection(baseline))
+        disabled = copy.deepcopy(enabled)
+        disabled['cmc']['net_potential']['coordination']['enabled'] = False
+        self.assertEqual(resolved(disabled)[2], baseline)
+        for free, active in ((0, False), (START, False), ((START+FULL)/2, True), (FULL, True)):
+            source = copy.deepcopy(enabled)
+            source['cmc']['free_g_L'] = free
+            cfg, meta, values = resolved(source)
+            with self.subTest(free=free):
+                self.assertEqual(meta['cmc']['net_potential']['coordination']['active'], active)
+                self.assertEqual(set(COORD_KEYS).intersection(values), set(COORD_KEYS) if active else set())
+                if active:
+                    self.assertEqual([values[key] for key in COORD_KEYS], [1, 1, 2, .1])
+                cfg['cmc']['net_potential']['enabled'] = False
+                self.assertFalse(set(COORD_KEYS).intersection(resolved(cfg)[2]))
+
+    def test_shipped_force_override_preserves_scalar_defaults_and_barrier_parameters(self):
+        cfg, meta, values = resolved()
+        self.assertEqual(values['cmc_net_contact_force'], 4.5e-10)
+        self.assertEqual(values['cmc_net_barrier_force'], 2e-11)
+        self.assertEqual(values['cmc_net_attraction_range'], 1e-9)
+        self.assertEqual(values['cmc_net_repulsion_range'], 6e-9)
+        del cfg['cmc']['net_potential']['contact_force_N']
+        self.assertEqual(resolved(cfg)[2]['cmc_net_contact_force'], 1.5e-10)
+        coordinate = meta['cmc']['net_potential']['coordination']
+        self.assertIn('g(z_i-q_ij)*g(z_j-q_ij)', coordinate['energy'])
+        self.assertAlmostEqual(coordinate['minimum_pair_factor'], .01)
+        self.assertIn('Full configuration derivative', coordinate['differentiation'])
+
+    def test_coordination_input_validation_is_strict_even_when_disabled(self):
+        for bad in (None, [], True, 1, 'enabled'):
+            source = case()
+            source['cmc']['net_potential']['coordination'] = bad
+            with self.subTest(section=bad), self.assertRaises(ValueError):
+                resolved(source)
+        for key in RUNNER.CMC_COORDINATION_DEFAULTS:
+            bad_values = (0, 1, 'true', None) if key == 'enabled' else (-1, math.nan, math.inf, True, None)
+            for bad in bad_values:
+                source = case()
+                source['cmc']['net_potential']['coordination'].update(enabled=False)
+                source['cmc']['net_potential']['coordination'][key] = bad
+                with self.subTest(key=key, value=bad), self.assertRaises(ValueError):
+                    resolved(source)
+        for bad in ({'unknown': 1}, {'other_neighbors_end': 1},
+                    {'other_neighbors_start': 3}, {'minimum_factor': 1.001},
+                    {'other_neighbors_start': 0, 'other_neighbors_end': 5e-324}):
+            source = case()
+            source['cmc']['net_potential']['coordination'].update(bad)
+            with self.subTest(values=bad), self.assertRaises(ValueError):
+                resolved(source)
+        # Both endpoint factors are valid constitutive limits.
+        for floor in (0, 1):
+            source = case()
+            source['cmc']['net_potential']['coordination'].update(
+                other_neighbors_start=0, minimum_factor=floor)
+            self.assertEqual(resolved(source)[2]['cmc_coordination_floor'], floor)
+
+    def test_old_binary_is_rejected_only_for_active_coordination(self):
+        info = {'pass_max_version': 1, 'surface_adhesion_version': 1,
+                'free_cmc_repulsion_version': 1, 'free_cmc_inner_repulsion_version': 1,
+                'cmc_net_potential_version': 1}
+        for free in ((START+FULL)/2, FULL):
+            cfg, _, _ = resolved()
+            cfg['cmc']['free_g_L'] = free
+            for version in (None, 0, 2):
+                old = dict(info)
+                if version is not None:
+                    old['cmc_coordination_version'] = version
+                with self.subTest(free=free, version=version), self.assertRaisesRegex(ValueError, 'coordination.*Rebuild'):
+                    RUNNER.require_local_adhesion_build(cfg, old)
+            RUNNER.require_local_adhesion_build(cfg, dict(info, cmc_coordination_version=1))
+            cfg['cmc']['net_potential']['coordination']['enabled'] = False
+            RUNNER.require_local_adhesion_build(cfg, info)
+        cfg['cmc']['net_potential']['coordination']['enabled'] = True
+        cfg['cmc']['free_g_L'] = START
+        RUNNER.require_local_adhesion_build(cfg, info)
+
+    def test_restart_requires_matching_coordination_signature_and_rejects_old_pair_law(self):
+        cfg, meta, values = resolved()
+        saved = checkpoint(cfg, meta, values)
+        self.assertTrue(RUNNER.validate_restart(cfg, meta, saved, 1))
+        for key in RUNNER.CMC_COORDINATION_CHECKPOINT_KEYS:
+            broken = copy.deepcopy(saved)
+            del broken['immutable_config'][key]
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                RUNNER.validate_restart(cfg, meta, broken, 1)
+            broken = copy.deepcopy(saved)
+            broken['immutable_config'][key] *= .5
+            with self.subTest(changed=key), self.assertRaises(ValueError):
+                RUNNER.validate_restart(cfg, meta, broken, 1)
+        disabled = copy.deepcopy(cfg)
+        disabled['cmc']['net_potential']['coordination']['enabled'] = False
+        old_cfg, old_meta, old_values = resolved(disabled)
+        old_saved = checkpoint(old_cfg, old_meta, old_values)
+        self.assertTrue(RUNNER.validate_restart(old_cfg, old_meta, old_saved, 1))
+        with self.assertRaises(ValueError):
+            RUNNER.validate_restart(cfg, meta, old_saved, 1)
+        with self.assertRaises(ValueError):
+            RUNNER.validate_restart(old_cfg, old_meta, saved, 1)
+        old_saved['immutable_config']['cmc_coordination_enabled'] = 0
+        with self.assertRaises(ValueError):
+            RUNNER.validate_restart(old_cfg, old_meta, old_saved, 1)
+
+
 @unittest.skipUnless(shutil.which('g++'), 'C++ parser integration requires g++')
 class NetCmcCppWiringTests(unittest.TestCase):
     def test_derived_net_parameters_reach_cpp_for_both_endpoints_and_intermediate(self):
@@ -206,16 +324,20 @@ int main(int argc,char** argv) {
     <<c.cmc_net_contact_force<<" "<<c.cmc_net_barrier_force<<" "
     <<c.cmc_net_attraction_range<<" "<<c.cmc_net_repulsion_range<<" "
     <<c.cmc_net_reference_length<<" "<<c.free_cmc_repulsion_pressure<<" "
-    <<c.free_cmc_inner_repulsion_work<<" "<<c.roughness_gap<<" "<<c.pass_max;
+    <<c.free_cmc_inner_repulsion_work<<" "<<c.roughness_gap<<" "<<c.pass_max<<" "
+    <<c.cmc_coordination_enabled<<" "<<c.cmc_coordination_start<<" "
+    <<c.cmc_coordination_end<<" "<<c.cmc_coordination_floor;
 }
 ''')
             executable = directory/'parse'
             subprocess.run(['g++', '-std=c++17', '-I'+str(ROOT/'olb-1.9r0/src/slurry/gr_re2'),
                             str(source), '-o', str(executable)], check=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            for free in (START, (START+FULL)/2, FULL):
+            for free, enabled in ((START, True), ((START+FULL)/2, True), (FULL, True), (FULL, False)):
                 config = case()
                 config['cmc']['free_g_L'] = free
+                config['cmc']['net_potential']['coordination'].update(
+                    enabled=enabled, other_neighbors_start=.25, other_neighbors_end=1.7, minimum_factor=.22)
                 _, meta, values = resolved(config)
                 path = directory/'run.cfg'
                 path.write_text(''.join('{}={}\n'.format(key, value) for key, value in values.items()))
@@ -226,8 +348,10 @@ int main(int argc,char** argv) {
                 for i, key in enumerate(NET_KEYS[1:], start=1):
                     if key in values:
                         self.assertEqual(parsed[i], values[key])
-                self.assertEqual(parsed[6:], [values['free_cmc_repulsion_pressure'],
+                self.assertEqual(parsed[6:10], [values['free_cmc_repulsion_pressure'],
                                               values['free_cmc_inner_repulsion_work'], 2e-9, 1])
+                self.assertEqual(parsed[10:], [values.get(key, default) for key, default in
+                                               zip(COORD_KEYS, (0, 1, 2, .1))])
 
 
 if __name__ == '__main__':

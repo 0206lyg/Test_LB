@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "description": "Graphite with 90k CMC at total 16 g/L: saturated adsorption defines the legacy adhesion reference; free CMC fully activates a compact phenomenological net potential with explicit contact attraction and a finite approach barrier, screening the complete legacy potential including the RE2 tail. Mechanical contact stays at the bare 2 nm gap.",
+  "description": "Graphite with 90k CMC at total 16 g/L: the compact phenomenological net potential screens the complete legacy potential including the RE2 tail. The 450 pN reference attraction gains conservative coordination saturation; the explicit pair repulsion remains 20 pN, while coordination adds a geometry-dependent entry cost. The bare contact gap stays 2 nm.",
   "fluid": {
     "density_kg_m3": 997.0,
     "dynamic_viscosity_Pa_s": 0.00089,
@@ -91,13 +91,20 @@
       "enabled": true,
       "start_free_g_L": 1.1015785714285715,
       "full_free_g_L": 13.101578571428572,
-      "contact_force_N": 1.5e-10,
+      "contact_force_N": 4.5e-10,
       "barrier_force_N": 2e-11,
       "attraction_range_m": 1e-09,
-      "repulsion_range_m": 6e-09
+      "repulsion_range_m": 6e-09,
+      "coordination": {
+        "enabled": true,
+        "other_neighbors_start": 1.0,
+        "other_neighbors_end": 2.0,
+        "minimum_factor": 0.1
+      }
     },
     "_net_potential_model": "Phenomenological total-potential screening: blend=clamp((free_g_L-start_free_g_L)/(full_free_g_L-start_free_g_L),0,1); U=(1-blend)*U_legacy(free_g_L)+blend*U_net. The legacy branch uses the same current free concentration, not a frozen 4 g/L potential. At full blend the legacy adsorption, outer/inner repulsion and entire RE2 tail are replaced. U_net is zero at and beyond h0+attraction_range_m+repulsion_range_m=9 nm. Geometry scales with local Derjaguin length divided by reference a*a/c, derived from the configured semiaxes (13.6125 micrometres here). Force parameters specify the reference geometry, not every orientation.",
     "_net_potential_reference": "Unmeasured starting constitutive parameters. Activation starts at the saturated-adsorption 4 g/L benchmark and reaches full strength at 16 g/L. The shipped 4 g/L case and pure graphite retain their legacy laws. This is an explicit hypothesis for concentration-dependent total interactions, not a claim of established molecular screening.",
+    "_coordination_model": "Only net attraction is modified: E_A=sum_ij g(z_i-q_ij)*g(z_j-q_ij)*A_ij, z_i=sum_j q_ij. The smooth neighbor weight q falls from 1 at h0 to 0 at h0+attraction_range_m using 1-10t^3+15t^4-6t^5. Each endpoint factor g is 1 up to one other neighbor and decreases by the same quintic to 0.1 at two other neighbors; the pair factor is their product (minimum 0.01). Forces and torques differentiate the full energy, including coordination derivatives. The explicit pair repulsion is unchanged; coordination adds a geometry-dependent entry cost. Disabling coordination restores the pair-additive net potential at the configured force amplitude.",
     "_initialization": "The common 10 nm initial clearance exceeds the active net potential's 9 nm support. This is only a geometric initial-placement condition; rough_contact.roughness_gap_m remains 2 nm and no aging or preshear is performed by initialization."
   }
 }

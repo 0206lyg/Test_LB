@@ -2,6 +2,7 @@
 #define SLURRY_GR_RE2_GRAPHITE_PARTICLE_SUBSTEPS_H
 
 #include "reSquaredPotential.h"
+#include "cmcCoordination.h"
 #include "nearFieldResistance.h"
 #include "roughContact.h"
 #include <functional>
@@ -144,11 +145,35 @@ inline void wrap(Body& b,double time,const ParticleStepSettings& s) {
   b.position[2]-=std::floor(b.position[2]/s.box[2])*s.box[2];
 }
 
+// Evaluate each geometric pair once, then differentiate the coordination
+// energy using the complete neighbourhood. The ordered dense layout is shared
+// with contact history; far pairs contribute zero occupancy and zero energy.
+inline std::vector<CoordinationPair> coordinatedPairs(
+    const std::vector<Body>& bodies,double time,const ParticleStepSettings& settings,
+    std::vector<GapCache>& cache) {
+  const std::size_t n=bodies.size();
+  std::vector<CoordinationPair> pairs(n*(n-1)/2);
+  const double range=std::max(settings.pair.cutoffGap,
+      std::max(settings.nearField.matchingGap,settings.rough.enabled?settings.rough.gap:0.));
+  std::size_t index=0;
+  for(std::size_t i=0;i<n;++i)for(std::size_t j=i+1;j<n;++j,++index) {
+    auto& pair=pairs[index];pair.i=i;pair.j=j;
+    const Body image=closestImage(bodies[i],bodies[j],time,settings);
+    const Vec3 rij=sub(bodies[i].position,image.position);
+    const double bound=radius(bodies[i])+radius(image)+range;
+    if(dot(rij,rij)<=bound*bound)
+      pair.result=evaluatePair(bodies[i],image,settings.pair,&cache[index]);
+  }
+  applyCmcCoordination(n,pairs,settings.pair);
+  return pairs;
+}
+
 struct PairLinearization {
   std::size_t i=0,j=0,index=0;
   int slot=-1;
   double gap=0.;
   Vec3 normal{},leverI{},leverJ{};
+  Vec3 pairForceI{}; // Current globally corrected conservative force.
   Mat3 resistance{},rollingResistance{};
   Vec3 forcePerNormalLoad{},torqueIPerNormalLoad{},torqueJPerNormalLoad{};
   RoughContactResult contact;
@@ -201,12 +226,17 @@ struct Residual {
       std::size_t index=0;
       const double range=std::max(settings.pair.cutoffGap,
           std::max(settings.nearField.matchingGap,settings.rough.enabled?settings.rough.gap:0.));
+      const bool coordination=cmcCoordinationActive(settings.pair);
+      std::vector<CoordinationPair> coordinated;
+      if(coordination)coordinated=coordinatedPairs(e.bodies,time+dt,settings,e.cache);
+      auto rough=settings.rough;rough.currentAdhesionRolling=coordination;
       for(std::size_t i=0;i<n;++i)for(std::size_t j=i+1;j<n;++j,++index) {
         const Body image=closestImage(e.bodies[i],e.bodies[j],time+dt,settings);
         const Vec3 rij=sub(e.bodies[i].position,image.position);
         const double bound=radius(e.bodies[i])+radius(image)+range;
         if(dot(rij,rij)>bound*bound && activeSlot[index]<0 && !startingContacts[index].active)continue;
-        PairResult p=evaluatePair(e.bodies[i],image,settings.pair,&e.cache[index]);
+        PairResult p=coordination?coordinated[index].result
+            :evaluatePair(e.bodies[i],image,settings.pair,&e.cache[index]);
         if(!std::isfinite(p.gap)) {
           const auto gap=closestEllipsoidGap(e.bodies[i],image,&e.cache[index]);
           p.gap=gap.gap;p.normal=gap.normal;p.leverI=gap.leverI;p.leverJ=gap.leverJ;
@@ -230,7 +260,7 @@ struct Residual {
         e.diagnostic.lubricationDissipation+=lub.dissipation;
         PairLinearization linear;
         linear.i=i;linear.j=j;linear.index=index;linear.slot=activeSlot[index];linear.gap=p.gap;
-        linear.normal=p.normal;
+        linear.normal=p.normal;linear.pairForceI=p.forceI;
         const Vec3 point=scale(add(add(e.bodies[i].position,p.leverI),add(image.position,p.leverJ)),.5);
         linear.leverI=sub(point,e.bodies[i].position);linear.leverJ=sub(point,image.position);
         for(int a=0;a<3;++a)for(int b=0;b<3;++b)
@@ -247,14 +277,18 @@ struct Residual {
               : p.gap<=settings.rough.gap+settings.contactGapTolerance
                 && (normalLoad>0. || startingContacts[index].active)));
           double adhesiveBirthForce=0.;
-          if(active && !startingContacts[index].active) {
+          if(active && coordination) {
+            // Coordination can change an existing contact's strength. Use the
+            // corrected current force, not an isolated pair or a frozen birth.
+            adhesiveBirthForce=std::max(0.,dot(p.forceI,p.normal));
+          } else if(active && !startingContacts[index].active) {
             Body birthImage=image;
             birthImage.position=add(birthImage.position,scale(p.normal,settings.rough.gap-p.gap));
             const auto birth=evaluatePair(e.bodies[i],birthImage,settings.pair);
             adhesiveBirthForce=std::max(0.,dot(birth.forceI,birth.normal));
           }
           auto contact=roughContact(e.bodies[i],image,p.normal,p.leverI,p.leverJ,
-              normalLoad,adhesiveBirthForce,dt,startingContacts[index],settings.rough,active);
+              normalLoad,adhesiveBirthForce,dt,startingContacts[index],rough,active);
           // A candidate may be open: only its algebraic normal multiplier enters
           // momentum. It must not acquire tangential or rolling history.
           if(candidate && !active) {
@@ -512,6 +546,9 @@ inline bool implicitStep(const std::vector<Body>& old,const std::vector<Vec3>& f
     q[6*i+3+c]=old[i].omega[c]*dt;
   }
   if(settings.rough.enabled) {
+    const bool coordination=cmcCoordinationActive(settings.pair);
+    std::vector<CoordinationPair> coordinated;
+    if(coordination)coordinated=coordinatedPairs(old,time,settings,cache);
     std::size_t index=0;
     for(std::size_t i=0;i<n;++i)for(std::size_t j=i+1;j<n;++j,++index) {
       const Body image=closestImage(old[i],old[j],time,settings);
@@ -532,9 +569,14 @@ inline bool implicitStep(const std::vector<Body>& old,const std::vector<Vec3>& f
         // An initial Newton guess only: the reaction remains a solved unknown.
         // Starting a newly adhesive contact at N=0 creates a Coulomb corner
         // and can stall line search while the gap moves to its constraint.
-        Body birthImage=image;birthImage.position=add(image.position,scale(gap.normal,settings.rough.gap-gap.gap));
-        const auto birth=evaluatePair(old[i],birthImage,settings.pair);
-        birthReaction[index]=std::max(0.,dot(birth.forceI,birth.normal));
+        if(coordination) {
+          const auto& current=coordinated[index].result;
+          birthReaction[index]=std::max(0.,dot(current.forceI,current.normal));
+        } else {
+          Body birthImage=image;birthImage.position=add(image.position,scale(gap.normal,settings.rough.gap-gap.gap));
+          const auto birth=evaluatePair(old[i],birthImage,settings.pair);
+          birthReaction[index]=std::max(0.,dot(birth.forceI,birth.normal));
+        }
       }
     }
   }
@@ -568,10 +610,14 @@ inline bool implicitStep(const std::vector<Body>& old,const std::vector<Vec3>& f
             const auto found=std::find_if(base.pairs.begin(),base.pairs.end(),
                 [&](const PairLinearization& a){return a.index==p;});
             if(found!=base.pairs.end()) {
-              Body image=closestImage(base.bodies[found->i],base.bodies[found->j],time+dt,settings);
-              image.position=add(image.position,scale(found->normal,settings.rough.gap-found->gap));
-              const auto birth=evaluatePair(base.bodies[found->i],image,settings.pair);
-              revisedQ[6*n+revised[p]]=std::max(0.,dot(birth.forceI,birth.normal))/reactionScale;
+              if(cmcCoordinationActive(settings.pair)) {
+                revisedQ[6*n+revised[p]]=std::max(0.,dot(found->pairForceI,found->normal))/reactionScale;
+              } else {
+                Body image=closestImage(base.bodies[found->i],base.bodies[found->j],time+dt,settings);
+                image.position=add(image.position,scale(found->normal,settings.rough.gap-found->gap));
+                const auto birth=evaluatePair(base.bodies[found->i],image,settings.pair);
+                revisedQ[6*n+revised[p]]=std::max(0.,dot(birth.forceI,birth.normal))/reactionScale;
+              }
             }
           }
         }
@@ -715,6 +761,9 @@ inline ParticleStepDiagnostics evaluateParticleState(
   if(persistentCache->size()!=pairs)persistentCache->resize(pairs);
   if(persistentContacts && !persistentContacts->empty() && persistentContacts->size()!=pairs)
     throw std::invalid_argument("Contact history size does not match ordered particle pairs");
+  const bool coordination=cmcCoordinationActive(settings.pair);
+  std::vector<CoordinationPair> coordinated;
+  if(coordination)coordinated=particle_detail::coordinatedPairs(bodies,time,settings,*persistentCache);
   std::size_t index=0;
   for(std::size_t i=0;i<bodies.size();++i)for(std::size_t j=i+1;j<bodies.size();++j,++index) {
     if(settings.rough.enabled && persistentContacts && !persistentContacts->empty()) {
@@ -726,7 +775,8 @@ inline ParticleStepDiagnostics evaluateParticleState(
     const double range=std::max(settings.pair.cutoffGap,settings.nearField.matchingGap);
     const double bound=particle_detail::radius(bodies[i])+particle_detail::radius(image)+range;
     if(dot(rij,rij)>bound*bound)continue;
-    auto pair=evaluatePair(bodies[i],image,settings.pair,&(*persistentCache)[index]);
+    auto pair=coordination?coordinated[index].result
+        :evaluatePair(bodies[i],image,settings.pair,&(*persistentCache)[index]);
     if(!std::isfinite(pair.gap)) {
       const auto gap=closestEllipsoidGap(bodies[i],image,&(*persistentCache)[index]);
       pair.gap=gap.gap;pair.normal=gap.normal;pair.leverI=gap.leverI;pair.leverJ=gap.leverJ;
