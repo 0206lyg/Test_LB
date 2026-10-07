@@ -48,6 +48,7 @@ FREE_CMC_REPULSION_VERSION = 1
 FREE_CMC_INNER_REPULSION_VERSION = 1
 CMC_NET_POTENTIAL_VERSION = 1
 CMC_COORDINATION_VERSION = 1
+CURRENT_ADHESION_ROLLING_VERSION = 1
 MOLAR_GAS_CONSTANT = 8.31446261815324
 PASS_MAX_VERSION = 1
 LOCAL_ADHESION_DEFAULTS = {
@@ -73,6 +74,8 @@ NET_CMC_CHECKPOINT_KEYS = (
 CMC_COORDINATION_CHECKPOINT_KEYS = (
     'cmc_coordination_enabled', 'cmc_coordination_start',
     'cmc_coordination_end', 'cmc_coordination_floor', 'cmc_coordination_version')
+CURRENT_ADHESION_ROLLING_CHECKPOINT_KEYS = (
+    'current_adhesion_rolling', 'current_adhesion_rolling_version')
 # Gwag et al., ACS Nano, DOI 10.1021/acsnano.6c10201, report adsorption
 # saturation of 0.37 +/- 0.09 wt% relative to graphite + carbon-black mass.
 # This default is OUR approximate transfer to a 44 wt% graphite/water
@@ -366,7 +369,7 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         cfg['output'].setdefault(key,value)
     for key,value in {'enabled':True,'roughness_gap_m':2e-9,'sliding_friction':.5,
                       'tangential_stiffness_N_m':9.0,'rolling_length_m':100e-9,
-                      'rolling_yield_angle_rad':.01}.items():
+                      'rolling_yield_angle_rad':.01,'current_adhesion_rolling':False}.items():
         contact.setdefault(key,value)
     interaction = cfg['interaction']
     interaction.setdefault('surface_adhesion', False)
@@ -437,6 +440,8 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
     positive(n['lubrication_cutoff_cells'], 'lubrication_cutoff_cells', zero=True)
     if not isinstance(contact['enabled'],bool):
         raise ValueError('rough_contact.enabled must be a JSON boolean')
+    if not isinstance(contact['current_adhesion_rolling'],bool):
+        raise ValueError('rough_contact.current_adhesion_rolling must be a JSON boolean')
     for name in ('roughness_gap_m','tangential_stiffness_N_m','rolling_yield_angle_rad'):
         positive(contact[name],'rough_contact.'+name)
     for name in ('sliding_friction','rolling_length_m'):
@@ -545,6 +550,16 @@ def resolve(config, shear_rate=None, max_steps=0, target_mach=None, time_step=No
         if interaction['surface_adhesion']:
             metadata['interaction']['bare_adhesion_work_J_m2'] = interaction['adhesion_work_J_m2']
             metadata['interaction']['adhesion_work_J_m2'] = cmc_metadata['effective_adhesion_work_J_m2']
+    explicit_current_rolling = contact['enabled'] and contact['current_adhesion_rolling']
+    coordination_current_rolling = (contact['enabled'] and cmc_metadata is not None
+                                    and cmc_metadata['net_potential']['coordination']['active'])
+    metadata['current_adhesion_rolling'] = {
+        'explicit_requested':contact['current_adhesion_rolling'],
+        'explicit_active':explicit_current_rolling,
+        'coordination_active':coordination_current_rolling,
+        'active':explicit_current_rolling or coordination_current_rolling,
+        'model':'Rolling strength uses current attractive force when explicitly enabled '
+                'or when coordination is active; rolling length and yield angle stay independent inputs'}
     return cfg,metadata
 
 
@@ -598,6 +613,8 @@ def solver_values(cfg, output, particles, max_steps):
                       local_switch_excess_gap=interaction['local_switch_excess_gap_m'],
                       local_cutoff_excess_gap=interaction['local_cutoff_excess_gap_m'])
     # Inactive terms leave old pure-Gr/outer-only checkpoint fingerprints intact.
+    if contact['enabled'] and contact.get('current_adhesion_rolling', False):
+        values['current_adhesion_rolling'] = 1
     if cmc_metadata is not None:
         free = cmc_metadata['free_repulsion']
         if free['outer_active']:
@@ -627,6 +644,10 @@ def solver_values(cfg, output, particles, max_steps):
 def require_local_adhesion_build(cfg, build_info):
     if build_info.get('pass_max_version') != PASS_MAX_VERSION:
         raise ValueError('This driver requires the particle solver pass_max policy. '
+                         'Rebuild with build_slurry_cpu.sbatch before running.')
+    if (cfg['rough_contact']['enabled'] and cfg['rough_contact'].get('current_adhesion_rolling', False)
+            and build_info.get('current_adhesion_rolling_version') != CURRENT_ADHESION_ROLLING_VERSION):
+        raise ValueError('This configuration requires explicit current-adhesion rolling. '
                          'Rebuild with build_slurry_cpu.sbatch before running.')
     _, cmc_metadata = resolve_cmc(cfg)
     if cmc_metadata is not None:
@@ -734,7 +755,9 @@ def validate_restart(cfg,meta,checkpoint,ranks,max_steps=0,allow_complete=False)
             ('net potential', 'cmc_net_blend', 'cmc_net_potential_version',
              CMC_NET_POTENTIAL_VERSION, NET_CMC_CHECKPOINT_KEYS),
             ('coordination', 'cmc_coordination_enabled', 'cmc_coordination_version',
-             CMC_COORDINATION_VERSION, CMC_COORDINATION_CHECKPOINT_KEYS)):
+             CMC_COORDINATION_VERSION, CMC_COORDINATION_CHECKPOINT_KEYS),
+            ('current-adhesion rolling', 'current_adhesion_rolling', 'current_adhesion_rolling_version',
+             CURRENT_ADHESION_ROLLING_VERSION, CURRENT_ADHESION_ROLLING_CHECKPOINT_KEYS)):
         active = values.get(physical_key, 0.0) > 0
         saved_active = immutable.get(physical_key, 0.0) > 0
         if active != saved_active:

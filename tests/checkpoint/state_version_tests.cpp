@@ -122,6 +122,8 @@ void signatures() {
   c::Config cfg;c::Units units(cfg);
   const auto pure=cp::signature(cfg,units,2,1);
   require(pure.find("cmc_")==std::string::npos,"Inactive CMC changed pure signature");
+  require(!cfg.current_adhesion_rolling&&pure.find("current_adhesion_rolling")==std::string::npos,
+      "Default rolling mode changed the pure-Gr signature");
   cfg.pass_max=0;
   require(cp::signature(cfg,units,2,1)==pure,"pass_max policy became immutable physics");
   cfg.cmc_contact_version=1;cfg.cmc_contact_gap=4.e-9;cfg.cmc_cohesion_retention=.2;
@@ -169,6 +171,8 @@ void signatures() {
   require(coordinated!=net&&coordinated.find("cmc_coordination_version=1\n")!=std::string::npos
       &&coordinated.find("cmc_coordination_enabled=1\n")!=std::string::npos,
       "Active coordination is missing from the checkpoint signature");
+  require(coordinated.find("current_adhesion_rolling")==std::string::npos,
+      "Legacy implicit coordination rolling acquired a new fingerprint");
   for(auto field:{&c::Config::cmc_coordination_start,&c::Config::cmc_coordination_end,
       &c::Config::cmc_coordination_floor}) {
     auto changed=cfg;changed.*field*=1.1;
@@ -178,6 +182,18 @@ void signatures() {
   cfg.cmc_net_blend=0.;
   require(cp::signature(cfg,units,2,1)==pure,
       "Coordination with zero net blend changed the legacy checkpoint signature");
+  cfg.current_adhesion_rolling=true;
+  const auto rolling=cp::signature(cfg,units,2,1);
+  require(rolling!=pure&&rolling.find("current_adhesion_rolling=1\n")!=std::string::npos
+      &&rolling.find("current_adhesion_rolling_version=1\n")!=std::string::npos,
+      "Independent current-adhesion rolling is missing from the signature");
+  cfg.current_adhesion_rolling=false;
+  require(cp::signature(cfg,units,2,1)==pure,"Disabled independent rolling changed the old signature");
+  cfg.rough_contact_enabled=false;
+  const auto contactDisabled=cp::signature(cfg,units,2,1);
+  cfg.current_adhesion_rolling=true;
+  require(cp::signature(cfg,units,2,1)==contactDisabled,
+      "Independent rolling changed the signature with rough contact disabled");
 }
 
 void netConfiguration(const cp::fs::path& directory) {
@@ -225,6 +241,16 @@ void netConfiguration(const cp::fs::path& directory) {
   const auto dormant=parse("cmc_net_blend=0\ncmc_coordination_enabled=1\n");
   require(dormant.cmc_coordination_enabled&&!dormant.surface_adhesion,
       "Zero-blend coordination must remain dormant");
+  require(!parsed.current_adhesion_rolling,"Independent rolling is enabled by default");
+  require(parse(base+"current_adhesion_rolling=1\n").current_adhesion_rolling
+      &&!parse(base+"current_adhesion_rolling=0\n").current_adhesion_rolling,
+      "Independent current-adhesion rolling was not parsed");
+  for(const std::string invalid:{"2","-1","true","false","1.0","nan",""})
+    rejects([&]{parse(base+"current_adhesion_rolling="+invalid+"\n");},
+        "Invalid independent rolling boolean accepted");
+  const auto dormantRolling=parse("rough_contact_enabled=0\ncurrent_adhesion_rolling=1\n");
+  require(dormantRolling.current_adhesion_rolling&&!dormantRolling.rough_contact_enabled,
+      "Independent rolling must be allowed to remain dormant without rough contact");
 }
 
 void coordinationRestart(const cp::fs::path& directory) {
@@ -247,11 +273,32 @@ void coordinationRestart(const cp::fs::path& directory) {
   require(cp::loadState(path,1,cp::signature(cfg,units,1,1)).step==17,
       "Disabled coordination rejected an unchanged net-potential checkpoint");
 }
+
+void currentRollingRestart(const cp::fs::path& directory) {
+  c::Config cfg;cfg.surface_adhesion=true;cfg.cmc_net_blend=1.;
+  c::Units units(cfg);
+  const auto previous=cp::signature(cfg,units,1,1);
+  cp::State state;state.bodies.resize(1);state.angularAcceleration.resize(1);state.step=23;
+  const auto oldPath=directory/"net-before-current-rolling.bin";
+  cp::saveState(oldPath,state,previous);
+  cfg.current_adhesion_rolling=true;
+  const auto updated=cp::signature(cfg,units,1,1);
+  rejects([&]{cp::loadState(oldPath,1,updated);},
+      "Birth-adhesion rolling checkpoint accepted by current-adhesion rolling mode");
+  const auto activePath=directory/"net-current-rolling.bin";
+  cp::saveState(activePath,state,updated);
+  require(cp::loadState(activePath,1,updated).step==23,"Current-adhesion rolling checkpoint failed roundtrip");
+  rejects([&]{cp::loadState(activePath,1,previous);},
+      "Current-adhesion rolling checkpoint accepted by birth-adhesion rolling mode");
+  cfg.current_adhesion_rolling=false;
+  require(cp::loadState(oldPath,1,cp::signature(cfg,units,1,1)).step==23,
+      "Disabled independent rolling rejected the previous net-potential checkpoint");
+}
 }
 int main() {
   try {Scratch scratch;migrateLegacyAndRoundtrip(scratch.path);signatures();netConfiguration(scratch.path);
-    coordinationRestart(scratch.path);
-    std::cout<<"PASS: checkpoint v1 migration, v2 counters, ABI/version guards, coordination config and physics signatures\n";
+    coordinationRestart(scratch.path);currentRollingRestart(scratch.path);
+    std::cout<<"PASS: checkpoint v1 migration, v2 counters, ABI/version guards, coordination/rolling config and physics signatures\n";
     return 0;
   }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

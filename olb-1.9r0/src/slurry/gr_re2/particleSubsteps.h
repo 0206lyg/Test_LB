@@ -229,7 +229,8 @@ struct Residual {
       const bool coordination=cmcCoordinationActive(settings.pair);
       std::vector<CoordinationPair> coordinated;
       if(coordination)coordinated=coordinatedPairs(e.bodies,time+dt,settings,e.cache);
-      auto rough=settings.rough;rough.currentAdhesionRolling=coordination;
+      auto rough=settings.rough;
+      rough.currentAdhesionRolling=rough.currentAdhesionRolling||coordination;
       for(std::size_t i=0;i<n;++i)for(std::size_t j=i+1;j<n;++j,++index) {
         const Body image=closestImage(e.bodies[i],e.bodies[j],time+dt,settings);
         const Vec3 rij=sub(e.bodies[i].position,image.position);
@@ -277,9 +278,9 @@ struct Residual {
               : p.gap<=settings.rough.gap+settings.contactGapTolerance
                 && (normalLoad>0. || startingContacts[index].active)));
           double adhesiveBirthForce=0.;
-          if(active && coordination) {
-            // Coordination can change an existing contact's strength. Use the
-            // corrected current force, not an isolated pair or a frozen birth.
+          if(active && rough.currentAdhesionRolling) {
+            // Current-strength rolling is independent of coordination. When
+            // coordination is active, p already includes its correction.
             adhesiveBirthForce=std::max(0.,dot(p.forceI,p.normal));
           } else if(active && !startingContacts[index].active) {
             Body birthImage=image;
@@ -569,8 +570,9 @@ inline bool implicitStep(const std::vector<Body>& old,const std::vector<Vec3>& f
         // An initial Newton guess only: the reaction remains a solved unknown.
         // Starting a newly adhesive contact at N=0 creates a Coulomb corner
         // and can stall line search while the gap moves to its constraint.
-        if(coordination) {
-          const auto& current=coordinated[index].result;
+        if(settings.rough.currentAdhesionRolling||coordination) {
+          const auto current=coordination?coordinated[index].result
+              :evaluatePair(old[i],image,settings.pair);
           birthReaction[index]=std::max(0.,dot(current.forceI,current.normal));
         } else {
           Body birthImage=image;birthImage.position=add(image.position,scale(gap.normal,settings.rough.gap-gap.gap));
@@ -610,7 +612,7 @@ inline bool implicitStep(const std::vector<Body>& old,const std::vector<Vec3>& f
             const auto found=std::find_if(base.pairs.begin(),base.pairs.end(),
                 [&](const PairLinearization& a){return a.index==p;});
             if(found!=base.pairs.end()) {
-              if(cmcCoordinationActive(settings.pair)) {
+              if(settings.rough.currentAdhesionRolling||cmcCoordinationActive(settings.pair)) {
                 revisedQ[6*n+revised[p]]=std::max(0.,dot(found->pairForceI,found->normal))/reactionScale;
               } else {
                 Body image=closestImage(base.bodies[found->i],base.bodies[found->j],time+dt,settings);

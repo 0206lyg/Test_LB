@@ -39,6 +39,9 @@ def checkpoint(directory, config, step, rate):
     if values.get('cmc_coordination_enabled', 0) > 0:
         values['cmc_coordination_version'] = DRIVER.CMC_COORDINATION_VERSION
         immutable.update({key: values[key] for key in DRIVER.CMC_COORDINATION_CHECKPOINT_KEYS})
+    if values.get('current_adhesion_rolling', 0) > 0:
+        values['current_adhesion_rolling_version'] = DRIVER.CURRENT_ADHESION_ROLLING_VERSION
+        immutable.update({key: values[key] for key in DRIVER.CURRENT_ADHESION_ROLLING_CHECKPOINT_KEYS})
     immutable.update(shear_rate=rate, dt_s=derived['dt_s'],
                      particle_count=cfg['particles']['count'], ranks=1)
     saved = directory / 'checkpoints' / ('checkpoint_%020d' % step)
@@ -157,6 +160,7 @@ class GrCmcControllerTests(unittest.TestCase):
                       'free_cmc_repulsion_version': 1, 'free_cmc_inner_repulsion_version': 1,
                       'cmc_net_potential_version': 1,
                       'cmc_coordination_version': 1,
+                      'current_adhesion_rolling_version': 1,
                       'pure_gr_checkpoint_version': 1, 'particle_solver': 'petsc',
                       'engines': ['pure_gr', 'gr_cmc']}
         executable.write_text(

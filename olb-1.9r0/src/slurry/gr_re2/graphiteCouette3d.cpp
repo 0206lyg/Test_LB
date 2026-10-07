@@ -208,7 +208,8 @@ void simulate(const Config& c){
   solver.rough.tangentialStiffness=c.tangential_stiffness;
   solver.rough.rollingLength=c.rolling_length;
   solver.rough.rollingYieldAngle=c.rolling_yield_angle;
-  solver.rough.currentAdhesionRolling=c.cmc_coordination_enabled&&c.cmc_net_blend>0.;
+  solver.rough.currentAdhesionRolling=c.current_adhesion_rolling
+      ||(c.cmc_coordination_enabled&&c.cmc_net_blend>0.);
   std::vector<graphite::GapCache> pairCache;
   graphite::PersistentContactState contacts(bodies.size()*(bodies.size()-1)/2);
   auto pair=graphite::evaluateParticleState(bodies,0.,solver,&pairCache,&contacts);
@@ -237,8 +238,10 @@ void simulate(const Config& c){
   log<<"rough_contact="<<c.rough_contact_enabled<<" roughness_gap_nm="<<c.roughness_gap*1.e9
      <<" contact_gap_nm="<<solver.rough.gap*1.e9<<" cmc_cohesion_retention="<<c.cmc_cohesion_retention
      <<" sliding_friction="<<c.sliding_friction<<" tangential_stiffness_N_m="<<c.tangential_stiffness
-     <<" rolling_length_nm="<<c.rolling_length*1.e9<<" rolling_yield_angle_rad="<<c.rolling_yield_angle
-     <<" end_strain="<<c.end_strain<<std::endl;
+     <<" rolling_length_nm="<<c.rolling_length*1.e9<<" rolling_yield_angle_rad="<<c.rolling_yield_angle;
+  if(solver.rough.enabled&&solver.rough.currentAdhesionRolling)
+    log<<" current_adhesion_rolling=1 current_adhesion_rolling_version=1";
+  log<<" end_strain="<<c.end_strain<<std::endl;
   log<<"hamaker_J="<<c.hamaker<<" sigma_lj_nm="<<c.sigma_lj*1.e9
      <<" surface_adhesion="<<c.surface_adhesion;
   if(c.surface_adhesion)
@@ -318,7 +321,10 @@ void simulate(const Config& c){
       <<",\n\"rough_contact\":{\"enabled\":"<<(c.rough_contact_enabled?"true":"false")
       <<",\"roughness_gap_m\":"<<c.roughness_gap<<",\"sliding_friction\":"<<c.sliding_friction
       <<",\"tangential_stiffness_N_m\":"<<c.tangential_stiffness
-      <<",\"rolling_length_m\":"<<c.rolling_length<<",\"rolling_yield_angle_rad\":"<<c.rolling_yield_angle<<"}\n}\n";
+      <<",\"rolling_length_m\":"<<c.rolling_length<<",\"rolling_yield_angle_rad\":"<<c.rolling_yield_angle;
+    if(solver.rough.enabled&&solver.rough.currentAdhesionRolling)
+      meta<<",\"current_adhesion_rolling\":true,\"current_adhesion_rolling_version\":1";
+    meta<<"}\n}\n";
     appendHistory=!c.restart_dir.empty()&&fs::exists(fs::path(c.output_dir)/"history.csv")
         &&fs::file_size(fs::path(c.output_dir)/"history.csv")>0;
     appendPoses=!c.restart_dir.empty()&&fs::exists(fs::path(c.output_dir)/"particles.csv")
@@ -439,9 +445,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #endif
     return 0;
   }

@@ -9,7 +9,7 @@ OpenLB 원본과 외부 라이브러리의 문서·LICENSE는 각 소스 트리�
 | --- | --- | --- |
 | `pure_cmc` | CMC Cross 유체 | `slurry/cases/run.json`의 `cmc`, `cmc250k_cross_parameters.csv` |
 | `pure_gr` | RE² graphite, 곡률 기반 근접 인력·표면 응착, lubrication, rough contact, Lees–Edwards, checkpoint/restart | `slurry/cases/pure_gr.json` |
-| `gr_cmc` | CMC 농도별 순포텐셜과 고농도 배위수 의존 접착 포화 | `slurry/cases/gr_CMC.json` |
+| `gr_cmc` | CMC 농도별 순포텐셜과 고농도 근접 접착 강화 | `slurry/cases/gr_CMC.json` |
 | `gr_baseline` | 기존 graphite Couette 및 기존 checkpoint/restart | `slurry/cases/gr_baseline.json` |
 
 ## 1. 설치, 빌드, 실행
@@ -113,31 +113,39 @@ W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 �
 사용하며, 이 모드에는 새 부착일·범위·곡률 연결 키를 넣을 수 없습니다.
 이전 결과 재현에는 당시의 JSON을 별도 `--config`로 지정합니다.
 
-### 2.1. CMC 90k: 고농도 배위수 의존 접착 포화
+### 2.1. CMC 90k: 근접 접착 강화와 배위수 약화 해제
 
-`slurry/cases/gr_CMC.json`은 16 g/L에서 **배위수에 따라 접착이 포화되는 다체 에너지**를
-사용합니다. `gr_CMC_4g_L.json`의 물리 설정은 변경하지 않습니다.
-두 조건의 흡착 CMC는 2.8984214285714285 g/L로 같고, 기계적 접촉은 2 nm입니다.
+`slurry/cases/gr_CMC.json`의 16 g/L 기준 접촉 인력을 **0.45 nN에서 4.5 nN으로**
+올리고, 배위수 의존 약화를 끕니다. `gr_CMC_4g_L.json`과 pure Gr의 설정은 그대로입니다.
+두 CMC 조건의 흡착량은 2.8984214285714285 g/L이고, 기계적 접촉 간격은 2 nm입니다.
 
-16 g/L의 기본 순포텐셜은 기존 RE², 추가 접착력, 외측/내측 반발의 합을 교체합니다.
-고립된 기준 face-to-face 입자쌍의 2–3 nm 인력 기준값을 150 pN에서 **450 pN**으로
-올리고, 3–9 nm의 반발 기준값 20 pN과 9 nm 바깥의 영 에너지를 유지합니다.
-이 값은 모든 방향의 접촉에 동일하게 작용하는 힘이 아닙니다. 기존 곡률 계수와
-아래의 배위수 계수가 함께 적용되며, 다체 에너지를 미분한 추가 힘도 포함됩니다.
-**450 pN, 배위수 포화 및 9 nm의 인력 차단은 모델 가정입니다. 측정된 CMC 패치 수나
-차폐 길이를 의미하지 않으며, 1 Pa·s를 입력하거나 보장하는 보정 계수도 아닙니다.**
+16 g/L의 순포텐셜은 기존 RE², 추가 접착력, 외측/내측 반발의 합을 교체합니다.
+인력은 2–3 nm, 명시적인 반발력은 3–9 nm에서 작용하고, 9 nm 이상에서는 에너지와
+힘이 0입니다. 기준 face-to-face 배치의 접촉 인력은 4.5 nN, 반발력의 최대 기준값은
+20 pN입니다. 다른 배치에는 기존의 실제 접촉 곡률 계수가 적용되므로 모든 접촉의
+인력이 4.5 nN으로 같지는 않습니다. 같은 2 nm face-to-face 배치의 pure Gr 인력은
+약 936.6 nN입니다.
+
+이 변경은 장벽을 넘은 뒤 입자 사이의 결합과 하중 전달을 강화하려는 모델 가정입니다.
+기존 배위수 항은 새 이웃이 접근할 때 기존 결합까지 약화시켜 추가적인 진입 비용을
+만들었습니다. 이번 설정에서는 그 항을 계산하지 않습니다. 접촉 수나 응집체 크기에
+별도의 상한을 부과하지 않으며, 전단률 의존 계수나 CMC 점성저항도 추가하지 않습니다.
+4.5 nN과 유한 범위 차폐는 측정된 CMC 상수가 아니며, 목표 점도 1 Pa·s를 입력한
+보정이나 검증된 벌크 물성 결과가 아닙니다.
+
+`cmc` 안의 기본 설정은 다음과 같습니다.
 
 ```json
 "net_potential": {
   "enabled": true,
   "start_free_g_L": 1.1015785714285715,
   "full_free_g_L": 13.101578571428572,
-  "contact_force_N": 4.5e-10,
+  "contact_force_N": 4.5e-9,
   "barrier_force_N": 2e-11,
   "attraction_range_m": 1e-9,
   "repulsion_range_m": 6e-9,
   "coordination": {
-    "enabled": true,
+    "enabled": false,
     "other_neighbors_start": 1.0,
     "other_neighbors_end": 2.0,
     "minimum_factor": 0.1
@@ -145,73 +153,57 @@ W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 �
 }
 ```
 
-이 객체는 `cmc` 안에 둡니다. Free 농도에 따른 순포텐셜 보간율을 `w`라고 하면,
-기존 모델과 새 모델의 에너지를 선형 보간합니다. 시작 농도 이하는 `w=0`,
-완전 적용 농도 이상은 `w=1`입니다. 이전 `free_repulsion` 입력은 저농도와 보간에
-계속 사용합니다. `coordination` 객체를 생략하거나 `enabled=false`로 두면 다체
-보정과 현재 접착력에 연동하는 rolling을 끕니다. 이전 150 pN 모델을 그대로
-재현하려면 `contact_force_N`도 `1.5e-10`으로 복원합니다.
+Free 농도에 따른 보간율 `w`로 전체 에너지를
+`U=(1-w)*sum U_legacy,ij+w*sum U_net,ij`처럼 보간합니다. 시작 농도 이하는
+`w=0`, 완전 적용 농도 이상은 `w=1`입니다. 이전 `free_repulsion` 입력은 저농도와
+보간 구간에서 계속 사용합니다. 인력과 반발력의 힘·토크는 곡률의 위치·방향 의존성까지
+포함한 전체 에너지 미분이며, solver와 virial 응력에 같은 결과를 씁니다.
 
-배위수는 접촉 플래그 대신 **현재 시험 위치·방향에서 계산한 매끄러운 근접 이웃 수**입니다.
-`x=(H-h0)/La`, `h0=2 nm`, `La=1 nm`에 대해
+Rolling은 배위수 옵션과 분리했습니다. 기존 `rough_contact` 객체에 다음 키를 둡니다.
 
-```text
-q(H) = 1                                      (x <= 0)
-       1 - 10*x^3 + 15*x^4 - 6*x^5            (0 < x < 1)
-       0                                      (x >= 1)
-z_i = sum(k != i) q(H_ik)
-m_i(ij) = z_i - q(H_ij)                       # 상대 입자 j는 제외
+```json
+"current_adhesion_rolling": true
 ```
 
-다른 이웃 수 `m`이 1 이하이면 `g(m)=1`, 2 이상이면 `g(m)=0.1`입니다.
-중간 구간에서는 같은 5차 smoothstep으로 연결합니다. 입자쌍의 접착 계수는
-`b_ij=g(m_i(ij))*g(m_j(ij))`이고 전체 에너지는
+이 설정에서는 매 시험 상태의 순인력 `max(0, F_pair · n)`에 rolling length를 곱해
+cap을 갱신합니다. 강성이 바뀔 때 기존 탄성 이력을 에너지 보존 방식으로 옮기고,
+새 cap을 넘는 저장 에너지는 기존 `releasedEnergy` 소산에 반영합니다.
+접착력이 0이 되면 rolling 이력을 지우며, 이후 접착력이 회복되어도 이전 토크가
+되살아나지 않습니다. Sliding 한계는 기존 `mu*N`이고 `mu=0.1`입니다.
 
-```text
-U = (1-w) * sum U_legacy,ij + w * sum [b_ij * U_net,A,ij + U_net,R,ij]
-```
+`current_adhesion_rolling`을 생략하면 기본값은 false입니다. 기존 배위수 모델을
+명시적으로 활성화한 설정은 이전과 같이 현재 접착력 연동을 사용합니다. 두 옵션이
+모두 꺼진 pure Gr·4 g/L·legacy 설정은 생성 시 rolling cap을 고정하는 기존 법칙을
+유지합니다. 이전 150 pN 순포텐셜을 재현하려면 `contact_force_N=1.5e-10`,
+`coordination.enabled=false`, `current_adhesion_rolling=false`를 함께 지정합니다.
 
-입니다. 따라서 두 이웃에 완전히 접촉한 입자는 각 결합에서 다른 이웃을 하나만
-세므로 강한 접착을 유지합니다. 세 번째 이웃이 들어오면 해당 입자의 추가 결합뿐
-아니라 기존 결합의 에너지도 변합니다. 한쪽 끝만 포화되면 기본 접착 에너지의
-0.1배, 양쪽 끝이 모두 포화되면 0.01배가 됩니다. 이는 **강한 접착의 포화**이며,
-기계적 접촉 수를 2개로 자르거나 유한 크기 응집체를 강제로 배치하는 규칙이 아닙니다.
+배위수 모델은 이전 계산과 비교하기 위한 비활성 옵션으로 남겨 둡니다. 활성화하면
+`q(H)`가 2–3 nm에서 1에서 0으로 내려가는 5차 smoothstep 이웃 수를 사용하고,
+상대 입자를 제외한 다른 이웃 수에 따라 각 끝의 계수 `g`가 1에서 0.1로 감소합니다.
+기존 접착 에너지에는 두 끝의 곱 `b_ij=g_i*g_j`가 적용됩니다. 힘·토크는 이웃 수의
+변화까지 미분하므로, 이 옵션의 추가 진입 비용도 복원됩니다. 기본 16 g/L 설정에는
+이 곱과 그 미분이 적용되지 않습니다.
 
-힘·토크는 `b_ij`와 `q(H)`의 위치·방향 의존성까지 포함한 전체 에너지 미분입니다.
-접착력에 `b_ij`만 곱하고 이웃의 에너지 변화를 버리는 구현은 사용하지 않습니다.
-이 다체 항은 매 Newton 시험 상태에서 다시 계산하며, virial 응력과 출력 에너지에도
-같은 결과를 씁니다. 추가 이웃의 진입 비용이 생기므로 다체계의 전체 접근 장벽은
-고립된 입자쌍의 20 pN 반발 항과 동일하지 않습니다.
-기존 CSV의 `stress_pair_attractive_Pa`에는 이 접착 에너지의 전체 미분이 들어가므로,
-배위수 변화에서 생기는 반발 방향의 기여도 포함됩니다. 열의 이름은 힘의 방향이
-아니라 에너지 항의 출처를 구분합니다.
+입자 배치의 최소 10 nm 간격, seed, fluid viscosity, 시간 간격, solver 허용오차와
+`pass_max`는 그대로입니다. 16 g/L의 절대 힘·토크 허용오차는 각각 1e-15 N,
+1.65e-21 N·m입니다. 출력 주기와 CSV 열도 바꾸지 않습니다.
 
-배위수 보정이 활성일 때 rolling cap은 생성 시점의 값에 고정하지 않고 현재의
-보정된 순인력 `max(0, F_pair · n)`에 rolling length를 곱해 갱신합니다.
-강성이 바뀔 때 기존 탄성 이력을 에너지 보존 방식으로 옮기고, 새 cap을 넘는
-저장 에너지는 기존 `releasedEnergy` 소산에 반영합니다. 접착력이 0이 되면 rolling
-이력을 지우며, 이후 접착력이 회복되어도 이전 토크가 되살아나지 않습니다.
-Sliding 한계는 기존 `mu*N`이며 `mu=0.1`과 기계적 접촉법칙은 유지합니다.
+빌드 기능 표시에 `current_adhesion_rolling_version=1`을 추가했습니다.
+명시적으로 활성화된 rolling 옵션과 버전은 checkpoint 물리 signature에 포함됩니다.
+기존 16 g/L checkpoint는 인력과 힘 법칙이 다르므로 이번 설정으로 이어서 쓰지 않습니다.
+새 옵션이 비활성인 기존 설정의 signature는 유지합니다. Particle replay는 버전 9로
+독립 rolling 옵션을 저장하며, 버전 1–8 입력은 각각 당시의 rolling 법칙으로 읽습니다.
 
-CMC 점성저항이나 전단률 의존 계수를 추가하지 않습니다. 입자 배치의 최소 10 nm
-간격, seed, fluid viscosity, 시간 간격, solver 허용오차와 `pass_max`도 그대로입니다.
-기존 16 g/L 설정의 절대 힘·토크 허용오차는 각각 1e-15 N, 1.65e-21 N·m입니다.
-
-빌드 기능 표시는 `cmc_net_potential_version=1`, `cmc_coordination_version=1`입니다.
-활성 배위수 설정과 버전은 checkpoint 물리 signature에 포함됩니다.
-기존 16 g/L checkpoint는 다른 힘 법칙이므로 이번 설정으로 이어서 쓰지 않습니다.
-배위수 보정이 꺼진 기존 계산의 signature는 유지하고, particle replay는 버전 8로
-저장하면서 버전 1–7의 입력도 읽습니다.
-
-소스 업데이트 후 한 번 재빌드하고, 빌드가 끝난 뒤 실행합니다.
+Overlay는 저장소 루트에서 압축을 풀어 덮어쓴 뒤 한 번 재빌드합니다.
+빌드가 끝난 후 새 계산으로 실행합니다.
 
 ```bash
 sbatch build_slurry_cpu.sbatch
 sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 10,100
 ```
 
-이번 overlay는 저장소 루트에서 압축을 풀어 덮어씁니다. 기존 설명서 외의 별도
-CMC README는 포함하지 않습니다. 실행 결과·바이너리·체크포인트도 포함하지 않습니다.
+이번 overlay는 기존 `README.md` 하나만 갱신하며, 별도의 CMC README를 만들지 않습니다.
+실행 결과·바이너리·체크포인트도 포함하지 않습니다.
 
 ### 2.2. 이번 업데이트에서 확인한 legacy 정리 후보
 
@@ -748,10 +740,10 @@ kₜ=80 N/m, N≈936 nN, μ=1인 FF 접촉의 항복 접선변위는 약 11.7 nm
 kₜ는 항복 전 탄성 변위를 정하며 μN 자체를 높이지 않습니다.
 
 **위의 표면 응착력 업데이트 당시에는 rolling 법칙을 변경하지 않았습니다.**
-배위수 포화를 쓰지 않는 현재의 pure Gr·4 g/L 및 legacy 설정에도
+현재의 pure Gr·4 g/L 및 legacy 기본 설정에는
 `rolling_length × adhesiveBirthForce`로 생성 시 cap·강성을 고정하는 방식이 남습니다.
-16 g/L의 활성 배위수 모델에는 §2.1의 현재 순접착력 연동과 에너지 이력 처리를
-적용하므로, 그 경우에는 생성 당시의 rolling cap을 계속 유지하지 않습니다.
+16 g/L에는 §2.1의 독립 옵션 `current_adhesion_rolling=true`를 통해 현재 순접착력
+연동과 에너지 이력 처리를 적용합니다. 이 동작은 배위수 약화가 꺼져 있어도 유지됩니다.
 
 물리식의 출처는 [Everaers–Ejtehadi RE²와 근접 곡률 근사](https://doi.org/10.1103/PhysRevE.67.041710),
 [Li et al.의 graphite–water Hamaker 상수](https://doi.org/10.1103/PhysRevB.71.235412),

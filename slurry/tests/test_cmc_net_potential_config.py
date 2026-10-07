@@ -18,10 +18,19 @@ START = 1.1015785714285715
 FULL = 13.101578571428572
 NET_KEYS = RUNNER.NET_CMC_CHECKPOINT_KEYS[:-1]
 COORD_KEYS = RUNNER.CMC_COORDINATION_CHECKPOINT_KEYS[:-1]
+ROLLING_KEYS = RUNNER.CURRENT_ADHESION_ROLLING_CHECKPOINT_KEYS
 
 
 def case(name='gr_CMC.json'):
     return json.loads((ROOT/'slurry/cases'/name).read_text())
+
+
+def coordinated_case():
+    value = case()
+    value['cmc']['net_potential']['contact_force_N'] = 4.5e-10
+    value['cmc']['net_potential']['coordination']['enabled'] = True
+    value['rough_contact'].pop('current_adhesion_rolling', None)
+    return value
 
 
 def resolved(source=None):
@@ -37,7 +46,8 @@ def checkpoint(cfg, meta, values):
             ('free_cmc_repulsion_pressure', 'free_cmc_repulsion_version', RUNNER.FREE_CMC_CHECKPOINT_KEYS),
             ('free_cmc_inner_repulsion_work', 'free_cmc_inner_repulsion_version', RUNNER.INNER_CMC_CHECKPOINT_KEYS),
             ('cmc_net_blend', 'cmc_net_potential_version', RUNNER.NET_CMC_CHECKPOINT_KEYS),
-            ('cmc_coordination_enabled', 'cmc_coordination_version', RUNNER.CMC_COORDINATION_CHECKPOINT_KEYS)):
+            ('cmc_coordination_enabled', 'cmc_coordination_version', RUNNER.CMC_COORDINATION_CHECKPOINT_KEYS),
+            ('current_adhesion_rolling', 'current_adhesion_rolling_version', ROLLING_KEYS)):
         if values.get(physical, 0) > 0:
             immutable.update({key: values[key] for key in keys if key != version})
             immutable[version] = 1
@@ -94,7 +104,8 @@ class NetCmcConfigTests(unittest.TestCase):
                                    'particle_torque_absolute_tolerance_N_m'})
         self.assertEqual(cfg['numerics']['particle_force_absolute_tolerance_N'], 1e-15)
         self.assertEqual(cfg['numerics']['particle_torque_absolute_tolerance_N_m'], 1.65e-21)
-        self.assertEqual(cfg['rough_contact'], four['rough_contact'])
+        self.assertEqual({key:cfg['rough_contact'][key] for key in four['rough_contact']}, four['rough_contact'])
+        self.assertTrue(cfg['rough_contact']['current_adhesion_rolling'])
 
     def test_reference_geometry_metadata_and_config_roundtrip(self):
         source = case()
@@ -155,7 +166,7 @@ class NetCmcCompatibilityTests(unittest.TestCase):
     def test_build_gate_is_conditional_on_actual_activation(self):
         info = {'pass_max_version': 1, 'surface_adhesion_version': 1,
                 'free_cmc_repulsion_version': 1, 'free_cmc_inner_repulsion_version': 1,
-                'cmc_coordination_version': 1}
+                'cmc_coordination_version': 1, 'current_adhesion_rolling_version': 1}
         cfg, _, _ = resolved()
         for version in (None, 0, 2):
             old = dict(info)
@@ -200,7 +211,7 @@ class NetCmcCompatibilityTests(unittest.TestCase):
 
 class CmcCoordinationTests(unittest.TestCase):
     def test_coordination_is_opt_in_and_only_active_on_the_net_branch(self):
-        enabled = case()
+        enabled = coordinated_case()
         omitted = copy.deepcopy(enabled)
         del omitted['cmc']['net_potential']['coordination']
         _, old_meta, baseline = resolved(omitted)
@@ -223,13 +234,17 @@ class CmcCoordinationTests(unittest.TestCase):
 
     def test_shipped_force_override_preserves_scalar_defaults_and_barrier_parameters(self):
         cfg, meta, values = resolved()
-        self.assertEqual(values['cmc_net_contact_force'], 4.5e-10)
+        self.assertEqual(values['cmc_net_contact_force'], 4.5e-9)
         self.assertEqual(values['cmc_net_barrier_force'], 2e-11)
         self.assertEqual(values['cmc_net_attraction_range'], 1e-9)
         self.assertEqual(values['cmc_net_repulsion_range'], 6e-9)
         del cfg['cmc']['net_potential']['contact_force_N']
         self.assertEqual(resolved(cfg)[2]['cmc_net_contact_force'], 1.5e-10)
         coordinate = meta['cmc']['net_potential']['coordination']
+        self.assertFalse(coordinate['enabled'])
+        self.assertFalse(coordinate['active'])
+        self.assertFalse(set(COORD_KEYS).intersection(values))
+        self.assertEqual(values['current_adhesion_rolling'], 1)
         self.assertIn('g(z_i-q_ij)*g(z_j-q_ij)', coordinate['energy'])
         self.assertAlmostEqual(coordinate['minimum_pair_factor'], .01)
         self.assertIn('Full configuration derivative', coordinate['differentiation'])
@@ -257,7 +272,7 @@ class CmcCoordinationTests(unittest.TestCase):
                 resolved(source)
         # Both endpoint factors are valid constitutive limits.
         for floor in (0, 1):
-            source = case()
+            source = coordinated_case()
             source['cmc']['net_potential']['coordination'].update(
                 other_neighbors_start=0, minimum_factor=floor)
             self.assertEqual(resolved(source)[2]['cmc_coordination_floor'], floor)
@@ -267,7 +282,7 @@ class CmcCoordinationTests(unittest.TestCase):
                 'free_cmc_repulsion_version': 1, 'free_cmc_inner_repulsion_version': 1,
                 'cmc_net_potential_version': 1}
         for free in ((START+FULL)/2, FULL):
-            cfg, _, _ = resolved()
+            cfg, _, _ = resolved(coordinated_case())
             cfg['cmc']['free_g_L'] = free
             for version in (None, 0, 2):
                 old = dict(info)
@@ -283,7 +298,7 @@ class CmcCoordinationTests(unittest.TestCase):
         RUNNER.require_local_adhesion_build(cfg, info)
 
     def test_restart_requires_matching_coordination_signature_and_rejects_old_pair_law(self):
-        cfg, meta, values = resolved()
+        cfg, meta, values = resolved(coordinated_case())
         saved = checkpoint(cfg, meta, values)
         self.assertTrue(RUNNER.validate_restart(cfg, meta, saved, 1))
         for key in RUNNER.CMC_COORDINATION_CHECKPOINT_KEYS:
@@ -309,6 +324,95 @@ class CmcCoordinationTests(unittest.TestCase):
             RUNNER.validate_restart(old_cfg, old_meta, old_saved, 1)
 
 
+class CurrentAdhesionRollingTests(unittest.TestCase):
+    def test_explicit_flag_is_independent_of_coordination_and_omission_preserves_legacy(self):
+        cfg, meta, values = resolved()
+        self.assertEqual(values['current_adhesion_rolling'], 1)
+        self.assertTrue(meta['current_adhesion_rolling']['explicit_active'])
+        self.assertFalse(meta['current_adhesion_rolling']['coordination_active'])
+        self.assertTrue(meta['current_adhesion_rolling']['active'])
+        # Historical coordination opts into the same rolling law implicitly.
+        _, meta, values = resolved(coordinated_case())
+        self.assertNotIn('current_adhesion_rolling', values)
+        self.assertFalse(meta['current_adhesion_rolling']['explicit_active'])
+        self.assertTrue(meta['current_adhesion_rolling']['coordination_active'])
+        self.assertTrue(meta['current_adhesion_rolling']['active'])
+        for filename in ('pure_gr.json', 'gr_CMC_4g_L.json'):
+            source = case(filename)
+            cfg, meta, values = resolved(source)
+            self.assertFalse(meta['current_adhesion_rolling']['active'])
+            self.assertNotIn('current_adhesion_rolling', values)
+            source['rough_contact']['current_adhesion_rolling'] = False
+            self.assertEqual(resolved(source)[2], values)
+
+    def test_boolean_validation_and_disabled_rough_contact_are_explicit(self):
+        for bad in (0, 1, 'true', None, [], math.nan):
+            source = case()
+            source['rough_contact']['current_adhesion_rolling'] = bad
+            with self.subTest(value=bad), self.assertRaisesRegex(ValueError, 'current_adhesion_rolling.*boolean'):
+                resolved(source)
+        source = case('pure_gr.json')
+        source['interaction']['surface_adhesion'] = False
+        for key in RUNNER.SURFACE_ADHESION_DEFAULTS:
+            source['interaction'].pop(key, None)
+        source['rough_contact'].update(enabled=False, current_adhesion_rolling=True)
+        cfg, meta, values = resolved(source)
+        self.assertTrue(meta['current_adhesion_rolling']['explicit_requested'])
+        self.assertFalse(meta['current_adhesion_rolling']['active'])
+        self.assertNotIn('current_adhesion_rolling', values)
+        RUNNER.require_local_adhesion_build(cfg, {'pass_max_version': 1})
+        source['rough_contact']['current_adhesion_rolling'] = False
+        self.assertEqual(resolved(source)[2], values)
+
+    def test_build_gate_requires_new_capability_only_for_explicit_active_flag(self):
+        info = {'pass_max_version': 1, 'surface_adhesion_version': 1,
+                'free_cmc_repulsion_version': 1, 'free_cmc_inner_repulsion_version': 1,
+                'cmc_net_potential_version': 1, 'cmc_coordination_version': 1}
+        cfg, _, _ = resolved()
+        for version in (None, 0, 2):
+            old = dict(info)
+            if version is not None:
+                old['current_adhesion_rolling_version'] = version
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'current-adhesion rolling.*Rebuild'):
+                RUNNER.require_local_adhesion_build(cfg, old)
+        RUNNER.require_local_adhesion_build(cfg, dict(info, current_adhesion_rolling_version=1))
+        cfg['rough_contact']['current_adhesion_rolling'] = False
+        RUNNER.require_local_adhesion_build(cfg, info)
+        cfg, _, _ = resolved(coordinated_case())
+        RUNNER.require_local_adhesion_build(cfg, info)
+
+    def test_checkpoint_rejects_changed_or_incomplete_explicit_rolling_law(self):
+        cfg, meta, values = resolved()
+        saved = checkpoint(cfg, meta, values)
+        self.assertTrue(RUNNER.validate_restart(cfg, meta, saved, 1))
+        for key in ROLLING_KEYS:
+            for operation in ('missing', 'changed'):
+                broken = copy.deepcopy(saved)
+                if operation == 'missing':
+                    del broken['immutable_config'][key]
+                else:
+                    broken['immutable_config'][key] = 2
+                with self.subTest(key=key, operation=operation), self.assertRaises(ValueError):
+                    RUNNER.validate_restart(cfg, meta, broken, 1)
+        disabled = copy.deepcopy(cfg)
+        disabled['rough_contact']['current_adhesion_rolling'] = False
+        old_cfg, old_meta, old_values = resolved(disabled)
+        old_saved = checkpoint(old_cfg, old_meta, old_values)
+        self.assertTrue(RUNNER.validate_restart(old_cfg, old_meta, old_saved, 1))
+        with self.assertRaises(ValueError):
+            RUNNER.validate_restart(cfg, meta, old_saved, 1)
+        with self.assertRaises(ValueError):
+            RUNNER.validate_restart(old_cfg, old_meta, saved, 1)
+        old_saved['immutable_config']['current_adhesion_rolling'] = 0
+        with self.assertRaises(ValueError):
+            RUNNER.validate_restart(old_cfg, old_meta, old_saved, 1)
+        for source in (coordinated_case(), case('gr_CMC_4g_L.json'), case('pure_gr.json')):
+            old_cfg, old_meta, old_values = resolved(source)
+            old_saved = checkpoint(old_cfg, old_meta, old_values)
+            self.assertFalse(set(ROLLING_KEYS).intersection(old_saved['immutable_config']))
+            self.assertTrue(RUNNER.validate_restart(old_cfg, old_meta, old_saved, 1))
+
+
 @unittest.skipUnless(shutil.which('g++'), 'C++ parser integration requires g++')
 class NetCmcCppWiringTests(unittest.TestCase):
     def test_derived_net_parameters_reach_cpp_for_both_endpoints_and_intermediate(self):
@@ -326,7 +430,7 @@ int main(int argc,char** argv) {
     <<c.cmc_net_reference_length<<" "<<c.free_cmc_repulsion_pressure<<" "
     <<c.free_cmc_inner_repulsion_work<<" "<<c.roughness_gap<<" "<<c.pass_max<<" "
     <<c.cmc_coordination_enabled<<" "<<c.cmc_coordination_start<<" "
-    <<c.cmc_coordination_end<<" "<<c.cmc_coordination_floor;
+    <<c.cmc_coordination_end<<" "<<c.cmc_coordination_floor<<" "<<c.current_adhesion_rolling;
 }
 ''')
             executable = directory/'parse'
@@ -350,8 +454,9 @@ int main(int argc,char** argv) {
                         self.assertEqual(parsed[i], values[key])
                 self.assertEqual(parsed[6:10], [values['free_cmc_repulsion_pressure'],
                                               values['free_cmc_inner_repulsion_work'], 2e-9, 1])
-                self.assertEqual(parsed[10:], [values.get(key, default) for key, default in
+                self.assertEqual(parsed[10:14], [values.get(key, default) for key, default in
                                                zip(COORD_KEYS, (0, 1, 2, .1))])
+                self.assertEqual(parsed[14], 1)
 
 
 if __name__ == '__main__':

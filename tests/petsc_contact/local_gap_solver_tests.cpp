@@ -89,13 +89,14 @@ void replayVersions() {
   input.force.resize(2);input.torque.resize(2);input.contacts.resize(1);input.cache.resize(1);
   input.contacts[0].active=true;input.contacts[0].normalLoad=9.36e-7;
   input.contacts[0].rollingCap=9.36e-14;
-  const auto v8=scratch.path/"v8.dat";d::writeParticleReplay(input,v8.string());
-  const auto read=d::readParticleReplay(v8.string());
+  const auto v9=scratch.path/"v9.dat";d::writeParticleReplay(input,v9.string());
+  const auto read=d::readParticleReplay(v9.string());
   const auto& a=input.settings.pair;const auto& b=read.settings.pair;
   require(a.roughnessGap==b.roughnessGap&&a.localGap==b.localGap
       &&a.localGapFraction==b.localGapFraction&&a.localSwitchExcessGap==b.localSwitchExcessGap
       &&a.localCutoffExcessGap==b.localCutoffExcessGap,"Replay lost local adhesion parameters");
   require(read.settings.rough.tangentialStiffness==80.,"Replay lost configured tangential stiffness");
+  require(!read.settings.rough.currentAdhesionRolling,"Replay changed the raw rolling mode");
   require(read.contacts[0].rollingCap==input.contacts[0].rollingCap,"Replay lost frozen rolling cap");
   require(read.settings.passMax==input.settings.passMax,"Replay lost maximum-iteration acceptance policy");
   const auto expected=g::evaluatePair(input.bodies[0],input.bodies[1],a);
@@ -103,16 +104,17 @@ void replayVersions() {
   require(expected.forceI==actual.forceI&&expected.energy==actual.energy,"Replay changed local pair interaction");
 
   require(!b.surfaceAdhesion,"Legacy replay unexpectedly enabled surface adhesion");
-  // v1-v7 omit coordination; v1-v6 omit net CMC; v1-v5 omit inner CMC;
+  // v1-v8 omit independent rolling; v1-v7 omit coordination;
+  // v1-v6 omit net CMC; v1-v5 omit inner CMC;
   // v1-v3 omit outer CMC;
   // v1-v2 omit surface parameters;
   // v1 additionally omits the legacy local line.
-  for(int version:{1,2,3,4,5,6,7}) {
-    std::ifstream source(v8);const auto oldPath=scratch.path/("v"+std::to_string(version)+".dat");
+  for(int version:{1,2,3,4,5,6,7,8}) {
+    std::ifstream source(v9);const auto oldPath=scratch.path/("v"+std::to_string(version)+".dat");
     std::ofstream target(oldPath);std::string line;int index=0;
     while(std::getline(source,line)) {
       if(index==0)target<<"GR_PARTICLE_REPLAY "<<version<<'\n';
-      else if(index!=11&&(version>=7||index!=10)&&(version>=6||index!=9)&&(version>=5||index!=8)&&(version>=4||index!=7)
+      else if(index!=12&&(version>=8||index!=11)&&(version>=7||index!=10)&&(version>=6||index!=9)&&(version>=5||index!=8)&&(version>=4||index!=7)
           &&(version>=3||index!=6)&&(version!=1||index!=5))target<<line<<'\n';
       ++index;
     }
@@ -122,6 +124,7 @@ void replayVersions() {
     require(old.settings.pair.freeCmcInnerRepulsionWork==0.,"Legacy replay unexpectedly enabled inner CMC repulsion");
     require(old.settings.pair.cmcNetBlend==0.,"Legacy replay unexpectedly enabled net CMC potential");
     require(!old.settings.pair.cmcCoordinationEnabled,"Legacy replay unexpectedly enabled coordination");
+    require(!old.settings.rough.currentAdhesionRolling,"Legacy pairwise replay enabled current-strength rolling");
     require(old.settings.passMax==(version>=5?input.settings.passMax:0),
         "Legacy failure replay must retain its maximum-iteration policy");
     require(old.settings.pair.localGapFraction==(version==1?0.:a.localGapFraction),
@@ -162,7 +165,7 @@ void replayVersions() {
     std::ifstream source(surface);std::ofstream target(oldInner);std::string line;int index=0;
     while(std::getline(source,line)) {
       if(index==0)target<<"GR_PARTICLE_REPLAY 6\n";
-      else if(index!=10&&index!=11)target<<line<<'\n';
+      else if(index!=10&&index!=11&&index!=12)target<<line<<'\n';
       ++index;
     }
   }
@@ -198,7 +201,7 @@ void replayVersions() {
     std::ifstream source(net);std::ofstream target(oldNet);std::string line;int index=0;
     while(std::getline(source,line)) {
       if(index==0)target<<"GR_PARTICLE_REPLAY 7\n";
-      else if(index!=11)target<<line<<'\n';
+      else if(index!=11&&index!=12)target<<line<<'\n';
       ++index;
     }
   }
@@ -218,9 +221,41 @@ void replayVersions() {
   const auto& cp=coordinatedRead.settings.pair;
   require(cp.cmcCoordinationEnabled&&cp.cmcCoordinationStart==1.25
       &&cp.cmcCoordinationEnd==2.75&&cp.cmcCoordinationFloor==.13
-      &&coordinatedRead.settings.rough.currentAdhesionRolling,
-      "Replay lost coordination settings or the derived current-strength rolling law");
+      &&!coordinatedRead.settings.rough.currentAdhesionRolling,
+      "Version 9 replay lost coordination settings or changed the raw rolling flag");
+  const auto oldCoordinated=scratch.path/"coordinated_v8.dat";
+  {
+    std::ifstream source(coordinated);std::ofstream target(oldCoordinated);std::string line;int index=0;
+    while(std::getline(source,line)) {
+      if(index==0)target<<"GR_PARTICLE_REPLAY 8\n";
+      else if(index!=12)target<<line<<'\n';
+      ++index;
+    }
+  }
+  const auto oldCoordinatedRead=d::readParticleReplay(oldCoordinated.string());
+  require(oldCoordinatedRead.settings.pair.cmcCoordinationEnabled
+      &&oldCoordinatedRead.settings.rough.currentAdhesionRolling,
+      "Version 8 replay lost its inferred current-strength rolling law");
   input.settings.pair.cmcCoordinationEnabled=false;
+  input.settings.rough.currentAdhesionRolling=true;
+  const auto independent=scratch.path/"independent_rolling.dat";
+  d::writeParticleReplay(input,independent.string());
+  const auto independentRead=d::readParticleReplay(independent.string());
+  require(!independentRead.settings.pair.cmcCoordinationEnabled
+      &&independentRead.settings.rough.currentAdhesionRolling,
+      "Version 9 replay tied current-strength rolling to coordination");
+  for(const int invalid:{-1,2}) {
+    const auto invalidPath=scratch.path/("invalid_rolling_"+std::to_string(invalid)+".dat");
+    std::ifstream source(independent);std::ofstream target(invalidPath);std::string line;int index=0;
+    while(std::getline(source,line)) {
+      if(index==12)target<<invalid<<'\n';else target<<line<<'\n';
+      ++index;
+    }
+    target.close();bool rejected=false;
+    try {d::readParticleReplay(invalidPath.string());}catch(const std::exception&){rejected=true;}
+    require(rejected,"Version 9 replay accepted a nonboolean rolling flag");
+  }
+  input.settings.rough.currentAdhesionRolling=false;
   input.settings.pair.cmcNetBlend=0.;
   input.settings.pair.freeCmcRepulsionPressure=0.;
   input.settings.pair.freeCmcInnerRepulsionWork=0.;
@@ -251,6 +286,39 @@ void netContactBirth() {
   s.rough.gap=3.e-9;bool rejected=false;
   try {g::validateParticlePairSettings(s);}catch(const std::exception&){rejected=true;}
   require(rejected,"Net-CMC potential accepted a different physical contact plane");
+}
+
+void independentCurrentRolling() {
+  auto s=settings();s.pair.localGapFraction=0.;s.pair.surfaceAdhesion=true;
+  s.pair.cmcNetBlend=1.;s.pair.cmcNetContactForce=4.5e-9;
+  s.pair.cmcCoordinationEnabled=false;s.nearField.enabled=false;
+  auto b=bodies(s);
+  std::vector<g::Vec3> zero(2);std::vector<g::GapCache> cache(1);
+  g::PersistentContactState history(1);std::vector<int> slots{0};
+  const auto pair=g::evaluatePair(b[0],b[1],s.pair);
+  const double adhesion=std::max(0.,g::dot(pair.forceI,pair.normal));
+  const double expectedCap=s.rough.rollingLength*adhesion;
+  auto& old=history[0];old.active=true;old.normal=pair.normal;
+  old.rollingCap=3.*expectedCap;old.rollingStiffness=old.rollingCap/s.rough.rollingYieldAngle;
+  old.elasticRoll={.003,0.,0.};
+  old.elasticEnergy=.5*old.rollingStiffness*g::dot(old.elasticRoll,old.elasticRoll);
+  const double dt=1.e-8,L=b[0].axes[0];
+  d::Residual residual{b,zero,zero,s,cache,history,slots,dt,0.,L,1.,1};
+  d::Vector q(13,0.);q[12]=adhesion;d::Evaluation frozen,current;std::string error;
+  require(residual(q,frozen,error),"Pairwise frozen-strength residual failed");
+  require(frozen.contacts[0].rollingCap==old.rollingCap,"Disabled current rolling changed a frozen cap");
+  s.rough.currentAdhesionRolling=true;
+  require(residual(q,current,error),"Independent current-strength residual failed");
+  require(current.contacts[0].active
+      &&std::abs(current.contacts[0].rollingCap-expectedCap)<1.e-28+1.e-10*expectedCap,
+      "Coordination-disabled residual did not use the current adhesive force");
+  require(std::abs(current.contacts[0].elasticEnergy-old.elasticEnergy)<1.e-28+1.e-10*old.elasticEnergy,
+      "Current rolling strength update did not preserve sub-yield elastic energy");
+  require(old.rollingCap==3.*expectedCap,"Current-strength residual mutated committed contact history");
+  history[0]={};d::Evaluation born;
+  require(residual(q,born,error)&&born.contacts[0].active
+      &&std::abs(born.contacts[0].rollingCap-expectedCap)<1.e-28+1.e-10*expectedCap,
+      "Independent current rolling changed the physical contact birth force");
 }
 
 void coordinatedResidualAndSnapshot() {
@@ -338,7 +406,7 @@ void coordinatedResidualAndSnapshot() {
 }
 
 int main() {
-  try {trialDomainAndBirth();replayVersions();netContactBirth();coordinatedResidualAndSnapshot();
+  try {trialDomainAndBirth();replayVersions();netContactBirth();independentCurrentRolling();coordinatedResidualAndSnapshot();
     std::cout<<"Local gap solver/replay tests passed\n";return 0;}
   catch(const std::exception& error){std::cerr<<"Local gap solver/replay test failed: "<<error.what()<<'\n';return 1;}
 }

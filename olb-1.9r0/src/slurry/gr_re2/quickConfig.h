@@ -45,6 +45,7 @@ struct Config {
   bool rough_contact_enabled=true;
   double roughness_gap=2e-9,sliding_friction=.5,tangential_stiffness=9.;
   double rolling_length=100e-9,rolling_yield_angle=.01;
+  bool current_adhesion_rolling=false;
   double particle_force_absolute_tolerance=1e-15,particle_torque_absolute_tolerance=1.65e-21;
   double contact_gap_tolerance=1e-12;
   std::uint64_t max_steps=0,sample_every=20,vtk_every=0,checkpoint_every=0,checkpoint_keep=2;
@@ -109,6 +110,10 @@ inline Config parseConfig(int argc,char**argv) {
     if(key=="cmc_coordination_enabled"){
       if(v!="0"&&v!="1")throw std::runtime_error("cmc_coordination_enabled must be 0 or 1");
       c.cmc_coordination_enabled=v=="1";continue;
+    }
+    if(key=="current_adhesion_rolling"){
+      if(v!="0"&&v!="1")throw std::runtime_error("current_adhesion_rolling must be 0 or 1");
+      c.current_adhesion_rolling=v=="1";continue;
     }
     if(key=="pass_max"||key=="cmc_contact_version"){
       if(v!="0"&&v!="1")throw std::runtime_error(key+" must be 0 or 1");

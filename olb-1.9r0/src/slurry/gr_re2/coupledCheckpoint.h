@@ -107,6 +107,12 @@ inline std::map<std::string,double> physics(const Config& c,const Units& u,std::
   KEEP(lubrication_cutoff_cells);
   KEEP(rough_contact_enabled);KEEP(roughness_gap);KEEP(sliding_friction);KEEP(tangential_stiffness);
   KEEP(rolling_length);KEEP(rolling_yield_angle);
+  if(c.rough_contact_enabled&&c.current_adhesion_rolling){
+    // Coordination already identifies its legacy implicit rolling behavior.
+    // Only the independently requested mode adds new checkpoint fields.
+    KEEP(current_adhesion_rolling);
+    out["current_adhesion_rolling_version"]=1.;
+  }
 #undef KEEP
   out["dt_s"]=u.dt;out["particle_count"]=count;out["ranks"]=ranks;
   return out;
