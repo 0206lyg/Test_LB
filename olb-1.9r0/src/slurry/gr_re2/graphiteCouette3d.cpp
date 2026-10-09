@@ -38,6 +38,33 @@ static double seconds(Clock::time_point t){return std::chrono::duration<double>(
 static volatile std::sig_atomic_t stopRequested=0;
 static void requestStop(int){stopRequested=1;}
 
+// SuperVTMwriter3D appends entries by replacing this exact 25-byte footer;
+// createMasterFile() would truncate an existing restart timeline. Its write
+// path does not depend on the private _createFile flag, so initialize the
+// collection here and leave an already migrated restart collection untouched.
+static void prepareVtkMaster(const fs::path& path,bool restarting){
+  const std::string marker="vtk_time_index=\"simulation_step\"";
+  const std::string footer="</Collection>\n</VTKFile>\n";
+  if(restarting&&fs::exists(path)){
+    if(!fs::is_regular_file(path))throw std::runtime_error("Restart VTK master is not a regular file");
+    std::ifstream in(path,std::ios::binary);std::ostringstream data;
+    if(!in)throw std::runtime_error("Cannot read restart VTK master");
+    data<<in.rdbuf();const std::string contents=data.str();
+    if(in.bad()||contents.find(marker)==std::string::npos
+       ||contents.find("type=\"Collection\"")==std::string::npos
+       ||contents.size()<footer.size()
+       ||contents.compare(contents.size()-footer.size(),footer.size(),footer)!=0)
+      throw std::runtime_error("Restart VTK master needs migration/canonicalization by run_graphite.py --restart");
+    return;
+  }
+  std::ofstream out(path,std::ios::binary|std::ios::trunc);
+  if(!out)throw std::runtime_error("Cannot create VTK master");
+  out<<"<?xml version=\"1.0\"?>\n"
+       "<VTKFile type=\"Collection\" version=\"0.1\" byte_order=\"LittleEndian\" "
+     <<marker<<">\n<Collection>\n"<<footer;
+  out.close();if(!out)throw std::runtime_error("Cannot write VTK master");
+}
+
 // OpenLB initializes MPI first. PETSc therefore does not own MPI finalization.
 struct ParticleSolverRuntime {
   bool ownsPetsc=false;
@@ -284,6 +311,7 @@ void simulate(const Config& c){
       <<",\n\"rho_fluid_numeric_kg_m3\":"<<u.rhoFluid<<",\n\"rho_particle_numeric_kg_m3\":"<<u.rhoParticle
       <<",\n\"Re_physical\":"<<u.rePhysical<<",\n\"Re_numeric\":"<<u.reNumeric<<",\n\"St_numeric\":"<<u.stNumeric
       <<",\n\"particle_count\":"<<bodies.size()<<",\n\"steps_to_target_strain\":"<<endStep
+      <<",\n\"vtk_time_index\":\"simulation_step\""
       <<",\n\"interaction\":{\"hamaker_J\":"<<c.hamaker<<",\"sigma_lj_m\":"<<c.sigma_lj
       <<",\"switch_gap_m\":"<<c.switch_gap<<",\"cutoff_gap_m\":"<<c.cutoff_gap
       <<",\"surface_adhesion\":"<<(c.surface_adhesion?"true":"false");
@@ -340,7 +368,12 @@ void simulate(const Config& c){
   }
   SuperVTMwriter3D<T> writer("graphite");SuperLatticePhysVelocity3D<T,D> velocity(l,converter);
   SuperLatticePhysPressure3D<T,D> pressure(l,converter);SuperLatticePhysExternalPorosity3D<T,D> porosity(l,converter);
-  writer.addFunctor(velocity);writer.addFunctor(pressure);writer.addFunctor(porosity);if(c.vtk_every)writer.createMasterFile();
+  writer.addFunctor(velocity);writer.addFunctor(pressure);writer.addFunctor(porosity);
+  if(c.vtk_every){
+    if(singleton::mpi().isMainProcessor())
+      prepareVtkMaster(fs::path(singleton::directories().getVtkOutDir())/"graphite.pvd",!c.restart_dir.empty());
+    singleton::mpi().barrier();
+  }
   const auto start=Clock::now();auto lastCheckpoint=Clock::now();
   T fluidSeconds=previousTiming[1],mapSeconds=previousTiming[2],couplingSeconds=previousTiming[3],
     particleSeconds=previousTiming[4],outputSeconds=previousTiming[5];
@@ -419,8 +452,10 @@ void simulate(const Config& c){
     ++step;mapAndCouple();
     if(step%c.sample_every==0||step==stopStep)sample();
     if(c.vtk_every&&step%c.vtk_every==0){
-      const U64 frame=step/c.vtk_every;if(frame>std::numeric_limits<int>::max())throw std::runtime_error("Too many VTK frames");
-      writer.write(static_cast<int>(frame));
+      // Absolute steps prevent filename collisions when vtk_every changes on
+      // restart. Legacy frame-named files stay linked by the migrated PVD.
+      if(step>std::numeric_limits<int>::max())throw std::runtime_error("VTK simulation step exceeds writer index range");
+      writer.write(static_cast<int>(step));
     }
     int stop=stopRequested?1:0,saveNow=0;
     if(singleton::mpi().isMainProcessor()){
@@ -445,9 +480,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"vtk_restart_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"vtk_restart_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #endif
     return 0;
   }

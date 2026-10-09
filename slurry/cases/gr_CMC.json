@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "description": "Graphite with 90k CMC at total 16 g/L: a pair-additive compact net potential with 4.5 nN reference attraction and 20 pN reference repulsion screens the complete legacy potential including the RE2 tail. Coordination saturation is disabled. Rolling strength uses current attraction, with the same rolling length, yield angle and bare 2 nm contact gap.",
+  "description": "Graphite with 90k CMC at total 16 g/L: a pair-additive compact net potential with 45 nN reference attraction and 60 pN reference repulsion screens the complete legacy potential including the RE2 tail. Attraction and the approach barrier are increased independently to strengthen activated contacts and shift their activation toward higher shear. Coordination saturation is disabled. Rolling strength uses current attraction, with the same rolling length, yield angle and bare 2 nm contact gap.",
   "fluid": {
     "density_kg_m3": 997.0,
     "dynamic_viscosity_Pa_s": 0.00089,
@@ -37,7 +37,7 @@
     "lubrication_cutoff_cells": 1.0,
     "particle_force_absolute_tolerance_N": 1e-15,
     "particle_torque_absolute_tolerance_N_m": 1.65e-21,
-    "_absolute_tolerance_reference": "The net potential can have an orientation-dependent barrier of about 0.3 pN. These absolute residual tolerances resolve forces below that scale; relative tolerance and all iteration/substep limits are unchanged. This change is specific to the 16 g/L case.",
+    "_absolute_tolerance_reference": "The 60 pN reference barrier scales to about 0.88 pN in the aligned edge-to-edge geometry. Absolute residual tolerances are retained from the previous 20 pN reference-barrier case (about 0.3 pN edge-to-edge); relative tolerance and all iteration/substep limits are unchanged. This setting is specific to the 16 g/L case.",
     "contact_gap_tolerance_m": 1e-12,
     "pass_max": 1
   },
@@ -93,8 +93,8 @@
       "enabled": true,
       "start_free_g_L": 1.1015785714285715,
       "full_free_g_L": 13.101578571428572,
-      "contact_force_N": 4.5e-09,
-      "barrier_force_N": 2e-11,
+      "contact_force_N": 4.5e-08,
+      "barrier_force_N": 6e-11,
       "attraction_range_m": 1e-09,
       "repulsion_range_m": 6e-09,
       "coordination": {

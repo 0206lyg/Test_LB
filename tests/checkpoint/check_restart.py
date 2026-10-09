@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare an uninterrupted contact run with a saved/restored pure_gr run."""
+"""Compare an uninterrupted contact run with an in-place graphite restart."""
 import argparse
 import csv
 import importlib.util
@@ -21,12 +21,13 @@ def main():
     parser.add_argument('--executable',type=Path,default=ROOT/'build/slurry/current/slurry')
     parser.add_argument('--work',type=Path)
     parser.add_argument('--ranks',type=int,default=1)
+    parser.add_argument('--case',choices=('pure_gr','gr_cmc'),default='pure_gr')
     parser.add_argument('--checkpoint-seconds',type=float,
                         help='Override wall-time interval for a short timer-trigger regression')
     args=parser.parse_args()
     work=args.work or Path(tempfile.mkdtemp(prefix='pure-gr-restart-'))
     work.mkdir(parents=True,exist_ok=True)
-    config=json.loads((ROOT/'slurry/cases/pure_gr.json').read_text())
+    config=json.loads((ROOT/'slurry/cases'/('gr_CMC.json' if args.case=='gr_cmc' else 'pure_gr.json')).read_text())
     executable=args.executable.resolve()
     build_info=json.loads(subprocess.check_output([str(executable),'--build-info'],universal_newlines=True))
     config['numerics']['particle_solver']=build_info['particle_solver']
@@ -39,10 +40,13 @@ def main():
         config['output']['checkpoint_every_seconds']=args.checkpoint_seconds
     config_path=work/'config.json';driver.write_json(config_path,config)
     cfg,_=driver.resolve(config)
-    environment=dict(os.environ,SLURRY_ENGINE='pure_gr')
+    environment=dict(os.environ,SLURRY_ENGINE=args.case)
     prefix=[shutil.which('mpirun'),'-np',str(args.ranks)] if args.ranks>1 else []
     for name,steps in [('whole',16),('part',8)]:
         output=work/name;output.mkdir()
+        saved=output/'input/cases';saved.mkdir(parents=True)
+        driver.write_json(saved/(args.case+'.json'),config)
+        driver.write_json(output/'effective_config.json',cfg)
         particles=output/'initial_particles.csv'
         particles.write_text('id,x_m,y_m,z_m,angle_x_deg,angle_y_deg,angle_z_deg\n'
                              '0,5e-6,4.799e-6,5e-6,90,0,0\n'
@@ -51,15 +55,15 @@ def main():
         values_path=output/'run.cfg'
         values_path.write_text(''.join('%s=%s\n'%item for item in values.items()))
         with (output/'run.log').open('w') as log:
-            subprocess.run(prefix+[str(executable),'--engine','pure_gr','--config',str(values_path)],
+            subprocess.run(prefix+[str(executable),'--engine',args.case,'--config',str(values_path)],
                            stdout=log,stderr=subprocess.STDOUT,env=environment,check=True)
     # Exercise the same common controller and driver as run_slurry_cpu.sbatch.
     with (work/'restart.log').open('w') as log:
         subprocess.run([os.sys.executable,str(ROOT/'slurry/tools/run_slurry.py'),
-                        '--restart',str(work/'part'),'--config',str(config_path),
-                        '--ranks',str(args.ranks),'--max-steps','16','--output',str(work/'resumed'),
+                        '--restart',str(work/'part'),
+                        '--ranks',str(args.ranks),'--max-steps','16',
                         '--executable',str(executable)],stdout=log,stderr=subprocess.STDOUT,check=True)
-    resumed=work/'resumed/pure_gr/g000_100'
+    resumed=work/'part'
     for directory,log_name,start,endpoint in [(work/'whole','run.log',0,16),
                                               (work/'part','run.log',0,8),
                                               (resumed,'solver.log',8,16)]:
@@ -87,7 +91,7 @@ def main():
     for rank in range(args.ranks):
         name='lattice_rank_%d.bin'%rank
         assert (a/name).read_bytes()==(b/name).read_bytes(),'Final fluid distributions differ: '+name
-    print('PASS: exact physical CSV rows and final lattice match; active contact history; shared --restart controller; ranks=%d'%args.ranks)
+    print('PASS: exact physical CSV rows and final lattice match; active contact history; in-place --restart controller; case=%s ranks=%d'%(args.case,args.ranks))
     print('Results:',work)
 
 

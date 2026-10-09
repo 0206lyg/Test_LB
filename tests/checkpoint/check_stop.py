@@ -32,24 +32,33 @@ def main():
     config=json.loads(args.config.read_text());config['flow']['end_strain']=1
     config['output'].update(checkpoint_every_steps=0,checkpoint_every_seconds=350*60)
     config_path=work/'config.json';driver.write_json(config_path,config)
-    prefix=[sys.executable,str(ROOT/'slurry/tools/run_slurry.py'),'--config',str(config_path),
+    prefix=[sys.executable,str(ROOT/'slurry/tools/run_slurry.py'),
             '--ranks',str(data['ranks']),'--executable',str(args.executable.resolve())]
     output=work/'stopped'
-    result=output/('pure_gr/g000_%s'%format(data['shear_rate_s_inv'],'.12g'))
+    # Work on an isolated copy of the small regression fixture, then exercise
+    # the user's real same-folder restart contract for both resumptions.
+    shutil.copytree(str(source.parent.parent),str(output))
+    engine='gr_cmc' if 'cmc' in config else 'pure_gr'
+    saved=output/'input/cases';saved.mkdir(parents=True,exist_ok=True)
+    driver.write_json(saved/(engine+'.json'),config)
+    result=output
+    previous_pointer=(result/'latest_checkpoint.txt').read_bytes() if (result/'latest_checkpoint.txt').exists() else None
+    solver_log=result/'solver.log'
+    previous_log_size=solver_log.stat().st_size if solver_log.exists() else 0
     with (work/'stop.log').open('w') as log:
-        process=subprocess.Popen(prefix+['--restart',str(source),'--max-steps','1000','--output',str(output)],
+        process=subprocess.Popen(prefix+['--restart',str(output/'checkpoints'/source.name),'--max-steps','1000'],
                                  stdout=log,stderr=subprocess.STDOUT)
         try:
             deadline=time.monotonic()+90
             # Startup no longer writes a checkpoint. Wait for the solver's first
             # completed restored step, after the driver's signal handler is ready.
-            solver_log=result/'solver.log'
             progress='step=%d '%(data['step']+1)
-            while not (solver_log.is_file() and progress in solver_log.read_text()):
+            while not (solver_log.is_file() and progress.encode() in solver_log.read_bytes()[previous_log_size:]):
                 if process.poll() is not None:raise RuntimeError('Run exited before stop signal; inspect '+str(work/'stop.log'))
                 if time.monotonic()>deadline:raise RuntimeError('Timed out waiting for the first restored step')
                 time.sleep(0.05)
-            assert not (result/'latest_checkpoint.txt').exists(),'Unexpected startup/periodic checkpoint'
+            pointer=(result/'latest_checkpoint.txt').read_bytes() if (result/'latest_checkpoint.txt').exists() else None
+            assert pointer==previous_pointer,'Unexpected startup/periodic checkpoint'
             process.send_signal(signal.SIGUSR1)
             assert process.wait(timeout=90)==0,'Controller did not stop cleanly'
         finally:
@@ -60,19 +69,17 @@ def main():
     checkpoint,saved=driver.latest_checkpoint(result)
     assert data['step']<saved['step']<1000,saved['step']
     with (work/'continue.log').open('w') as log:
-        subprocess.run(prefix+['--restart',str(result),'--max-steps',str(saved['step']+2),
-                               '--output',str(work/'continued')],stdout=log,stderr=subprocess.STDOUT,check=True)
+        subprocess.run(prefix+['--restart',str(result),'--max-steps',str(saved['step']+2)],
+                       stdout=log,stderr=subprocess.STDOUT,check=True)
     # File size is unchanged, so metadata preflight passes and the C++ checksum
     # must catch corruption before applying any restored state.
-    broken=work/'corrupt';broken.mkdir()
-    for name in ('checkpoint.json','state.bin','initial_particles.csv'):shutil.copy2(str(checkpoint/name),str(broken/name))
-    for rank in range(saved['ranks']):
-        name='lattice_rank_%d.bin'%rank;(broken/name).symlink_to(checkpoint/name)
-    with (broken/'state.bin').open('r+b') as f:
+    broken=work/'corrupt';shutil.copytree(str(output),str(broken))
+    broken_checkpoint=broken/'checkpoints'/checkpoint.name
+    with (broken_checkpoint/'state.bin').open('r+b') as f:
         f.seek(64);value=f.read(1);f.seek(64);f.write(bytes([value[0]^1]))
     with (work/'corruption.log').open('w') as log:
-        failed=subprocess.run(prefix+['--restart',str(broken),'--max-steps',str(saved['step']+2),
-                                      '--output',str(work/'rejected')],stdout=log,stderr=subprocess.STDOUT)
+        failed=subprocess.run(prefix+['--restart',str(broken_checkpoint),'--max-steps',str(saved['step']+2)],
+                              stdout=log,stderr=subprocess.STDOUT)
     assert failed.returncode!=0 and 'Checkpoint checksum mismatch' in (work/'corruption.log').read_text()
     print('PASS: SIGUSR1 saved at LB boundary, successful subsequent restart, corrupt state rejected')
     print('Results:',work)

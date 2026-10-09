@@ -68,9 +68,9 @@ class GrCmcControllerTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def run_controller(self, *args, **kwargs):
+        output=[] if '--restart' in args else ['--output',str(self.root/'output')]
         return subprocess.run(
-            [sys.executable, str(CONTROLLER), '--dry-run',
-             '--output', str(self.root / 'output')] + list(args),
+            [sys.executable, str(CONTROLLER), '--dry-run'] + output + list(args),
             cwd=str(ROOT), env=kwargs.get('env', self.environment),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True)
@@ -126,6 +126,8 @@ class GrCmcControllerTests(unittest.TestCase):
 
     def test_restart_filters_mixed_engine_folder_and_skips_complete_rates(self):
         config = json.loads((ROOT / 'slurry/cases/gr_CMC.json').read_text())
+        saved=self.root/'input/cases/gr_cmc.json';saved.parent.mkdir(parents=True)
+        COMMON.write_json(saved,config)
         checkpoint(self.root / 'pure_gr/g000_999', config, 8, 999)
         checkpoint(self.root / 'gr_cmc/g000_100', config, 16, 100)
         pending = checkpoint(self.root / 'gr_cmc/g001_10', config, 8, 10)
@@ -212,6 +214,81 @@ class GrCmcControllerTests(unittest.TestCase):
         self.assertTrue((run / 'particles_to_paraview.py').is_file())
 
     @unittest.skipUnless(shutil.which('c++'), 'C++ compiler unavailable')
+    def test_actual_restart_uses_saved_cmc_in_place_without_replacing_snapshot(self):
+        config=json.loads((ROOT/'slurry/cases/gr_CMC.json').read_text())
+        config['cmc']['net_potential']['contact_force_N']*=.37
+        output=self.root/'saved_run';run=output/'gr_cmc/g007_10'
+        saved=output/'input/cases/gr_cmc.json';saved.parent.mkdir(parents=True)
+        COMMON.write_json(saved,config)
+        stale_driver=output/'input/drivers/gr_re2/run_graphite.py'
+        stale_driver.parent.mkdir(parents=True)
+        stale_driver.write_text('raise RuntimeError("Must not execute the old snapshotted driver")\n')
+        point=checkpoint(run,config,8,10)
+        data=json.loads((point/'checkpoint.json').read_text())
+        data['output_bytes']={'history.csv':9,'particles.csv':9}
+        COMMON.write_json(point/'checkpoint.json',data)
+        for name in ('history.csv','particles.csv'):(run/name).write_text('header\n8\n12\n')
+        (run/'initial_particles.csv').write_bytes(b'x')
+        (run/'solver.log').write_text('old solver output\n')
+        COMMON.write_json(run/'effective_config.json',DRIVER.resolve(config,10)[0])
+        COMMON.write_json(run/'manifest.json',{'saved_run':True})
+        before={str(path.relative_to(output/'input')):path.read_bytes()
+                for path in (output/'input').rglob('*') if path.is_file()}
+        executable=self.root/'fake_restart_slurry'
+        info={'mpi_enabled':False,'rough_contact':True,'local_gap_adhesion':True,
+              'surface_adhesion_version':1,'pass_max_version':1,'cmc_contact_version':1,
+              'free_cmc_repulsion_version':1,'free_cmc_inner_repulsion_version':1,
+              'cmc_net_potential_version':1,'cmc_coordination_version':1,
+              'current_adhesion_rolling_version':1,'pure_gr_checkpoint_version':1,
+              'particle_solver':'petsc','engines':['pure_gr','gr_cmc']}
+        executable.write_text(
+            '#!'+sys.executable+'\n'
+            'import json, os, pathlib, shutil, sys\n'
+            'if sys.argv[1:] == ["--build-info"]:\n'
+            '    print('+repr(json.dumps(info))+')\n'
+            'else:\n'
+            '    root=pathlib.Path.cwd()\n'
+            '    cfg=dict(line.split("=",1) for line in pathlib.Path(sys.argv[2]).read_text().splitlines())\n'
+            '    observed={"cwd":str(root),"engine":os.environ.get("SLURRY_ENGINE"),"config":cfg,\n'
+            '              "history_before":(root/"history.csv").read_text()}\n'
+            '    (root/"observed_restart.json").write_text(json.dumps(observed))\n'
+            '    old=pathlib.Path(cfg["restart_dir"])\n'
+            '    for name in ("history.csv","particles.csv"):\n'
+            '        with (root/name).open("a") as stream:stream.write("16\\n")\n'
+            '    data=json.loads((old/"checkpoint.json").read_text());data["step"]=16\n'
+            '    data["output_bytes"]={name:(root/name).stat().st_size for name in data["output_bytes"]}\n'
+            '    new=root/"checkpoints"/"checkpoint_00000000000000000016";new.mkdir()\n'
+            '    for name in data["files"]:shutil.copy2(str(old/name),str(new/name))\n'
+            '    (new/"checkpoint.json").write_text(json.dumps(data))\n'
+            '    (root/"status.json").write_text(json.dumps({"status":"MAX_STEPS"}))\n'
+            '    print("resumed solver output")\n')
+        executable.chmod(0o755)
+        COMMON.write_json(self.root/'build_manifest.json',{
+            'build_id':'restart-fixture','build_info':info,
+            'executable_sha256':COMMON.digest(executable),'source_inputs':COMMON.source_inputs()})
+        result=subprocess.run([sys.executable,str(CONTROLLER),'--restart',str(output),
+                               '--executable',str(executable),'--max-steps','16','--end-strain','20'],
+                              cwd=str(ROOT),env=self.environment,stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,universal_newlines=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        observed=json.loads((run/'observed_restart.json').read_text())
+        self.assertEqual(observed['cwd'],str(run))
+        self.assertEqual(observed['engine'],'gr_cmc')
+        self.assertEqual(float(observed['config']['cmc_net_contact_force']),
+                         config['cmc']['net_potential']['contact_force_N'])
+        self.assertEqual(float(observed['config']['end_strain']),20.)
+        self.assertEqual(observed['history_before'],'header\n8\n')
+        for name in ('history.csv','particles.csv'):
+            self.assertEqual((run/name).read_text(),'header\n8\n16\n')
+        self.assertIn('old solver output',(run/'solver.log').read_text())
+        self.assertIn('resumed solver output',(run/'solver.log').read_text())
+        self.assertTrue(point.is_dir())
+        self.assertTrue((run/'checkpoints/checkpoint_00000000000000000016/checkpoint.json').is_file())
+        after={str(path.relative_to(output/'input')):path.read_bytes()
+               for path in (output/'input').rglob('*') if path.is_file()}
+        self.assertEqual(before,after,'original input snapshot must remain byte-for-byte intact')
+        self.assertFalse((output/'pure_gr').exists())
+
     def test_cpp_dispatcher_routes_alias_with_generated_registry(self):
         engines = json.loads((ROOT / 'slurry/engines.json').read_text())
         declarations = ['namespace slurry { namespace ' + entry['namespace'] +

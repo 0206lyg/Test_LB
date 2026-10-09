@@ -232,10 +232,10 @@ class CmcCoordinationTests(unittest.TestCase):
                 cfg['cmc']['net_potential']['enabled'] = False
                 self.assertFalse(set(COORD_KEYS).intersection(resolved(cfg)[2]))
 
-    def test_shipped_force_override_preserves_scalar_defaults_and_barrier_parameters(self):
+    def test_shipped_force_overrides_preserve_scalar_defaults_and_ranges(self):
         cfg, meta, values = resolved()
-        self.assertEqual(values['cmc_net_contact_force'], 4.5e-9)
-        self.assertEqual(values['cmc_net_barrier_force'], 2e-11)
+        self.assertEqual(values['cmc_net_contact_force'], 4.5e-8)
+        self.assertEqual(values['cmc_net_barrier_force'], 6e-11)
         self.assertEqual(values['cmc_net_attraction_range'], 1e-9)
         self.assertEqual(values['cmc_net_repulsion_range'], 6e-9)
         del cfg['cmc']['net_potential']['contact_force_N']

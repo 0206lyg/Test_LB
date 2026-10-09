@@ -7,16 +7,20 @@ Use --dry-run to inspect the Mach-based time mapping without running OpenLB.
 import argparse
 import copy
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import quoteattr
 
 
 def digest(path):
@@ -695,14 +699,23 @@ def read_checkpoint(directory):
     return directory,data
 
 
+def checkpoint_candidates(run):
+    return sorted((int(directory.name[11:]), directory)
+                  for directory in (Path(run)/'checkpoints').glob('checkpoint_*')
+                  if directory.is_dir() and directory.name[11:].isdigit()
+                  and (directory/'checkpoint.json').is_file())
+
+
+def checkpoint_run_directory(checkpoint):
+    checkpoint = Path(checkpoint).expanduser().resolve()
+    return checkpoint.parent.parent if checkpoint.parent.name == 'checkpoints' else None
+
+
 def latest_checkpoint(run):
     run=Path(run).expanduser().resolve()
     if (run/'checkpoint.json').is_file():
         return read_checkpoint(run)
-    candidates=[]
-    for directory in (run/'checkpoints').glob('checkpoint_*'):
-        if directory.is_dir() and directory.name[11:].isdigit() and (directory/'checkpoint.json').is_file():
-            candidates.append((int(directory.name[11:]),directory))
+    candidates=checkpoint_candidates(run)
     if not candidates:
         raise ValueError('No completed pure_gr checkpoint in '+str(run)+
                          '. Old history.csv/particle failure files do not contain the fluid state.')
@@ -721,7 +734,9 @@ def restart_targets(folder, engine='pure_gr'):
     # engine's subtree when the requested one has no checkpoints.
     engine_root = any((folder/name).is_dir() for name in ('pure_gr', 'gr_cmc'))
     scope=folder/engine if engine_root else folder
-    runs=sorted({path.parent for path in scope.rglob('checkpoints') if path.is_dir()})
+    runs=sorted({path.parent for path in scope.rglob('checkpoints')
+                 if path.is_dir() and checkpoint_candidates(path.parent)
+                 and not {'restart_attempts','restart_archive'}.intersection(path.relative_to(scope).parts)})
     if not runs:
         raise ValueError('No '+engine+' checkpoint under '+str(folder)+
                          '. Checkpoints are available only for runs made with the restart update.')
@@ -785,22 +800,37 @@ def validate_restart(cfg,meta,checkpoint,ranks,max_steps=0,allow_complete=False)
     return endpoint>checkpoint['step']
 
 
-def copy_history_prefix(checkpoint,data,output):
-    # Keep the source run intact. Copy exactly the flushed bytes represented by
-    # the checkpoint, excluding any later samples from an interrupted attempt.
-    source=checkpoint.parent.parent if checkpoint.parent.name=='checkpoints' else None
-    if source is None:return False
+def history_prefix_sizes(checkpoint, data, required=False):
+    source=checkpoint_run_directory(checkpoint)
+    if source is None:
+        if required:raise ValueError('In-place restart requires a checkpoint inside this run/checkpoints directory')
+        return None, {}
     sizes=data.get('output_bytes',{})
-    if not all((source/name).is_file() for name in ('history.csv','particles.csv')):
-        return False
+    present=[(source/name).is_file() for name in ('history.csv','particles.csv')]
+    if not all(present):
+        if required or any(present):
+            raise ValueError('Restart output CSV pair is incomplete: '+str(source))
+        return source, {}
     for name in ('history.csv','particles.csv'):
         size=sizes.get(name,0)
         integer(size,'checkpoint output size',1)
         if (source/name).stat().st_size<size:
             raise ValueError('Source output is shorter than its checkpoint: '+str(source/name))
+    return source, {name:sizes[name] for name in ('history.csv','particles.csv')}
+
+
+def copy_history_prefix(checkpoint,data,output):
+    # Copy for a new run, or truncate only uncommitted bytes for the same run.
+    # Never open an in-place source with 'wb': it would destroy its saved prefix.
+    source,sizes=history_prefix_sizes(checkpoint,data)
+    if not sizes:return False
     for name in ('history.csv','particles.csv'):
+        destination=Path(output)/name
+        if destination.exists() and os.path.samefile(str(source/name),str(destination)):
+            with destination.open('r+b') as stream:stream.truncate(sizes[name])
+            continue
         left=sizes[name]
-        with (source/name).open('rb') as src,(output/name).open('wb') as dst:
+        with (source/name).open('rb') as src,destination.open('wb') as dst:
             while left:
                 block=src.read(min(left,1048576))
                 if not block:raise ValueError('Source output was truncated while copying '+name)
@@ -808,9 +838,158 @@ def copy_history_prefix(checkpoint,data,output):
     return True
 
 
+def vtk_restart_plan(output, step, saved_config):
+    """Migrate legacy frame indices to LB steps and retain committed VTK data."""
+    folder=output/'vtk'/'vtkData'
+    master=folder/'graphite.pvd'
+    frame_pattern=re.compile(r'^graphite_iT(\d+)(?:iC\d+)?\.(?:vtm|vti)$')
+    frames=[]
+    if (folder/'data').is_dir():
+        frames=[path for path in (folder/'data').iterdir()
+                if path.is_file() and frame_pattern.match(path.name)]
+    if not master.exists() and not frames:return None
+    attributes={'type':'Collection','version':'0.1','byte_order':'LittleEndian'}
+    entries=[]
+    absolute=False
+    if master.exists():
+        try:root=ET.parse(str(master)).getroot()
+        except ET.ParseError as error:raise ValueError('Invalid restart VTK collection: '+str(error))
+        collections=root.findall('Collection')
+        if root.tag!='VTKFile' or root.get('type')!='Collection' or len(collections)!=1:
+            raise ValueError('Invalid restart VTK collection: '+str(master))
+        attributes=dict(root.attrib)
+        marker=root.get('vtk_time_index')
+        if marker not in (None,'simulation_step'):
+            raise ValueError('Unsupported VTK time index: '+str(marker))
+        absolute=marker=='simulation_step'
+        entries=list(collections[0])
+    elif (output/'mapping.json').is_file():
+        mapping=json.loads((output/'mapping.json').read_text(encoding='utf-8'))
+        marker=mapping.get('vtk_time_index')
+        if marker not in (None,'simulation_step'):
+            raise ValueError('Unsupported saved VTK time index: '+str(marker))
+        absolute=marker=='simulation_step'
+        # Migrated legacy filenames deliberately keep their old frame indices.
+        # A missing collection loses that mapping; do not guess those times from
+        # the new convention recorded by the latest executable.
+        if absolute:
+            for archive_name in ('restart_attempts','restart_archive'):
+                for prior in (output/archive_name).glob('*/vtk/vtkData/graphite.pvd'):
+                    try:old_root=ET.parse(str(prior)).getroot()
+                    except ET.ParseError as error:
+                        raise ValueError('Invalid archived VTK collection: '+str(error))
+                    if old_root.get('vtk_time_index')=='simulation_step':continue
+                    old_config=prior.parents[2]/'effective_config.json'
+                    old_period=None
+                    if old_config.is_file():
+                        old_period=json.loads(old_config.read_text(encoding='utf-8')).get('output',{}).get('vtk_every_steps')
+                    for entry in old_root.findall('./Collection/DataSet'):
+                        name=entry.get('file','')
+                        if old_period!=1 and (folder/name).is_file():
+                            raise ValueError('Missing VTK collection after legacy migration; cannot safely infer retained legacy frame times')
+    period=None if saved_config is None else saved_config.get('output',{}).get('vtk_every_steps')
+    if not absolute and (entries or frames):
+        integer(period,'saved output.vtk_every_steps for legacy VTK continuation',1)
+    retained=[];file_steps={}
+    for entry in entries:
+        filename=entry.get('file','')
+        match=re.fullmatch(r'data/(graphite_iT(\d+)\.vtm)',filename)
+        try:index=int(entry.get('timestep',''))
+        except ValueError:raise ValueError('Invalid VTK timestep in '+str(master))
+        if entry.tag!='DataSet' or match is None or index<0:
+            raise ValueError('Unsupported VTK entry in '+str(master))
+        actual=index if absolute else index*period
+        file_steps[match.group(1)[:-4]]=actual
+        if actual<=step:
+            if not (folder/filename).is_file():
+                raise ValueError('Missing committed VTK frame: '+str(folder/filename))
+            entry.set('timestep',str(actual));entry.tail=None
+            retained.append(entry)
+    # If a master was lost, rebuild its links from existing frame descriptors.
+    if not master.exists():
+        for path in sorted(frames):
+            if path.suffix!='.vtm':continue
+            actual=int(frame_pattern.match(path.name).group(1))*(1 if absolute else period)
+            file_steps[path.stem]=actual
+            if actual<=step:
+                retained.append(ET.Element('DataSet',{'timestep':str(actual),'group':'','part':'',
+                                                       'file':'data/'+path.name}))
+    future=[]
+    for path in frames:
+        match=frame_pattern.match(path.name)
+        stem='graphite_iT'+match.group(1)
+        actual=file_steps.get(stem, int(match.group(1))*(1 if absolute else period))
+        if actual>step:future.append(path)
+    attributes['vtk_time_index']='simulation_step'
+    header='<?xml version="1.0"?>\n<VTKFile'+''.join(' '+key+'='+quoteattr(value)
+                                                   for key,value in attributes.items())+'>\n<Collection>\n'
+    # OpenLB appends by seeking exactly 25 bytes back from this closing footer.
+    text=header+''.join(ET.tostring(entry,encoding='unicode')+'\n' for entry in retained)
+    text+='</Collection>\n</VTKFile>\n'
+    return {'master':master,'text':text,'future':future}
+
+
+def inplace_restart_plan(checkpoint, data, output):
+    if checkpoint_run_directory(checkpoint)!=output:
+        raise ValueError('Existing output can only resume its own checkpoint')
+    _,sizes=history_prefix_sizes(checkpoint,data,required=True)
+    initial=output/'initial_particles.csv'
+    if initial.exists() and digest(initial)!=digest(checkpoint/'initial_particles.csv'):
+        raise ValueError('Initial particle file differs from its checkpoint; refusing to overwrite it')
+    saved=None
+    if (output/'effective_config.json').is_file():
+        saved=json.loads((output/'effective_config.json').read_text(encoding='utf-8'))
+    vtk=vtk_restart_plan(output,data['step'],saved)
+    return {'sizes':sizes,'vtk':vtk}
+
+
+def prepare_inplace_restart(checkpoint, data, output, plan):
+    """Archive overwritten metadata and uncommitted tails before rolling back."""
+    stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    archive=output/'restart_attempts'/('step_%020d_%s'%(data['step'],stamp))
+    archive.mkdir(parents=True)
+    for name in ('manifest.json','effective_config.json','resolved_run.cfg','mapping.json','latest_checkpoint.txt'):
+        if (output/name).is_file():shutil.copy2(str(output/name),str(archive/name))
+    for name in ('status.json','driver_status.json','STOP_REQUEST','particle_solver_summary.txt','latest_checkpoint.txt.tmp'):
+        if (output/name).is_file():shutil.move(str(output/name),str(archive/name))
+    for path in output.glob('particle_solver_rank*'):
+        if path.is_file():shutil.move(str(path),str(archive/path.name))
+    tails={}
+    for name,size in plan['sizes'].items():
+        remaining=(output/name).stat().st_size-size
+        if remaining:
+            with (output/name).open('rb') as src,(archive/(name+'.after_checkpoint')).open('wb') as dst:
+                src.seek(size);shutil.copyfileobj(src,dst,1048576)
+            tails[name]={'offset':size,'bytes':remaining}
+    vtk=plan['vtk']
+    if vtk is not None:
+        if vtk['master'].exists():
+            destination=archive/vtk['master'].relative_to(output)
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(str(vtk['master']),str(destination))
+        for path in vtk['future']:
+            destination=archive/path.relative_to(output);destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.move(str(path),str(destination))
+        vtk['master'].parent.mkdir(parents=True,exist_ok=True)
+        vtk['master'].write_text(vtk['text'],encoding='utf-8')
+    for path in (output/'checkpoints').iterdir():
+        match=re.fullmatch(r'checkpoint_(\d+)(\.partial)?',path.name)
+        if path.is_dir() and match and (int(match.group(1))>data['step'] or match.group(2)):
+            destination=archive/'checkpoints'/path.name;destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.move(str(path),str(destination))
+    copy_history_prefix(checkpoint,data,output)
+    pointer=output/'latest_checkpoint.txt'
+    temporary=pointer.with_name(pointer.name+'.tmp')
+    temporary.write_text('checkpoints/'+checkpoint.name+'\n',encoding='utf-8')
+    os.replace(str(temporary),str(pointer))
+    write_json(archive/'restart.json',{'checkpoint':str(checkpoint),'step':data['step'],
+                                      'csv_tails':tails,'vtk_time_index':'simulation_step'})
+    return archive
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config',type=Path,default=Path(__file__).with_name('config.json'))
+    parser.add_argument('--config',type=Path,help='Case JSON; restart defaults to the saved effective_config.json')
     parser.add_argument('--shear-rate',type=float)
     parser.add_argument('--target-mach',type=float)
     parser.add_argument('--time-step',type=float,help='Explicit fixed LB step in seconds; 0 uses target Mach')
@@ -820,11 +999,20 @@ def main():
     parser.add_argument('--output',type=Path)
     parser.add_argument('--executable',type=Path,default=Path(__file__).with_name('build')/'current'/'graphiteCouette3d')
     parser.add_argument('--generator',type=Path,default=Path(__file__).with_name('generate_particles.py'))
-    parser.add_argument('--ranks',type=int,default=1)
-    parser.add_argument('--restart',type=Path,help='Completed pure_gr checkpoint or previous case directory')
+    parser.add_argument('--ranks',type=int,help='MPI ranks; restart defaults to the checkpoint rank count')
+    parser.add_argument('--restart',type=Path,help='Completed graphite checkpoint or previous rate directory; defaults to continuing there')
     args=parser.parse_args()
     try:
         restart,checkpoint=latest_checkpoint(args.restart) if args.restart else (None,None)
+        source=checkpoint_run_directory(restart) if restart else None
+        if args.config is None:
+            if restart:
+                if source is None or not (source/'effective_config.json').is_file():
+                    raise ValueError('Restart needs --config or the source run effective_config.json')
+                args.config=source/'effective_config.json'
+            else:args.config=Path(__file__).with_name('config.json')
+        if args.ranks is None:args.ranks=checkpoint['ranks'] if checkpoint else 1
+        if args.output is None and source is not None:args.output=source
         rate=args.shear_rate
         if checkpoint:
             if rate is not None and not math.isclose(rate,checkpoint['shear_rate_s_inv'],rel_tol=1e-13):
@@ -863,22 +1051,41 @@ def main():
             raise ValueError('This configuration requires the PETSc contact solver. Rebuild with build_slurry_cpu.sbatch before running.')
         if args.ranks>1 and not build_info['mpi_enabled']:
             raise ValueError('--ranks > 1 requires an MPI-enabled executable; use build_slurry_cpu.sbatch')
+        if restart and cfg['output']['vtk_every_steps'] and build_info.get('vtk_restart_version')!=1:
+            raise ValueError('VTK restart requires an executable with vtk_restart_version=1; rebuild before continuing')
         if not restart and not generator.is_file():
             raise ValueError('Particle generator not found: '+str(generator))
-        if any((output/name).exists() for name in ('manifest.json','history.csv','resolved_run.cfg','initial_particles.csv')):
+        inplace=restart is not None and source==output
+        if not inplace and any((output/name).exists() for name in ('manifest.json','history.csv','resolved_run.cfg','initial_particles.csv')):
             raise ValueError('Output already contains a run; specify a new --output directory')
+        restart_plan=inplace_restart_plan(restart,checkpoint,output) if inplace else None
         mpirun=shutil.which('mpirun') if args.ranks>1 else None
         if args.ranks>1 and not mpirun:
             raise ValueError('mpirun not found')
     except (ValueError,OSError,KeyError,TypeError) as error:
         parser.error(str(error))
     output.mkdir(parents=True,exist_ok=True)
+    # The controller owns a separate batch lock; a rate lock also protects direct use.
+    run_lock=(output/'.run_graphite.lock').open('a+')
+    try:fcntl.flock(run_lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except OSError:
+        run_lock.close();parser.error('This rate directory is already running: '+str(output))
+    if not inplace and any((output/name).exists() for name in ('manifest.json','history.csv','resolved_run.cfg','initial_particles.csv')):
+        parser.error('Output already contains a run; specify a new --output directory')
+    restart_archive=None
+    if inplace:
+        # Recheck under the lock before touching any output.
+        try:
+            restart_plan=inplace_restart_plan(restart,checkpoint,output)
+            restart_archive=prepare_inplace_restart(restart,checkpoint,output,restart_plan)
+        except (ValueError,OSError,KeyError,TypeError) as error:parser.error(str(error))
     effective=output/'effective_config.json'
     write_json(effective,cfg)
     particles=output/'initial_particles.csv'
     if restart:
-        shutil.copy2(str(restart/'initial_particles.csv'),str(particles))
-        copy_history_prefix(restart,checkpoint,output)
+        if not inplace or not particles.exists():
+            shutil.copy2(str(restart/'initial_particles.csv'),str(particles))
+        if not inplace:copy_history_prefix(restart,checkpoint,output)
     else:
         generation=subprocess.run([sys.executable,str(generator),'--config',str(effective),'--output',str(particles)])
         if generation.returncode:return generation.returncode
@@ -896,6 +1103,7 @@ def main():
         'config':cfg,'derived':meta,'ranks':args.ranks,'argv':argv,'executable_build':build_info,
         'restart_directory':str(restart) if restart else None,
         'restart_step':checkpoint['step'] if checkpoint else None,
+        'restart_in_place':inplace,'restart_archive':str(restart_archive) if restart_archive else None,
         'petsc_options':os.environ.get('PETSC_OPTIONS',''),
         'sha256':{'executable':digest(executable),'driver':digest(__file__),
                   'generator':digest(generator) if generator.is_file() else None,'particles':digest(particles)}
@@ -909,7 +1117,10 @@ def main():
         (output/'STOP_REQUEST').touch()
         print('Stop requested; saving a collective pure_gr checkpoint at the next completed LB step.',flush=True)
     for number in (signal.SIGUSR1,signal.SIGTERM,signal.SIGINT):signal.signal(number,request_stop)
-    with (output/'solver.log').open('w',encoding='utf-8') as logfile:
+    with (output/'solver.log').open('a' if inplace else 'w',encoding='utf-8') as logfile:
+        if inplace:
+            logfile.write('\n# Restart from step %d at %s\n'%(checkpoint['step'],datetime.now(timezone.utc).isoformat()))
+            logfile.flush()
         process=subprocess.Popen(argv,cwd=str(output),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
                                  universal_newlines=True,bufsize=1,start_new_session=True)
         for line in process.stdout:

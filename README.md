@@ -113,24 +113,27 @@ W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 �
 사용하며, 이 모드에는 새 부착일·범위·곡률 연결 키를 넣을 수 없습니다.
 이전 결과 재현에는 당시의 JSON을 별도 `--config`로 지정합니다.
 
-### 2.1. CMC 90k: 근접 접착 강화와 배위수 약화 해제
+### 2.1. CMC 90k: 접촉 인력과 접근 장벽의 동시 조정
 
-`slurry/cases/gr_CMC.json`의 16 g/L 기준 접촉 인력을 **0.45 nN에서 4.5 nN으로**
-올리고, 배위수 의존 약화를 끕니다. `gr_CMC_4g_L.json`과 pure Gr의 설정은 그대로입니다.
+`slurry/cases/gr_CMC.json`의 16 g/L 기준 접촉 인력을 **4.5 → 45 nN**, 기준 반발력을
+**20 → 60 pN**으로 올립니다. 배위수 의존 약화는 계속 꺼 둡니다.
+`gr_CMC_4g_L.json`과 pure Gr의 설정은 그대로입니다.
 두 CMC 조건의 흡착량은 2.8984214285714285 g/L이고, 기계적 접촉 간격은 2 nm입니다.
 
 16 g/L의 순포텐셜은 기존 RE², 추가 접착력, 외측/내측 반발의 합을 교체합니다.
 인력은 2–3 nm, 명시적인 반발력은 3–9 nm에서 작용하고, 9 nm 이상에서는 에너지와
-힘이 0입니다. 기준 face-to-face 배치의 접촉 인력은 4.5 nN, 반발력의 최대 기준값은
-20 pN입니다. 다른 배치에는 기존의 실제 접촉 곡률 계수가 적용되므로 모든 접촉의
-인력이 4.5 nN으로 같지는 않습니다. 같은 2 nm face-to-face 배치의 pure Gr 인력은
-약 936.6 nN입니다.
+힘이 0입니다. 기준 face-to-face 배치의 접촉 인력은 45 nN, 반발력의 최대 기준값은
+60 pN입니다. 다른 배치에는 기존의 실제 접촉 곡률 계수가 적용되므로 모든 접촉의
+인력이 45 nN으로 같지는 않습니다. 같은 2 nm face-to-face 배치의 pure Gr 인력은
+약 936.6 nN이며, 이번 CMC 기준값은 그 약 1/21입니다.
 
-이 변경은 장벽을 넘은 뒤 입자 사이의 결합과 하중 전달을 강화하려는 모델 가정입니다.
+인력 증가는 장벽을 넘은 뒤 결합과 하중 전달을 강화하고, 장벽 증가는 10–100/s 안에서
+전단률에 따른 접촉 활성화 차이를 키우려는 조정입니다. 1/s의 저점도 가지는 유지하는
+방향이며, 1–100/s 전체의 고점도 Newtonian 응답을 전제하지 않습니다.
 기존 배위수 항은 새 이웃이 접근할 때 기존 결합까지 약화시켜 추가적인 진입 비용을
 만들었습니다. 이번 설정에서는 그 항을 계산하지 않습니다. 접촉 수나 응집체 크기에
 별도의 상한을 부과하지 않으며, 전단률 의존 계수나 CMC 점성저항도 추가하지 않습니다.
-4.5 nN과 유한 범위 차폐는 측정된 CMC 상수가 아니며, 목표 점도 1 Pa·s를 입력한
+45 nN·60 pN과 유한 범위 차폐는 측정된 CMC 상수가 아니며, 목표 점도 1 Pa·s를 입력한
 보정이나 검증된 벌크 물성 결과가 아닙니다.
 
 `cmc` 안의 기본 설정은 다음과 같습니다.
@@ -140,8 +143,8 @@ W_eff는 미해상 거칠기·표면 상태를 포함하는 **조절 가능한 �
   "enabled": true,
   "start_free_g_L": 1.1015785714285715,
   "full_free_g_L": 13.101578571428572,
-  "contact_force_N": 4.5e-9,
-  "barrier_force_N": 2e-11,
+  "contact_force_N": 4.5e-8,
+  "barrier_force_N": 6e-11,
   "attraction_range_m": 1e-9,
   "repulsion_range_m": 6e-9,
   "coordination": {
@@ -190,7 +193,8 @@ cap을 갱신합니다. 강성이 바뀔 때 기존 탄성 이력을 에너지 �
 
 빌드 기능 표시에 `current_adhesion_rolling_version=1`을 추가했습니다.
 명시적으로 활성화된 rolling 옵션과 버전은 checkpoint 물리 signature에 포함됩니다.
-기존 16 g/L checkpoint는 인력과 힘 법칙이 다르므로 이번 설정으로 이어서 쓰지 않습니다.
+기존 16 g/L checkpoint는 인력·장벽이 다르므로 45 nN·60 pN 설정으로 이어서 쓰지 않습니다.
+기존 계산의 연장은 해당 run에 저장된 당시 JSON을 읽어 동일한 물리값으로 진행합니다.
 새 옵션이 비활성인 기존 설정의 signature는 유지합니다. Particle replay는 버전 9로
 독립 rolling 옵션을 저장하며, 버전 1–8 입력은 각각 당시의 rolling 법칙으로 읽습니다.
 
@@ -204,6 +208,12 @@ sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 10,100
 
 이번 overlay는 기존 `README.md` 하나만 갱신하며, 별도의 CMC README를 만들지 않습니다.
 실행 결과·바이너리·체크포인트도 포함하지 않습니다.
+
+이번 변경은 Python 회귀 검사 125개와 직렬 legacy backend 전체 빌드를 통과했습니다.
+접촉 이력이 있는 2입자 `gr_cmc`에서 연속 16 step과 같은 폴더의 8→저장→16 step을
+비교해 물리 CSV 값과 최종 유체 lattice의 byte 일치를 확인했습니다. 이어서 VTK 출력
+주기를 1→2 step으로 바꿔 두 번 재시작했을 때도 기존 프레임과 시간 목록이 보존되었습니다.
+이 검증은 재시작 기능 검사이며, 45 nN·60 pN 조건의 벌크 점도 검증은 아닙니다.
 
 ### 2.2. 이번 업데이트에서 확인한 legacy 정리 후보
 
@@ -220,35 +230,41 @@ sbatch run_slurry_cpu.sbatch --cases gr_cmc --shear-rates 10,100
 위 두 후보를 제거해도 절약되는 크기는 약 4.3 KiB이며 실행 속도나 메모리는 달라지지 않습니다.
 기존 빌드의 이전 문서 백업·정리 동작은 1절과 같습니다.
 
-## 3. pure_gr 재시작
+## 3. pure_gr / gr_cmc 동일 폴더 재시작
 
 이 기능으로 생성한 **완료 checkpoint가 있는 실행부터** 재시작할 수 있습니다.
 예전 `history.csv`, `particles.csv`, 입자 실패 파일만으로는 전체 유체 상태를 복원할 수 없습니다.
 
 ```bash
-sbatch run_slurry_cpu.sbatch --restart 폴더명
+sbatch run_slurry_cpu.sbatch --restart slurry_25197013_20261007T212259Z
 ```
 
 `runs/폴더명`에서 최신 완료 checkpoint를 선택합니다. `runs/`를 포함한 상대 경로,
 절대 경로, 개별 전단율 폴더, 특정 `checkpoints/checkpoint_...`도 지정할 수 있습니다.
-`--restart`만 쓰면 모델은 자동으로 `pure_gr`이고, 각 checkpoint의 기존 전단율을 유지합니다.
-여러 전단율이 있으면 현재 종료 지점에 도달하지 않은 각 케이스를 이어갑니다.
+모델은 해당 run의 기록과 `input/cases/`에서 자동으로 찾습니다. `gr_cmc` 계산은
+`gr_cmc`로, `pure_gr` 계산은 `pure_gr`로 이어가며, 각 checkpoint의 전단율과 MPI rank 수를
+유지합니다. 여러 전단율이 있으면 현재 종료 지점에 도달하지 않은 각 케이스를 이어갑니다.
 아직 시작하지 않아 checkpoint가 없는 전단율은 별도 신규 실행 대상입니다.
 
-현재 `/home/lyjania/OpenLB/slurry/cases/pure_gr.json`을 읽습니다.
-`--config` 또는 공통 `run.json`에 다른 파일을 지정했다면 그 파일을 사용합니다.
+기본 입력은 **그 run 안의 `input/cases/gr_cmc.json` 또는 `pure_gr.json`**입니다.
+저장소의 `slurry/cases/gr_CMC.json`을 나중에 수정해도 기존 run에 끼워 넣지 않습니다.
+기존 snapshot은 덮어쓰지 않고, 재시작 처리는 업데이트된 driver가 수행합니다.
+별도 입력을 명시해야 하는 이전 직접 실행은 `--cases ... --config ...`로 지정할 수 있으며,
+이때도 checkpoint와 물리 설정이 일치해야 합니다.
 
 | 설정 | 재시작 시 처리 |
 | --- | --- |
 | `flow.end_strain` | 현재 값. 처음부터의 **총 누적 strain** 목표 |
 | `--max-steps` | 처음부터의 **총 LB step 수** 상한 |
-| 출력·checkpoint 간격, 보관 개수 | 현재 값 |
-| solver 반복 상한·수렴 허용오차·진단 옵션 | 현재 값 |
+| 출력·checkpoint 간격, 보관 개수 | run 내부 JSON의 현재 값 |
+| solver 반복 상한·수렴 허용오차·진단 옵션 | run 내부 JSON의 현재 값 |
 | 물리값, 입자 수·크기, 격자, 시간 간격, MPI rank 수 | 저장 당시와 같아야 함 |
 | 초기 배치 seed·minimum gap | 배치를 다시 만들지 않고 저장 상태 사용 |
 
 strain 4.2에서 중단하고 `end_strain=10`이면 4.2부터 10까지 진행합니다.
-완료된 계산을 더 연장하려면 JSON의 종료 strain을 높이거나 다음처럼 지정합니다.
+완료된 계산을 더 연장하려면 **`runs/폴더명/input/cases/gr_cmc.json`의
+`flow.end_strain`을 높인 뒤 같은 `--restart 폴더명` 명령**을 쓰면 됩니다.
+명령행에서만 종료점을 지정하려면 다음처럼 실행합니다.
 
 ```bash
 sbatch run_slurry_cpu.sbatch --restart 폴더명 --end-strain 20
@@ -256,16 +272,24 @@ sbatch run_slurry_cpu.sbatch --restart 폴더명 --end-strain 20
 
 힘 법칙의 종류, W_eff, δ, 곡률 연결 길이, A_H, σ, h₀, 마찰, 접촉 강성 등을
 바꾸면 호환성 검사에서 중단합니다. **이전 α·국소 간격 모델의 checkpoint를 새 표면 응착
-법칙으로 이어 실행할 수 없습니다.** 이번 기본 JSON으로는 새 계산을 시작합니다.
-기존 계산은 당시 JSON을 `--config`로 지정해 이전 법칙으로 이어갈 수 있습니다.
+법칙으로 이어 실행할 수 없습니다.** 이번 45 nN·60 pN 조건은 새 계산으로 시작합니다.
+기존 4.5 nN·20 pN 계산은 저장된 당시 JSON을 자동으로 읽어 계속할 수 있습니다.
 새 법칙에서 생성한 checkpoint는 같은 새 물리 설정으로 재시작합니다.
-부착력 변경 비교도 새 계산으로 시작합니다. 이전 실행에 `--ranks`를 지정했다면
-재시작에서도 동일한 값을 사용합니다.
+부착력 변경 비교도 새 계산으로 시작합니다. MPI rank 수는 checkpoint에서 복원하며,
+`--ranks`를 명시하면 저장값과 일치해야 합니다. 과거 실행에서 명령행으로 지정한
+`--target-mach` / `--time-step`도 보존하여 당시 시간 간격을 유지합니다.
 
-결과는 새 `runs/slurry_...` 폴더에 저장합니다. 원래 결과를 보존하고 `history.csv`와
-`particles.csv`는 저장 지점까지 복사한 뒤 중복 행 없이 이어 씁니다.
-저장 지점 이후 원래 실행이 기록한 행은 복사하지 않습니다. 이전 VTK는 원래 폴더에 남습니다.
-CSV 없이 checkpoint만 옮긴 경우 새 CSV는 저장 시각부터 시작합니다.
+결과는 **원래 run과 원래 전단율 하위 폴더에** 이어 씁니다. `--output`으로 다른 폴더를
+지정할 필요가 없습니다. `history.csv`와 `particles.csv`는 checkpoint에 기록된 저장 경계로
+맞춘 뒤 중복 행 없이 이어 씁니다. checkpoint 이후의 미저장 계산 구간은 복원 상태에
+포함되지 않으므로 현재 결과에서 제외하고 이전 실행 자료로 보관합니다.
+기존 solver 로그는 유지합니다. batch 실행 기록은 run 루트의 `restart_attempts/`,
+개별 계산의 이전 실행 정보와 되돌린 출력은 해당 계산 폴더의 `restart_attempts/`에 보관합니다.
+종료 요청 파일은 재시작 전에 정리합니다. ParaView 시간 목록도 저장 지점까지 보존하여
+이어 쓰며, 출력 주기를 바꿔도 기존 프레임을 덮어쓰지 않습니다.
+
+`gr_baseline`의 명시적 재시작은 기존 driver의 별도 동작을 유지합니다. 위 동일 폴더
+방식은 RE² `pure_gr`와 `gr_cmc`에 적용됩니다.
 
 ### 저장 주기와 파일
 
