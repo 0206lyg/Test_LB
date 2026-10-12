@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "description": "Graphite-water shear: curvature-corrected near-field dispersion plus conservative finite-range surface adhesion (effective work 21.9 mJ/m2, opening range 0.67 nm), geometric rough contact at 2 nm, sliding stiffness 80 N/m and adhesive rolling resistance. Random initial placement; attraction and shear start together. Target Mach 0.02, end strain 10.",
+  "description": "Graphite-water shear: curvature-corrected near-field dispersion plus conservative finite-range surface adhesion (effective work 21.9 mJ/m2, opening range 0.67 nm), geometric rough contact at 2 nm, sliding stiffness 80 N/m and rolling resistance based on current adhesive loading. Random initial placement; attraction and shear start together. Target Mach 0.02, end strain 10.",
   "fluid": {
     "density_kg_m3": 997.0,
     "dynamic_viscosity_Pa_s": 0.00089,
@@ -61,6 +61,7 @@
     "sliding_friction": 0.1,
     "tangential_stiffness_N_m": 80.0,
     "rolling_length_m": 1e-07,
-    "rolling_yield_angle_rad": 0.01
+    "rolling_yield_angle_rad": 0.01,
+    "current_adhesion_rolling": true
   }
 }

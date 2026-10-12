@@ -51,6 +51,7 @@ SURFACE_ADHESION_VERSION = 1
 FREE_CMC_REPULSION_VERSION = 1
 FREE_CMC_INNER_REPULSION_VERSION = 1
 CMC_NET_POTENTIAL_VERSION = 1
+CMC_SHEAR_ADHESION_VERSION = 1
 CMC_COORDINATION_VERSION = 1
 CURRENT_ADHESION_ROLLING_VERSION = 1
 MOLAR_GAS_CONSTANT = 8.31446261815324
@@ -105,6 +106,12 @@ CMC_NET_POTENTIAL_DEFAULTS = {
 CMC_COORDINATION_DEFAULTS = {
     'enabled': False, 'other_neighbors_start': 1.0,
     'other_neighbors_end': 2.0, 'minimum_factor': 0.1}
+CMC_SHEAR_ADHESION_DEFAULTS = {
+    'enabled': False,
+    'start_free_g_L': 1.1015785714285715,
+    'full_free_g_L': 13.101578571428572,
+    'full_shear_rate_s_inv': 100.0,
+    'attraction_range_m': 1e-9}
 
 
 def resolve_cmc_coordination(net_params, blend):
@@ -143,7 +150,7 @@ def resolve_cmc_coordination(net_params, blend):
     return params, state
 
 
-def resolve_net_cmc(cmc, cfg):
+def resolve_net_cmc(cmc, cfg, *, full_replacement=False):
     """Blend the full legacy potential at this c_f with a compact net law.
 
     This phenomenological replacement screens the complete legacy potential,
@@ -163,14 +170,17 @@ def resolve_net_cmc(cmc, cfg):
     if not isinstance(params['enabled'], bool):
         raise ValueError('cmc.net_potential.enabled must be a JSON boolean')
     positive(params['start_free_g_L'], 'cmc.net_potential.start_free_g_L', zero=True)
-    for key in ('full_free_g_L', 'contact_force_N', 'barrier_force_N',
-                'attraction_range_m', 'repulsion_range_m'):
+    for key in ('full_free_g_L', 'attraction_range_m', 'repulsion_range_m'):
         positive(params[key], 'cmc.net_potential.'+key)
+    for key in ('contact_force_N', 'barrier_force_N'):
+        positive(params[key], 'cmc.net_potential.'+key, zero=full_replacement)
     if params['full_free_g_L'] <= params['start_free_g_L']:
         raise ValueError('cmc.net_potential.full_free_g_L must exceed start_free_g_L')
     span = params['full_free_g_L'] - params['start_free_g_L']
     blend = (min(max((cmc['free_g_L']-params['start_free_g_L'])/span, 0.0), 1.0)
              if params['enabled'] else 0.0)
+    if full_replacement:
+        blend = 1.0
     params['coordination'], coordination = resolve_cmc_coordination(params, blend)
     a = cfg['particles']['diameter_m']/2
     c = cfg['particles']['thickness_m']/2
@@ -191,7 +201,12 @@ def resolve_net_cmc(cmc, cfg):
         for key, value in (('reference_length_m', reference),
                            ('reference_attraction_energy_J', attraction_energy),
                            ('reference_barrier_energy_J', barrier_energy)):
-            positive(value, 'derived.cmc.net_potential.'+key)
+            positive(value, 'derived.cmc.net_potential.'+key,
+                     zero=full_replacement and key != 'reference_length_m')
+        if params['contact_force_N'] > 0:
+            positive(attraction_energy, 'derived.cmc.net_potential.reference_attraction_energy_J')
+        if params['barrier_force_N'] > 0:
+            positive(barrier_energy, 'derived.cmc.net_potential.reference_barrier_energy_J')
         for value in (1/params['attraction_range_m'], 1/params['repulsion_range_m'],
                       1/reference, attraction_energy/reference, barrier_energy/reference):
             if not math.isfinite(value):
@@ -207,6 +222,84 @@ def resolve_net_cmc(cmc, cfg):
                  legacy_potential_weight=1-blend,
                  re2_tail_weight=1-blend)
     return params, state
+
+
+def resolve_shear_adhesion(cmc, cfg, effective_work):
+    """Reduce adhesive loading using free CMC and prescribed steady shear.
+
+    p is the concentration activation, R the retained adhesive strength. Neither
+    is an adsorbed coverage or a stochastic contact lifetime. At every p the
+    compact law fully replaces legacy interactions, so p=0 cannot revive RE2.
+    """
+    supplied = cmc.get('shear_adhesion', {})
+    if not isinstance(supplied, dict):
+        raise ValueError('cmc.shear_adhesion must be a JSON object')
+    unknown = sorted(str(key) for key in supplied if key not in CMC_SHEAR_ADHESION_DEFAULTS
+                     and not (isinstance(key, str) and key.startswith('_')))
+    if unknown:
+        raise ValueError('Unknown cmc.shear_adhesion fields: '+', '.join(unknown))
+    params = dict(CMC_SHEAR_ADHESION_DEFAULTS)
+    params.update(supplied)
+    if not isinstance(params['enabled'], bool):
+        raise ValueError('cmc.shear_adhesion.enabled must be a JSON boolean')
+    positive(params['start_free_g_L'], 'cmc.shear_adhesion.start_free_g_L', zero=True)
+    for key in ('full_free_g_L', 'full_shear_rate_s_inv', 'attraction_range_m'):
+        positive(params[key], 'cmc.shear_adhesion.'+key)
+    span = params['full_free_g_L']-params['start_free_g_L']
+    if span <= 0 or not math.isfinite(1/span):
+        raise ValueError('cmc.shear_adhesion requires a representable full_free_g_L > start_free_g_L')
+    state = {key: params[key] for key in CMC_SHEAR_ADHESION_DEFAULTS}
+    state.update(active=params['enabled'], model_version=CMC_SHEAR_ADHESION_VERSION)
+    if not params['enabled']:
+        return params, state, None, None
+    if not cfg['interaction']['surface_adhesion'] or not cfg['rough_contact']['enabled']:
+        raise ValueError('Shear adhesion requires interaction.surface_adhesion=true and rough_contact.enabled=true')
+    if not cfg['rough_contact'].get('current_adhesion_rolling', False):
+        raise ValueError('Shear adhesion requires rough_contact.current_adhesion_rolling=true')
+    for name in ('free_repulsion', 'net_potential'):
+        supplied_legacy = cmc.get(name, {})
+        if not isinstance(supplied_legacy, dict):
+            raise ValueError('cmc.'+name+' must be a JSON object')
+        if supplied_legacy.get('enabled', False):
+            raise ValueError('cmc.shear_adhesion cannot be combined with enabled cmc.'+name)
+    rate = cfg['flow']['shear_rate_s_inv']
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate):
+        raise ValueError('flow.shear_rate_s_inv must be finite')
+    activation = min(max((cmc['free_g_L']-params['start_free_g_L'])/span, 0.0), 1.0)
+    shear_fraction = min(abs(rate)/params['full_shear_rate_s_inv'], 1.0)
+    # The sum form avoids cancellation near R=0 while implementing 1-p*(1-s).
+    retention = (1-activation)+activation*shear_fraction
+    a, c = cfg['particles']['diameter_m']/2, cfg['particles']['thickness_m']/2
+    reference = a*(a/c) if c > 0 else math.inf
+    positive(reference, 'derived.cmc.shear_adhesion.reference_length_m')
+    baseline_force = math.pi*reference*effective_work
+    positive(baseline_force, 'derived.cmc.shear_adhesion.baseline_contact_force_N')
+    effective_force = baseline_force*retention
+    positive(effective_force, 'derived.cmc.shear_adhesion.effective_contact_force_N', zero=True)
+    if retention > 0:
+        positive(effective_force, 'derived.cmc.shear_adhesion.effective_contact_force_N')
+    # Keep the existing compact cubic force/torque evaluator. Its unused outer
+    # length remains positive for checkpoint/kernel compatibility; FB is zero.
+    kernel = dict(cmc, net_potential={
+        'enabled': True, 'start_free_g_L': params['start_free_g_L'],
+        'full_free_g_L': params['full_free_g_L'],
+        'contact_force_N': effective_force, 'barrier_force_N': 0.0,
+        'attraction_range_m': params['attraction_range_m'],
+        'repulsion_range_m': CMC_NET_POTENTIAL_DEFAULTS['repulsion_range_m']})
+    _, net = resolve_net_cmc(kernel, cfg, full_replacement=True)
+    _, free = resolve_free_cmc(dict(cmc, free_repulsion={'enabled': False}), cfg)
+    force_cutoff = cfg['rough_contact']['roughness_gap_m']+params['attraction_range_m']
+    net.update(model='compact shear-regulated adhesion; no repulsive barrier or RE2 tail',
+               interpolation='full replacement at every free concentration; strength multiplied by R',
+               evaluator_cutoff_gap_m=net['cutoff_gap_m'], cutoff_gap_m=force_cutoff)
+    state.update(p=activation, retention=retention, shear_fraction=shear_fraction,
+                 imposed_shear_rate_s_inv=rate, reference_length_m=reference,
+                 baseline_contact_force_N=baseline_force, effective_contact_force_N=effective_force,
+                 force_cutoff_gap_m=force_cutoff,
+                 model='p=clamp((free-start)/(full-start),0,1); R=1-p*(1-min(abs(shear)/full_shear,1))',
+                 force_basis='F_A0=pi*(a*a/c)*W_eff; forces and torques retain local-curvature dependence',
+                 interpretation='Steady-shear constitutive strength, not a bond lifetime or adsorption change')
+    return params, state, net, free
 
 
 def resolve_free_cmc(cmc, cfg):
@@ -308,7 +401,7 @@ def resolve_cmc(cfg):
                          '; contact remains at rough_contact.roughness_gap_m. '
                          'Use cmc.net_potential for the explicit total-potential model.')
     unknown = sorted(str(key) for key in supplied if key not in CMC_DEFAULTS
-                     and key not in ('free_repulsion', 'net_potential')
+                     and key not in ('free_repulsion', 'net_potential', 'shear_adhesion')
                      and not (isinstance(key, str) and key.startswith('_')))
     if unknown:
         raise ValueError('Unknown cmc fields: '+', '.join(unknown))
@@ -319,8 +412,6 @@ def resolve_cmc(cfg):
     positive(cmc['adsorbed_saturation_g_L'], 'cmc.adsorbed_saturation_g_L')
     if cmc['q_sat'] > 1:
         raise ValueError('cmc.q_sat must be between zero and one')
-    cmc['free_repulsion'], free_metadata = resolve_free_cmc(cmc, cfg)
-    cmc['net_potential'], net_metadata = resolve_net_cmc(cmc, cfg)
     adsorbed = min(cmc['adsorbed_g_L'], cmc['adsorbed_saturation_g_L'])
     theta = adsorbed / cmc['adsorbed_saturation_g_L']
     # Preserve the exact endpoint values, including the pure-Gr fingerprint.
@@ -338,6 +429,12 @@ def resolve_cmc(cfg):
         effective_work = (bare_work if q == 1 else
                           background_work + q*(bare_work-background_work))
         positive(effective_work, 'effective CMC adhesion_work_J_m2')
+    shear_params, shear_metadata, net_metadata, free_metadata = resolve_shear_adhesion(cmc, cfg, effective_work)
+    if 'shear_adhesion' in cmc:
+        cmc['shear_adhesion'] = shear_params
+    if not shear_metadata['active']:
+        cmc['free_repulsion'], free_metadata = resolve_free_cmc(cmc, cfg)
+        cmc['net_potential'], net_metadata = resolve_net_cmc(cmc, cfg)
     metadata = {key: cmc[key] for key in CMC_DEFAULTS}
     metadata.update(
         effective_adsorbed_g_L=adsorbed,
@@ -346,6 +443,7 @@ def resolve_cmc(cfg):
         bare_adhesion_work_J_m2=bare_work,
         background_work_J_m2=background_work,
         effective_adhesion_work_J_m2=effective_work,
+        shear_adhesion=shear_metadata,
         free_repulsion=free_metadata,
         net_potential=net_metadata,
         free_cmc_physics_enabled=free_metadata['active'] or net_metadata['active'])
@@ -655,6 +753,10 @@ def require_local_adhesion_build(cfg, build_info):
                          'Rebuild with build_slurry_cpu.sbatch before running.')
     _, cmc_metadata = resolve_cmc(cfg)
     if cmc_metadata is not None:
+        if (cmc_metadata['shear_adhesion']['active']
+                and build_info.get('cmc_shear_adhesion_version') != CMC_SHEAR_ADHESION_VERSION):
+            raise ValueError('This configuration requires barrier-free shear-regulated CMC adhesion. '
+                             'Rebuild with build_slurry_cpu.sbatch before running.')
         free = cmc_metadata['free_repulsion']
         if free['outer_active'] and build_info.get('free_cmc_repulsion_version') != FREE_CMC_REPULSION_VERSION:
             raise ValueError('This configuration requires the outer free-CMC repulsion potential. '

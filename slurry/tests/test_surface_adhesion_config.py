@@ -81,10 +81,11 @@ class SurfaceAdhesionInputTests(unittest.TestCase):
 
     def test_build_requires_actual_surface_capability(self):
         cfg, _ = RUNNER.resolve(case())
+        other_capabilities = {'pass_max_version': 1, 'current_adhesion_rolling_version': 1}
         for info in ({}, {'local_gap_adhesion': True}, {'surface_adhesion_version': 2}):
             with self.subTest(info=info), self.assertRaisesRegex(ValueError, 'Rebuild'):
-                RUNNER.require_local_adhesion_build(cfg, info)
-        RUNNER.require_local_adhesion_build(cfg, {'surface_adhesion_version': 1, 'pass_max_version': 1})
+                RUNNER.require_local_adhesion_build(cfg, dict(other_capabilities, **info))
+        RUNNER.require_local_adhesion_build(cfg, dict(other_capabilities, surface_adhesion_version=1))
 
 
 @unittest.skipUnless(shutil.which('g++'), 'C++ integration requires g++')

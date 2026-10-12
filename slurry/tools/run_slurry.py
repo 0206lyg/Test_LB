@@ -123,7 +123,7 @@ def restart_numerics(args, current, job):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--settings', type=Path, default=BASE / 'slurry/cases/run.json')
-    p.add_argument('--cases', help='pure_cmc,pure_gr,gr_cmc,gr_baseline')
+    p.add_argument('--cases', help='pure_cmc,pure_gr,gr_cmc')
     p.add_argument('--shear-rates', help='Comma-separated s^-1; omitted means each existing case keeps its defaults')
     p.add_argument('--concentrations')
     p.add_argument('--resolution', type=int)
@@ -147,11 +147,11 @@ def main():
     if a.restart:
         a.restart=restart_folder(a.restart)
         restart_root=restart_context(a.restart)
-        if not a.dry_run and a.cases!='gr_baseline':run_lock=acquire_run_lock(restart_root)
+        if not a.dry_run:run_lock=acquire_run_lock(restart_root)
         saved_settings=saved_json(restart_root/'input/run_settings.json')
         saved_manifest=saved_json(restart_root/'batch_manifest.json')
         if saved_settings:settings=saved_settings
-    if not a.restart or (a.cases=='gr_baseline' and not saved_settings):
+    if not a.restart:
         settings=json.loads(a.settings.expanduser().resolve().read_text(encoding='utf-8'))
     cases = [x.strip() for x in a.cases.split(',')] if a.cases else (inferred_restart_cases(a.restart,restart_root,saved_manifest) if a.restart else settings['cases'])
     registry = {e['id']: e for e in json.loads((BASE / 'slurry/engines.json').read_text())}
@@ -164,8 +164,8 @@ def main():
             p.error('Selected restart directory belongs to '+selected_engine+'; requested cases do not match')
     graphites = [e for e in cases if e != 'pure_cmc']
     if a.config and len(graphites) != 1: p.error('--config requires exactly one graphite case')
-    if a.restart and (not all(engine in RE2_ENGINES for engine in cases) and cases!=['gr_baseline'] or a.shear_rates or a.smoke):
-        p.error('--restart requires saved pure_gr/gr_cmc cases or one explicit gr_baseline case; it retains saved shear rates and cannot use --smoke')
+    if a.restart and (not all(engine in RE2_ENGINES for engine in cases) or a.shear_rates or a.smoke):
+        p.error('--restart requires saved pure_gr/gr_cmc cases; it retains saved shear rates and cannot use --smoke')
     in_place=bool(a.restart and all(engine in RE2_ENGINES for engine in cases))
     restart_runs={};restart_skipped=[];restart_unstarted=[];restart_driver=None
     if in_place:
@@ -299,7 +299,7 @@ def main():
                 args = prefix + ['--config', str(config), '--output', str(result_dir)]
                 if rate is not None: args += ['--shear-rate', str(rate)]
                 limit = a.max_steps if a.max_steps is not None else (20 if a.smoke else None)
-                if limit is not None: args += ['--max-steps' if engine in RE2_ENGINES else '--benchmark-steps', str(limit)]
+                if limit is not None: args += ['--max-steps', str(limit)]
                 if engine in RE2_ENGINES:
                     for key in ('target_mach', 'time_step', 'end_strain'):
                         value=selected['numerics'][key] if in_place and key!='end_strain' else getattr(a,key)
@@ -326,7 +326,7 @@ def main():
     write_json(output / 'batch_status.json', state)
     child, current, stop = None, None, []
     def forward(number, frame):
-        if number == signal.SIGUSR1 and current not in RE2_ENGINES + ('gr_baseline',):
+        if number == signal.SIGUSR1 and current not in RE2_ENGINES:
             print('Slurm time notice received; selected case retains its original stop behavior.', flush=True)
             return
         stop.append(number)

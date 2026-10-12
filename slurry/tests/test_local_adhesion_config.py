@@ -19,7 +19,9 @@ SPEC.loader.exec_module(RUNNER)
 
 def case():
     config = json.loads((ROOT / 'slurry/cases/pure_gr.json').read_text())
-    # Preserve an explicit legacy fixture after pure_gr adopts surface adhesion.
+    # Preserve the historical contact and interaction laws independently of
+    # the shipped pure-Gr surface-adhesion/current-rolling defaults.
+    config['rough_contact']['current_adhesion_rolling'] = False
     for key in RUNNER.SURFACE_ADHESION_DEFAULTS:
         config['interaction'].pop(key, None)
     config['interaction'].pop('surface_adhesion', None)

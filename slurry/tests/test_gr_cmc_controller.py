@@ -117,10 +117,15 @@ class GrCmcControllerTests(unittest.TestCase):
         self.assertEqual(args[args.index('--max-steps') + 1], '20')
         self.assertEqual(float(args[args.index('--shear-rate') + 1]), 100)
 
-    def test_baseline_still_rejects_re2_numerical_options(self):
+    def test_retired_baseline_case_is_rejected(self):
+        result = self.run_controller('--cases', 'gr_baseline')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Unknown case: gr_baseline', result.stderr)
+
+    def test_pure_cmc_still_rejects_re2_numerical_options(self):
         for option, value in (('--target-mach', '0.04'), ('--time-step', '0'), ('--end-strain', '20')):
             with self.subTest(option=option):
-                result = self.run_controller('--cases', 'gr_baseline', option, value)
+                result = self.run_controller('--cases', 'pure_cmc', option, value)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('require pure_gr or gr_cmc', result.stderr)
 
@@ -161,6 +166,7 @@ class GrCmcControllerTests(unittest.TestCase):
                       'pass_max_version': 1, 'cmc_contact_version': 1,
                       'free_cmc_repulsion_version': 1, 'free_cmc_inner_repulsion_version': 1,
                       'cmc_net_potential_version': 1,
+                      'cmc_shear_adhesion_version': 1,
                       'cmc_coordination_version': 1,
                       'current_adhesion_rolling_version': 1,
                       'pure_gr_checkpoint_version': 1, 'particle_solver': 'petsc',
@@ -206,6 +212,8 @@ class GrCmcControllerTests(unittest.TestCase):
         expected = DRIVER.solver_values(resolved, run, run / 'initial_particles.csv', 2)
         self.assertAlmostEqual(float(values['adhesion_work']), expected['adhesion_work'])
         self.assertLess(float(values['adhesion_work']), config['interaction']['adhesion_work_J_m2'])
+        self.assertAlmostEqual(float(values['cmc_net_contact_force'])/expected['cmc_net_contact_force'], 1.)
+        self.assertEqual(float(values['cmc_net_barrier_force']), 0.)
         self.assertEqual(values['max_steps'], '2')
         manifest = json.loads((run / 'manifest.json').read_text())
         self.assertEqual(manifest['config'], resolved)
@@ -216,7 +224,7 @@ class GrCmcControllerTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('c++'), 'C++ compiler unavailable')
     def test_actual_restart_uses_saved_cmc_in_place_without_replacing_snapshot(self):
         config=json.loads((ROOT/'slurry/cases/gr_CMC.json').read_text())
-        config['cmc']['net_potential']['contact_force_N']*=.37
+        config['cmc']['q_sat']*=.37
         output=self.root/'saved_run';run=output/'gr_cmc/g007_10'
         saved=output/'input/cases/gr_cmc.json';saved.parent.mkdir(parents=True)
         COMMON.write_json(saved,config)
@@ -239,6 +247,7 @@ class GrCmcControllerTests(unittest.TestCase):
               'surface_adhesion_version':1,'pass_max_version':1,'cmc_contact_version':1,
               'free_cmc_repulsion_version':1,'free_cmc_inner_repulsion_version':1,
               'cmc_net_potential_version':1,'cmc_coordination_version':1,
+              'cmc_shear_adhesion_version':1,
               'current_adhesion_rolling_version':1,'pure_gr_checkpoint_version':1,
               'particle_solver':'petsc','engines':['pure_gr','gr_cmc']}
         executable.write_text(
@@ -274,8 +283,11 @@ class GrCmcControllerTests(unittest.TestCase):
         observed=json.loads((run/'observed_restart.json').read_text())
         self.assertEqual(observed['cwd'],str(run))
         self.assertEqual(observed['engine'],'gr_cmc')
-        self.assertEqual(float(observed['config']['cmc_net_contact_force']),
-                         config['cmc']['net_potential']['contact_force_N'])
+        expected_force=DRIVER.resolve(config,10)[1]['cmc']['shear_adhesion']['effective_contact_force_N']
+        default_config=json.loads((ROOT/'slurry/cases/gr_CMC.json').read_text())
+        default_force=DRIVER.resolve(default_config,10)[1]['cmc']['shear_adhesion']['effective_contact_force_N']
+        self.assertAlmostEqual(float(observed['config']['cmc_net_contact_force'])/expected_force,1.)
+        self.assertNotAlmostEqual(expected_force/default_force,1.)
         self.assertEqual(float(observed['config']['end_strain']),20.)
         self.assertEqual(observed['history_before'],'header\n8\n')
         for name in ('history.csv','particles.csv'):

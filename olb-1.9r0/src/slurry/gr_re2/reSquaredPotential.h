@@ -82,12 +82,12 @@ inline void validatePairParameters(const PairParameters&p){
      ||!std::isfinite(p.cmcCoordinationFloor)||p.cmcCoordinationFloor<0.||p.cmcCoordinationFloor>1.)
     throw std::domain_error("CMC coordination requires finite 0<=start<end and floor in [0,1]");
   if(!std::isfinite(p.cmcNetBlend)||p.cmcNetBlend<0.||p.cmcNetBlend>1.
-     ||!std::isfinite(p.cmcNetContactForce)||!(p.cmcNetContactForce>0.)
-     ||!std::isfinite(p.cmcNetBarrierForce)||!(p.cmcNetBarrierForce>0.)
+     ||!std::isfinite(p.cmcNetContactForce)||p.cmcNetContactForce<0.
+     ||!std::isfinite(p.cmcNetBarrierForce)||p.cmcNetBarrierForce<0.
      ||!std::isfinite(p.cmcNetAttractionRange)||!(p.cmcNetAttractionRange>0.)
      ||!std::isfinite(p.cmcNetRepulsionRange)||!(p.cmcNetRepulsionRange>0.)
      ||!std::isfinite(p.cmcNetReferenceLength)||!(p.cmcNetReferenceLength>0.))
-    throw std::domain_error("CMC net potential requires blend in [0,1] and finite forces/ranges/reference length>0");
+    throw std::domain_error("CMC net potential requires blend in [0,1], finite nonnegative forces, and positive ranges/reference length");
   if(p.cmcNetBlend>0.){
     const double saddle=p.roughnessGap+p.cmcNetAttractionRange;
     const double cutoff=saddle+p.cmcNetRepulsionRange;
@@ -103,8 +103,12 @@ inline void validatePairParameters(const PairParameters&p){
        ||!std::isfinite(1./p.cmcNetRepulsionRange)
        ||!std::isfinite(1./p.cmcNetReferenceLength)
        ||!std::isfinite(attractionEnergy)||!std::isfinite(barrierEnergy)
-       ||!(attractionEnergy>0.)||!(barrierEnergy>0.)
-       ||!std::isfinite(outerCoefficient)||!(outerCoefficient>0.)
+       // An explicitly absent force has zero work. A positive force must
+       // still produce a representable positive energy, as before.
+       ||(p.cmcNetContactForce>0.&&!(attractionEnergy>0.))
+       ||(p.cmcNetBarrierForce>0.&&!(barrierEnergy>0.))
+       ||!std::isfinite(outerCoefficient)
+       ||(p.cmcNetBarrierForce>0.&&!(outerCoefficient>0.))
        ||!std::isfinite(attractionEnergy/p.cmcNetReferenceLength)
        ||!std::isfinite(barrierEnergy/p.cmcNetReferenceLength))
       throw std::domain_error("Active CMC net potential requires unshifted surface adhesion, no legacy local-gap/screening, cutoff<=far switch, and representable scales");

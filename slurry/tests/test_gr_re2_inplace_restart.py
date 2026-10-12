@@ -19,6 +19,7 @@ BUILD={'mpi_enabled':False,'rough_contact':True,'particle_solver':'petsc',
        'pass_max_version':1,'surface_adhesion_version':1,'pure_gr_checkpoint_version':1,
        'free_cmc_repulsion_version':1,'free_cmc_inner_repulsion_version':1,
        'cmc_net_potential_version':1,'cmc_coordination_version':1,
+       'cmc_shear_adhesion_version':1,
        'current_adhesion_rolling_version':1,'vtk_restart_version':1}
 
 
@@ -191,7 +192,7 @@ print('continued through step '+str(stop))
         self.assertEqual(len(list((self.run/'restart_attempts').iterdir())),2)
 
     def test_preflight_rejects_changed_physics_before_touching_outputs(self):
-        changed=copy.deepcopy(self.cfg);changed['cmc']['net_potential']['contact_force_N']*=2
+        changed=copy.deepcopy(self.cfg);changed['cmc']['q_sat']*=2
         path=self.root/'changed.json';RUNNER.write_json(path,changed)
         result=self.launch('--config',str(path))
         self.assertNotEqual(result.returncode,0)
@@ -263,7 +264,7 @@ print('continued through step '+str(stop))
         result=self.launch('--dry-run')
         self.assertEqual(result.returncode,0,result.stderr)
         value=json.loads(result.stdout)
-        self.assertEqual(value['config']['cmc']['net_potential']['contact_force_N'],self.cfg['cmc']['net_potential']['contact_force_N'])
+        self.assertEqual(value['config']['cmc']['q_sat'],self.cfg['cmc']['q_sat'])
         after={str(path.relative_to(self.run)):path.read_bytes() for path in self.run.rglob('*') if path.is_file()}
         self.assertEqual(after,before)
 

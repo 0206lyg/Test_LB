@@ -199,7 +199,7 @@ class RestartTests(unittest.TestCase):
 
     def test_restart_infers_saved_cmc_and_preserves_original_rate_directories(self):
         config=case('gr_cmc')
-        config['cmc']['net_potential']['contact_force_N']*=.37
+        config['cmc']['q_sat']*=.37
         saved=self.snapshot(config)
         fixture(self.root/'gr_cmc/g009_10',8,10,config)
         fixture(self.root/'gr_cmc/g003_100',16,100,config)
@@ -222,8 +222,8 @@ class RestartTests(unittest.TestCase):
             resolved=subprocess.run(argv+['--dry-run'],cwd=str(ROOT),env=self.environment,
                                     stdout=subprocess.PIPE,stderr=subprocess.PIPE,universal_newlines=True)
             self.assertEqual(resolved.returncode,0,resolved.stderr)
-            actual=json.loads(resolved.stdout)['config']['cmc']['net_potential']['contact_force_N']
-            self.assertEqual(actual,config['cmc']['net_potential']['contact_force_N'])
+            actual=json.loads(resolved.stdout)['config']['cmc']['q_sat']
+            self.assertEqual(actual,config['cmc']['q_sat'])
         self.assertEqual(observed,{'g009_10','g003_100'})
         self.assertEqual(self.contents(),before,'dry-run must not touch saved output or inputs')
 
@@ -234,7 +234,7 @@ class RestartTests(unittest.TestCase):
         fixture(directory,step,10,config)
         # The old effective configuration deliberately differs. Restart should
         # read the input snapshot that the user edited to extend the run.
-        stale=copy.deepcopy(cfg);stale['cmc']['net_potential']['contact_force_N']*=2
+        stale=copy.deepcopy(cfg);stale['cmc']['q_sat']*=2
         RUNNER.write_json(directory/'effective_config.json',stale)
         config['flow']['end_strain']=1
         saved=self.snapshot(config)
@@ -257,7 +257,7 @@ class RestartTests(unittest.TestCase):
         self.assertIn('differ',invalid.stderr)
 
     def test_missing_snapshot_uses_rate_effective_config_not_repository_default(self):
-        config=case('gr_cmc');config['cmc']['net_potential']['contact_force_N']*=.4
+        config=case('gr_cmc');config['cmc']['q_sat']*=.4
         directory=self.root/'gr_cmc/g007_100';fixture(directory,8,100,config)
         saved=directory/'effective_config.json';RUNNER.write_json(saved,RUNNER.resolve(config,100)[0])
         result=self.controller('--restart',str(self.root),'--max-steps','16','--dry-run')
@@ -273,7 +273,7 @@ class RestartTests(unittest.TestCase):
     def test_explicit_changed_cmc_physics_rejected_without_modifying_run(self):
         config=case('gr_cmc');self.snapshot(config)
         fixture(self.root/'gr_cmc/g000_100',8,100,config)
-        changed=copy.deepcopy(config);changed['cmc']['net_potential']['contact_force_N']*=2
+        changed=copy.deepcopy(config);changed['cmc']['q_sat']*=2
         override=self.root/'changed.json';RUNNER.write_json(override,changed)
         before=self.contents()
         result=self.controller('--restart',str(self.root),'--config',str(override),

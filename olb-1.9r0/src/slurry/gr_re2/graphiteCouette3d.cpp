@@ -480,9 +480,9 @@ void simulate(const Config& c){
 int runCase(int argc,char** argv){
   if(argc==2&&std::string(argv[1])=="--build-info"){
 #ifdef PARALLEL_MODE_MPI
-    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"vtk_restart_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":true,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_shear_adhesion_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"vtk_restart_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #else
-    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"vtk_restart_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
+    std::cout<<"{\"mpi_enabled\":false,\"rough_contact\":true,\"local_gap_adhesion\":true,\"surface_adhesion_version\":1,\"free_cmc_repulsion_version\":1,\"free_cmc_inner_repulsion_version\":1,\"cmc_net_potential_version\":1,\"cmc_shear_adhesion_version\":1,\"cmc_coordination_version\":1,\"current_adhesion_rolling_version\":1,\"cmc_contact_version\":1,\"pass_max_version\":1,\"pure_gr_checkpoint_version\":1,\"vtk_restart_version\":1,\"revision\":\"surface-adhesion-1\"}\n";
 #endif
     return 0;
   }

@@ -25,6 +25,8 @@ INNER = {'inner_work_per_g_L_J_m2': .000543218,
 
 def case(cmc=None):
     value = json.loads((ROOT/'slurry/cases/pure_gr.json').read_text())
+    # Retain the historical contact mode for legacy repulsion/checkpoint tests.
+    value['rough_contact']['current_adhesion_rolling'] = False
     if cmc is not None:
         value['cmc'] = cmc
     return value

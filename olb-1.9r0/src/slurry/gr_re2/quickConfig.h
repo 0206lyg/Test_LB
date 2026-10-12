@@ -168,10 +168,10 @@ inline Config parseConfig(int argc,char**argv) {
   }
   const double contactGap=c.cmc_contact_gap>0.?c.cmc_contact_gap:c.roughness_gap;
   if(!(c.cmc_net_blend>=0.&&c.cmc_net_blend<=1.
-       &&c.cmc_net_contact_force>0.&&c.cmc_net_barrier_force>0.
+       &&c.cmc_net_contact_force>=0.&&c.cmc_net_barrier_force>=0.
        &&c.cmc_net_attraction_range>0.&&c.cmc_net_repulsion_range>0.
        &&c.cmc_net_reference_length>0.))
-    throw std::runtime_error("Net CMC potential requires blend in [0,1] and positive forces, ranges and reference length");
+    throw std::runtime_error("Net CMC potential requires blend in [0,1], nonnegative forces, and positive ranges and reference length");
   if(c.cmc_net_blend>0.){
     if(!c.surface_adhesion||!c.rough_contact_enabled||c.local_gap_fraction!=0.
         ||contactGap!=c.roughness_gap||c.cmc_cohesion_retention!=1.)

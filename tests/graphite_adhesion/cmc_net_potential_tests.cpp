@@ -127,6 +127,49 @@ void supportAndContinuation(){
             "full net branch is independent of replaced legacy amplitudes");
 }
 
+void barrierFreeShearAdhesion(){
+  auto full=parameters();full.cmcNetBarrierForce=0.;
+  full.cmcNetContactForce=pi*full.cmcNetReferenceLength*full.adhesionWork;
+  const double contact=full.roughnessGap;
+  const double end=contact+full.cmcNetAttractionRange;
+  for(double retention:{.01,.1,1.}){
+    auto p=full;p.cmcNetContactForce*=retention;
+    const auto centered=evaluate(atGap(contact),p);
+    near(outward(centered),-p.cmcNetContactForce,1.e-20,2.e-8,
+         "barrier-free contact force uses retained saturated-adsorption work");
+    for(int geometry:{0,1,2,3,4})for(double h:{1.8e-9,2.e-9,2.7e-9,3.001e-9,6.e-9,20.e-9,450.e-9}){
+      const auto b=atGap(h,geometry);const auto r=evaluate(b,p),base=evaluate(b,full);
+      require(r.ur==0.&&r.forceRepulsiveI==g::Vec3{}
+              &&r.torqueRepulsiveI==g::Vec3{}&&r.torqueRepulsiveJ==g::Vec3{},
+              "zero barrier removes every explicit repulsive contribution");
+      near(r.energy,retention*base.energy,1.e-31,2.e-13,"retention scales whole attractive energy");
+      nearVector(r.forceI,g::scale(base.forceI,retention),1.e-23,2.e-12,"retention scales complete force");
+      nearVector(r.torqueI,g::scale(base.torqueI,retention),1.e-29,2.e-12,"retention scales first torque");
+      nearVector(r.torqueJ,g::scale(base.torqueJ,retention),1.e-29,2.e-12,"retention scales second torque");
+      if(h>end)
+        require(r.energy==0.&&r.forceI==g::Vec3{}&&r.torqueI==g::Vec3{}&&r.torqueJ==g::Vec3{},
+                "zero barrier leaves no outer lobe or legacy RE2/free-CMC tail");
+    }
+    for(int geometry:{3,4})for(double h:{1.8e-9,2.2e-9,2.7e-9}){
+      const auto b=atGap(h,geometry);const auto r=evaluate(b,p);
+      for(int k=0;k<9;++k){
+        const double epsilon=k<3?1.e-13:1.e-7;
+        const double numerical=(evaluate(perturb(b,k,epsilon),p).energy
+            -evaluate(perturb(b,k,-epsilon),p).energy)/(2.*epsilon);
+        near(derivative(r,k),numerical,retention*(k<3?5.e-17:5.e-23),8.e-5,
+             "barrier-free scaled energy gradient "+std::to_string(k));
+      }
+    }
+  }
+  auto off=full;off.cmcNetContactForce=0.;
+  for(int geometry:{0,1,2,3,4})for(double h:{1.5e-9,2.e-9,2.5e-9,3.e-9,6.e-9,20.e-9,450.e-9,501.e-9}){
+    const auto r=evaluate(atGap(h,geometry),off);
+    require(r.energy==0.&&r.ua==0.&&r.ur==0.&&r.forceI==g::Vec3{}
+            &&r.torqueI==g::Vec3{}&&r.torqueJ==g::Vec3{},
+            "zero attraction and barrier stay exactly zero without resurrecting legacy forces");
+  }
+}
+
 void conservativeGeometry(){
   const auto p=parameters();
   for(int geometry:{3,4})for(double h:{1.8e-9,2.2e-9,2.7e-9,3.e-9,3.4e-9,6.e-9,8.5e-9,9.e-9}){
@@ -209,8 +252,10 @@ void validation(){
   const std::vector<std::function<void(g::PairParameters&)>> invalid={
     [](auto& p){p.cmcNetBlend=-.1;},[](auto& p){p.cmcNetBlend=1.1;},
     [](auto& p){p.cmcNetBlend=std::numeric_limits<double>::quiet_NaN();},
-    [](auto& p){p.cmcNetContactForce=-1.;},[](auto& p){p.cmcNetContactForce=0.;},
-    [](auto& p){p.cmcNetBarrierForce=0.;},[](auto& p){p.cmcNetBarrierForce=std::numeric_limits<double>::infinity();},
+    [](auto& p){p.cmcNetContactForce=-1.;},[](auto& p){p.cmcNetContactForce=std::numeric_limits<double>::quiet_NaN();},
+    [](auto& p){p.cmcNetContactForce=std::numeric_limits<double>::denorm_min();},
+    [](auto& p){p.cmcNetBarrierForce=-1.;},[](auto& p){p.cmcNetBarrierForce=std::numeric_limits<double>::infinity();},
+    [](auto& p){p.cmcNetBarrierForce=std::numeric_limits<double>::denorm_min();},
     [](auto& p){p.cmcNetAttractionRange=0.;},[](auto& p){p.cmcNetRepulsionRange=-1.;},
     [](auto& p){p.cmcNetReferenceLength=0.;},[](auto& p){p.cmcNetRepulsionRange=p.switchGap;},
     [](auto& p){p.surfaceAdhesion=false;},[](auto& p){p.localGapFraction=.1;},
@@ -219,11 +264,16 @@ void validation(){
   };
   for(const auto& change:invalid){auto p=base;change(p);rejects([&]{g::validatePairParameters(p);},"invalid net parameters accepted");}
   auto p=base;p.contactGap=p.roughnessGap;g::validatePairParameters(p);
+  for(bool zeroAttraction:{false,true})for(bool zeroBarrier:{false,true}){
+    p=base;if(zeroAttraction)p.cmcNetContactForce=0.;if(zeroBarrier)p.cmcNetBarrierForce=0.;
+    g::validatePairParameters(p);
+  }
 }
 }
 int main(){
   const std::vector<std::pair<std::string,std::function<void()>>> tests={
     {"aligned physical targets",alignedPhysicalTargets},{"support and continuation",supportAndContinuation},
+    {"barrier-free shear adhesion",barrierFreeShearAdhesion},
     {"conservative geometry",conservativeGeometry},{"blending",blending},
     {"smooth C2 joins",smoothJoins},{"validation",validation}
   };

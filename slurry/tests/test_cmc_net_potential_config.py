@@ -21,9 +21,47 @@ COORD_KEYS = RUNNER.CMC_COORDINATION_CHECKPOINT_KEYS[:-1]
 ROLLING_KEYS = RUNNER.CURRENT_ADHESION_ROLLING_CHECKPOINT_KEYS
 
 
-def case(name='gr_CMC.json'):
-    return json.loads((ROOT/'slurry/cases'/name).read_text())
+def historical_pure_case():
+    """Legacy checkpoint fixture, independent of today's rolling default."""
+    value = json.loads((ROOT/'slurry/cases/pure_gr.json').read_text())
+    value['rough_contact'].pop('current_adhesion_rolling', None)
+    return value
 
+
+def historical_four_case():
+    """Historical adsorption-plus-repulsion law, kept only as test data."""
+    value = historical_pure_case()
+    value['particles']['minimum_gap_m'] = 1e-8
+    value['cmc'] = {
+        'adsorbed_g_L': 2.8984214285714285,
+        'free_g_L': START,
+        'adsorbed_saturation_g_L': 2.8984214285714285,
+        'q_sat': .33,
+        'free_repulsion': {
+            'enabled': True, 'strength': 1., 'decay_length_m': 5e-9,
+            'degree_of_substitution': .7, 'repeat_unit_molar_mass_kg_mol': .218,
+            'osmotic_coefficient': .5, 'inner_work_per_g_L_J_m2': .000543218,
+            'inner_range_m': 6.7e-10, 'inner_exponent': 2.1}}
+    return value
+
+
+def case(name=None):
+    if name == 'pure_gr.json':
+        return json.loads((ROOT/'slurry/cases'/name).read_text())
+    if name is not None:
+        raise ValueError('Unknown fixture: '+name)
+    value = historical_four_case()
+    value['cmc']['free_g_L'] = FULL
+    value['cmc']['net_potential'] = {
+        'enabled': True, 'start_free_g_L': START, 'full_free_g_L': FULL,
+        'contact_force_N': 4.5e-8, 'barrier_force_N': 6e-11,
+        'attraction_range_m': 1e-9, 'repulsion_range_m': 6e-9,
+        'coordination': {'enabled': False, 'other_neighbors_start': 1.,
+                         'other_neighbors_end': 2., 'minimum_factor': .1}}
+    value['rough_contact']['current_adhesion_rolling'] = True
+    value['numerics'].update(particle_force_absolute_tolerance_N=1e-15,
+                             particle_torque_absolute_tolerance_N_m=1.65e-21)
+    return value
 
 def coordinated_case():
     value = case()
@@ -74,8 +112,8 @@ class NetCmcConfigTests(unittest.TestCase):
                                            .5*.7/.218*RUNNER.MOLAR_GAS_CONSTANT*298.15*free)
                     self.assertEqual(values['free_cmc_inner_repulsion_work'], .000543218*free)
 
-    def test_shipped_4g_and_pure_gr_remain_identical_with_inactive_net_option(self):
-        four = case('gr_CMC_4g_L.json')
+    def test_historical_four_and_pure_gr_remain_identical_with_inactive_net_option(self):
+        four = historical_four_case()
         self.assertNotIn('net_potential', four['cmc'])
         _, _, baseline = resolved(four)
         enabled = copy.deepcopy(four)
@@ -89,7 +127,7 @@ class NetCmcConfigTests(unittest.TestCase):
                        'net_potential': {'enabled': True, 'coordination': {'enabled': True}}}
         self.assertEqual(resolved(pure)[2], baseline)
 
-    def test_disabled_net_restores_full_legacy_config_and_shipped16_changes_only_named_settings(self):
+    def test_disabled_net_restores_full_legacy_config_and_historical16_changes_only_named_settings(self):
         source = case()
         source['cmc']['net_potential']['enabled'] = False
         cfg, _, disabled = resolved(source)
@@ -97,7 +135,7 @@ class NetCmcConfigTests(unittest.TestCase):
         self.assertEqual(resolved(source)[2], disabled)
         self.assertGreater(disabled['free_cmc_repulsion_pressure'], 0)
         self.assertGreater(disabled['free_cmc_inner_repulsion_work'], 0)
-        four = case('gr_CMC_4g_L.json')
+        four = historical_four_case()
         changed = {key for key, value in four['numerics'].items()
                    if not key.startswith('_') and cfg['numerics'][key] != value}
         self.assertEqual(changed, {'particle_force_absolute_tolerance_N',
@@ -232,7 +270,7 @@ class CmcCoordinationTests(unittest.TestCase):
                 cfg['cmc']['net_potential']['enabled'] = False
                 self.assertFalse(set(COORD_KEYS).intersection(resolved(cfg)[2]))
 
-    def test_shipped_force_overrides_preserve_scalar_defaults_and_ranges(self):
+    def test_historical_force_overrides_preserve_scalar_defaults_and_ranges(self):
         cfg, meta, values = resolved()
         self.assertEqual(values['cmc_net_contact_force'], 4.5e-8)
         self.assertEqual(values['cmc_net_barrier_force'], 6e-11)
@@ -337,8 +375,7 @@ class CurrentAdhesionRollingTests(unittest.TestCase):
         self.assertFalse(meta['current_adhesion_rolling']['explicit_active'])
         self.assertTrue(meta['current_adhesion_rolling']['coordination_active'])
         self.assertTrue(meta['current_adhesion_rolling']['active'])
-        for filename in ('pure_gr.json', 'gr_CMC_4g_L.json'):
-            source = case(filename)
+        for source in (historical_pure_case(), historical_four_case()):
             cfg, meta, values = resolved(source)
             self.assertFalse(meta['current_adhesion_rolling']['active'])
             self.assertNotIn('current_adhesion_rolling', values)
@@ -406,7 +443,7 @@ class CurrentAdhesionRollingTests(unittest.TestCase):
         old_saved['immutable_config']['current_adhesion_rolling'] = 0
         with self.assertRaises(ValueError):
             RUNNER.validate_restart(old_cfg, old_meta, old_saved, 1)
-        for source in (coordinated_case(), case('gr_CMC_4g_L.json'), case('pure_gr.json')):
+        for source in (coordinated_case(), historical_four_case(), historical_pure_case()):
             old_cfg, old_meta, old_values = resolved(source)
             old_saved = checkpoint(old_cfg, old_meta, old_values)
             self.assertFalse(set(ROLLING_KEYS).intersection(old_saved['immutable_config']))

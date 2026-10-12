@@ -16,7 +16,11 @@ SPEC.loader.exec_module(RUNNER)
 
 
 def case():
-    return json.loads((ROOT/'slurry/cases/pure_gr.json').read_text())
+    value = json.loads((ROOT/'slurry/cases/pure_gr.json').read_text())
+    # These fixtures exercise legacy adsorption/checkpoint compatibility,
+    # including its birth-frozen rolling mode rather than today's case default.
+    value['rough_contact']['current_adhesion_rolling'] = False
+    return value
 
 
 def resolved(inputs=None):
@@ -198,7 +202,7 @@ class CmcInputTests(unittest.TestCase):
             with self.subTest(offset=offset), self.assertRaisesRegex(ValueError, 'legacy cmc fields'):
                 resolved({'adsorbed_g_L': 3.8, 'contact_offset_at_saturation_m': offset})
 
-    def test_shipped_cmc_case_is_saturated_16g_and_outside_inner_barrier(self):
+    def test_shipped_cmc_case_is_saturated_16g_with_barrier_free_shear_adhesion(self):
         original = json.loads((ROOT/'slurry/cases/gr_CMC.json').read_text())
         cfg, meta = RUNNER.resolve(original)
         self.assertEqual(cfg['cmc']['adsorbed_g_L'], cfg['cmc']['adsorbed_saturation_g_L'])
@@ -207,7 +211,25 @@ class CmcInputTests(unittest.TestCase):
         self.assertFalse(meta['cmc']['adsorbed_clamped'])
         self.assertEqual(cfg['particles']['minimum_gap_m'], 1e-8)
         self.assertEqual(cfg['rough_contact']['roughness_gap_m'], 2e-9)
-        self.assertGreater(meta['cmc']['free_repulsion']['inner_repulsion_work_J_m2'], 0)
+        self.assertFalse(meta['cmc']['free_repulsion']['active'])
+        self.assertEqual(meta['cmc']['free_repulsion']['inner_repulsion_work_J_m2'], 0)
+        self.assertTrue(cfg['rough_contact']['current_adhesion_rolling'])
+        for shear in (1., 10., 100.):
+            source = copy.deepcopy(original)
+            source['flow']['shear_rate_s_inv'] = shear
+            rate_cfg, rate_meta = RUNNER.resolve(source)
+            values = RUNNER.solver_values(rate_cfg, Path('run'), Path('particles.csv'), 0)
+            state = rate_meta['cmc']['shear_adhesion']
+            self.assertTrue(state['active'])
+            self.assertEqual(state['p'], 1.)
+            self.assertEqual(state['retention'], shear/100.)
+            self.assertEqual(values['cmc_net_blend'], 1.)
+            self.assertEqual(values['cmc_net_barrier_force'], 0.)
+            self.assertNotIn('free_cmc_repulsion_pressure', values)
+            self.assertNotIn('free_cmc_inner_repulsion_work', values)
+            reference = (rate_cfg['particles']['diameter_m']/2)**2/(rate_cfg['particles']['thickness_m']/2)
+            expected = math.pi*reference*rate_meta['cmc']['effective_adhesion_work_J_m2']*shear/100.
+            self.assertTrue(math.isclose(values['cmc_net_contact_force'], expected, rel_tol=1e-14))
 
 
 class CmcRestartSelectionTests(unittest.TestCase):
